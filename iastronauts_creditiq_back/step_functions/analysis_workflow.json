@@ -1,0 +1,48 @@
+{
+  "Comment": "CreditIQ Financial Analysis Workflow",
+  "StartAt": "DocumentExtractor",
+  "States": {
+    "DocumentExtractor": {
+      "Type": "Task",
+      "Resource": "${ExtractorFunctionArn}",
+      "Next": "FinancialAnalyzer",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 3,
+          "MaxAttempts": 2,
+          "BackoffRate": 1.5
+        }
+      ]
+    },
+    "FinancialAnalyzer": {
+      "Type": "Task",
+      "Resource": "${AnalyzerFunctionArn}",
+      "Next": "RiskScorer",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 3,
+          "MaxAttempts": 2
+        }
+      ]
+    },
+    "RiskScorer": {
+      "Type": "Task",
+      "Resource": "${RiskScorerFunctionArn}",
+      "Next": "ReportGenerator",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 3,
+          "MaxAttempts": 2
+        }
+      ]
+    },
+    "ReportGenerator": {
+      "Type": "Task",
+      "Resource": "${ReportGeneratorFunctionArn}",
+      "End": true
+    }
+  }
+}

@@ -1,0 +1,112 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  CreditIQ Serverless Backend
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 256
+    Runtime: python3.12
+    Environment:
+      Variables:
+        ENV: dev
+        ANALYSES_TABLE: !Ref AnalysesTable
+        DOCUMENTS_BUCKET: !Ref DocumentsBucket
+
+Resources:
+  # Base de Datos
+  AnalysesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "creditiq-analyses-${AWS::StackName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: tenant_id
+          AttributeType: S
+        - AttributeName: analysis_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: tenant_id
+          KeyType: HASH
+        - AttributeName: analysis_id
+          KeyType: RANGE
+
+  # Almacenamiento S3
+  DocumentsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "creditiq-documents-${AWS::AccountId}-${AWS::Region}"
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ["*"]
+            AllowedMethods: [GET, PUT, POST, DELETE, HEAD]
+            AllowedOrigins: ["*"]
+            MaxAge: 3000
+
+  # Step Function Role
+  WorkflowRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaInvoke
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: "*"
+
+  # Step Function Workflow
+  AnalysisWorkflow:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      DefinitionUri: step_functions/analysis_workflow.json
+      DefinitionSubstitutions:
+        ExtractorFunctionArn: !GetAtt ExtractorFunction.Arn
+        AnalyzerFunctionArn: !GetAtt AnalyzerFunction.Arn
+        RiskScorerFunctionArn: !GetAtt RiskScorerFunction.Arn
+        ReportGeneratorFunctionArn: !GetAtt ReportGeneratorFunction.Arn
+      Role: !GetAtt WorkflowRole.Arn
+      Type: STANDARD
+
+  # Agentes (Lambdas)
+  ExtractorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/agents/document_extractor/
+      Handler: handler.lambda_handler
+      Timeout: 120
+
+  AnalyzerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/agents/financial_analyzer/
+      Handler: handler.lambda_handler
+      Timeout: 180
+
+  RiskScorerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/agents/risk_scorer/
+      Handler: handler.lambda_handler
+      Timeout: 120
+
+  ReportGeneratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/agents/report_generator/
+      Handler: handler.lambda_handler
+      Timeout: 300
+
+Outputs:
+  WorkflowArn:
+    Description: ARN of the Step Function Workflow
+    Value: !Ref AnalysisWorkflow
