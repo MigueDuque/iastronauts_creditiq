@@ -23,4 +23,3 @@ class FinancialHealth(str, Enum):
 class OutputFormat(str, Enum):
     MARKDOWN = "markdown"
     PDF = "pdf"
-    PPT = "ppt"

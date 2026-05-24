@@ -1,7 +1,8 @@
 from datetime import datetime
 from pydantic import BaseModel, Field
 
-from .base import RiskLevel
+from .base import RiskLevel, FinancialHealth
+from .analyzer import AccountAnalysis
 
 
 class NiifNoteDraft(BaseModel):
@@ -12,6 +13,7 @@ class NiifNoteDraft(BaseModel):
     affected_account_ids: list[str]
     requires_disclosure: bool
 
+
 class FinalReportOutput(BaseModel):
     """
     Output del Agente 4 (Report Generator). Entregable final del pipeline.
@@ -19,12 +21,14 @@ class FinalReportOutput(BaseModel):
     job_id: str
     tenant_id: str
     company_name: str
+    periods: list[str]                           # e.g. ["2024-12", "2023-12"]
     generated_at: datetime = Field(default_factory=datetime.utcnow)
-    validation_score: int
+    validation_score: int = Field(ge=0, le=100)
     overall_risk_score: RiskLevel
+    overall_financial_health: FinancialHealth
     executive_summary: str
     board_summary: str
+    analysis_results: list[AccountAnalysis]      # cuenta a cuenta — base para históricos
     niif_note_drafts: list[NiifNoteDraft]
     markdown_report_url: str
     pdf_report_url: str | None = None
-    ppt_report_url: str | None = None

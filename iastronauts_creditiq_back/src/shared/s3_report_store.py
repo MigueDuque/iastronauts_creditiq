@@ -57,22 +57,45 @@ def serialize_to_markdown(report: FinalReportOutput) -> str:
         else report.overall_risk_score
     )
 
+    periods_str = " — ".join(report.periods) if report.periods else "—"
+
+    accounts_rows = ""
+    for a in report.analysis_results:
+        mat = a.materiality.value if hasattr(a.materiality, "value") else a.materiality
+        rlv = a.risk_level.value if hasattr(a.risk_level, "value") else a.risk_level
+        sign = "+" if a.variation_pct >= 0 else ""
+        accounts_rows += (
+            f"| {a.account_name} "
+            f"| {a.current_value:,.0f} "
+            f"| {a.previous_value:,.0f} "
+            f"| {sign}{a.variation_pct:.1f}% "
+            f"| {mat} "
+            f"| {rlv} |\n"
+        )
+
     niif_sections = ""
     for note in report.niif_note_drafts:
         niif_sections += f"\n### {note.title} ({note.niif_reference})\n\n{note.content}\n"
         if note.affected_account_ids:
             niif_sections += (
-                f"*Cuentas afectadas: {', '.join(note.affected_account_ids)}*\n"
+                f"\n*Cuentas afectadas: {', '.join(note.affected_account_ids)}*\n"
             )
         if note.requires_disclosure:
             niif_sections += "*Requiere revelación obligatoria.*\n"
+
+    health = (
+        report.overall_financial_health.value
+        if hasattr(report.overall_financial_health, "value")
+        else report.overall_financial_health
+    )
 
     return (
         f"<!-- CREDITIQ_REPORT\n"
         f"{json.dumps(metadata, ensure_ascii=False, indent=2)}\n"
         f"-->\n\n"
         f"# {report.company_name} — Reporte Financiero CreditIQ\n\n"
-        f"*Generado: {report.generated_at.strftime('%Y-%m-%d %H:%M UTC')} "
+        f"*Período: {periods_str} "
+        f"| Generado: {report.generated_at.strftime('%Y-%m-%d %H:%M UTC')} "
         f"| Score de Validación: {report.validation_score}/100 "
         f"| Riesgo Global: {risk}*\n\n"
         f"---\n\n"
@@ -82,8 +105,18 @@ def serialize_to_markdown(report: FinalReportOutput) -> str:
         f"## Resumen para Junta Directiva\n\n"
         f"{report.board_summary or '_Por generar_'}\n\n"
         f"---\n\n"
+        f"## Análisis de Variaciones por Cuenta\n\n"
+        f"| Cuenta | Valor Actual | Valor Anterior | Variación % | Materialidad | Riesgo |\n"
+        f"|--------|-------------:|---------------:|------------:|:------------:|:------:|\n"
+        f"{accounts_rows or '_Sin cuentas analizadas_'}\n"
+        f"---\n\n"
         f"## Notas NIIF Requeridas\n"
-        f"{niif_sections or '_Sin notas requeridas_'}\n"
+        f"{niif_sections or '_Sin notas requeridas_'}\n\n"
+        f"---\n\n"
+        f"## Indicadores de Cumplimiento\n\n"
+        f"- **Score de validación:** {report.validation_score}/100\n"
+        f"- **Salud financiera:** {health}\n"
+        f"- **Riesgo global:** {risk}\n"
     )
 
 

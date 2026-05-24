@@ -39,6 +39,8 @@ sam local invoke AnalyzerFunction --event tests/events/sample_analysis.json
 
 Current packages: `anthropic>=0.49.0`, `boto3>=1.35.81`, `pydantic>=2.10.3`, `tenacity>=9.0.0`, `pandas>=2.2.3`, `openpyxl>=3.1.5`.
 
+`OutputFormat` has two values: `markdown` and `pdf`. PPT was removed — do not re-add it.
+
 ### Architecture
 
 The analysis pipeline is a **sequential Step Functions state machine** defined in `step_functions/analysis_workflow.json`. Each state calls a dedicated Lambda (agent) and passes its output as input to the next:
@@ -104,13 +106,20 @@ reports/{tenant_id}/{company_slug}/{YYYY}/{MM:02d}/report_{job_id}.md
 |---|---|
 | `save_report(report, bucket)` | Serializes and uploads a `FinalReportOutput`; returns the S3 key |
 | `fetch_historical_reports(tenant_id, company_slug, reference_date, bucket)` | Returns reports from the same calendar trimester + December of `reference_date.year - 1` |
-| `serialize_to_markdown(report)` | `FinalReportOutput` → `.md` string |
-| `deserialize_from_markdown(content)` | `.md` string → `FinalReportOutput` |
+| `serialize_to_markdown(report)` | `FinalReportOutput` → `.md` string (generates account table from `analysis_results`) |
+| `deserialize_from_markdown(content)` | `.md` string → `FinalReportOutput` (reads from the `<!-- CREDITIQ_REPORT ... -->` JSON block) |
 | `slugify(text)` | Company name → filesystem-safe slug |
+
+**`.md` file structure** — two layers in one file:
+
+1. `<!-- CREDITIQ_REPORT { ...full model_dump... } -->` — machine-readable; `deserialize_from_markdown` reads only this block. Must be a valid `FinalReportOutput.model_dump(mode="json")`.
+2. Human-readable markdown body: Resumen Ejecutivo → Resumen Junta Directiva → Análisis de Variaciones (table generated from `analysis_results`) → Riesgos → Notas NIIF → Indicadores de Cumplimiento.
+
+`test_files/reporte_final_eeff_diciembre_2024.md` is the canonical example of a correctly-structured report file.
 
 **Historical fetch logic:** given `reference_date`, lists only the S3 prefixes for the three months of that quarter one year back, plus `/12/` (December) if Q4 is not the current quarter. Malformed files are skipped silently so they never halt the pipeline.
 
-`ReportGenerator` calls `fetch_historical_reports` at startup. The resulting list is available for LLM prompts for trend context (narrative generation is still TODO).
+`ReportGenerator` calls `fetch_historical_reports` at startup. The resulting `list[FinalReportOutput]` gives the `FinancialAnalyzer` per-account historical values via `report.analysis_results` for `previous_value` calculation and trend context.
 
 ### `tenant_id` Propagation
 
@@ -151,6 +160,30 @@ All AWS resources are declared in `template.yaml` (AWS SAM / CloudFormation). Re
 **`states:StartExecution` targets the state machine ARN; `states:DescribeExecution` targets the execution ARN pattern** (`execution:...:*`). These are different resource types in IAM — do not consolidate them into one statement.
 
 **No DynamoDB.** All persistence is S3-based via `src/shared/s3_report_store.py`. There is no database in this stack.
+
+### Output Models — Key Fields
+
+**`FinalReportOutput`** (in `shared/models/report.py`) is the pipeline's final deliverable and the format used for all historical records in S3:
+
+```python
+class FinalReportOutput(BaseModel):
+    job_id: str
+    tenant_id: str
+    company_name: str
+    periods: list[str]                        # e.g. ["2024-12", "2023-12"]
+    generated_at: datetime
+    validation_score: int                     # 0–100
+    overall_risk_score: RiskLevel             # LOW | MEDIUM | HIGH
+    overall_financial_health: FinancialHealth # STABLE | DECLINING | GROWING | CRITICAL
+    executive_summary: str
+    board_summary: str
+    analysis_results: list[AccountAnalysis]   # per-account data — core of historical records
+    niif_note_drafts: list[NiifNoteDraft]
+    markdown_report_url: str                  # S3 key of the saved .md file
+    pdf_report_url: str | None = None
+```
+
+`analysis_results` is the key field for historical comparison: when `FinancialAnalyzer` loads prior reports via `fetch_historical_reports`, it reads each `AccountAnalysis.current_value` keyed by `account_id` to derive `previous_value` for the current period.
 
 ### Current Agent Implementation Status
 
