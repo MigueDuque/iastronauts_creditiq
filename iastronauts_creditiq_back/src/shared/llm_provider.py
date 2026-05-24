@@ -6,6 +6,17 @@ from typing import Dict, Any, Optional
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+_TENANT_BOUNDARY_TEMPLATE = (
+    "\n\n=== TENANT CONTEXT BOUNDARY ===\n"
+    "Tenant: {tenant_id} | Analysis: {job_id}\n"
+    "You are operating EXCLUSIVELY within this tenant's financial data context. "
+    "Never reference, infer, or include data from other analyses, tenants, or "
+    "any prior conversation context. "
+    "All outputs must be scoped strictly to the financial data provided in this request.\n"
+    "=== END BOUNDARY ===\n\n"
+)
+
+
 class LLMProvider:
     """
     Servicio de conexión a modelos de lenguaje.
@@ -15,7 +26,7 @@ class LLMProvider:
     """
     def __init__(self):
         self.provider = os.getenv("LLM_PROVIDER", "anthropic_api").lower()
-        self.model = os.getenv("LLM_MODEL", "claude-3-5-sonnet-20240620")
+        self.model = os.getenv("LLM_MODEL", "claude-sonnet-4-6")
         
         logger.info(f"Inicializando LLMProvider con proveedor: {self.provider}")
 
@@ -42,24 +53,61 @@ class LLMProvider:
             self.client = boto3.client(**client_kwargs)
             
             # Bedrock usa un formato de modelo distinto. Usamos 'us.' para Cross-Region Inference Profiles
-            self.model = os.getenv("BEDROCK_MODEL", "us.anthropic.claude-3-5-sonnet-20241022-v2:0")
+            self.model = os.getenv("BEDROCK_MODEL", "us.anthropic.claude-sonnet-4-5-20251001")
         else:
             raise ValueError(f"Proveedor LLM no soportado: {self.provider}")
 
-    def generate_text(self, system_prompt: str, user_prompt: str, temperature: float = 0.7) -> str:
+    def _inject_tenant_boundary(
+        self,
+        system_prompt: str,
+        tenant_id: Optional[str],
+        job_id: Optional[str],
+    ) -> str:
+        """
+        Appends a tenant isolation boundary to the system prompt.
+
+        WHY: LLMs can retain implicit context across calls within the same
+        process (warm Lambda container). Explicitly scoping the system prompt
+        to a tenant + job prevents cross-tenant context leakage and gives a
+        clear audit anchor in model outputs.
+        """
+        if not tenant_id:
+            return system_prompt
+        boundary = _TENANT_BOUNDARY_TEMPLATE.format(
+            tenant_id=tenant_id,
+            job_id=job_id or "N/A",
+        )
+        return system_prompt + boundary
+
+    def generate_text(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.7,
+        tenant_id: Optional[str] = None,
+        job_id: Optional[str] = None,
+    ) -> str:
         """
         Genera una respuesta en texto plano (Markdown, reportes, etc).
+
+        tenant_id / job_id: when provided, a tenant boundary is injected into
+        the system prompt to prevent cross-tenant AI context contamination.
         """
+        scoped_system = self._inject_tenant_boundary(system_prompt, tenant_id, job_id)
+        logger.info(
+            "llm_call | provider=%s model=%s tenant=%s job=%s",
+            self.provider, self.model, tenant_id or "anon", job_id or "N/A",
+        )
         if self.provider == "anthropic_api":
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=4096,
                 temperature=temperature,
-                system=system_prompt,
+                system=scoped_system,
                 messages=[{"role": "user", "content": user_prompt}]
             )
             return response.content[0].text
-            
+
         elif self.provider == "bedrock":
             # Usando la nueva API "Converse" de Bedrock (más moderna y estandarizada)
             response = self.client.converse(
@@ -70,7 +118,7 @@ class LLMProvider:
                         "content": [{"text": user_prompt}]
                     }
                 ],
-                system=[{"text": system_prompt}],
+                system=[{"text": scoped_system}],
                 inferenceConfig={
                     "maxTokens": 4096,
                     "temperature": temperature
@@ -78,16 +126,26 @@ class LLMProvider:
             )
             return response['output']['message']['content'][0]['text']
 
-    def generate_json(self, system_prompt: str, user_prompt: str, temperature: float = 0.0) -> Dict[str, Any]:
+    def generate_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.0,
+        tenant_id: Optional[str] = None,
+        job_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Genera una respuesta estructurada en formato JSON.
         Ideal para agentes extractores y analistas.
         """
         # Instrucción estricta para Claude de que retorne SOLO JSON
         json_system_prompt = f"{system_prompt}\n\nIMPORTANT: You must output ONLY valid JSON. Do not include markdown blocks like ```json. Just raw JSON."
-        
+
         # Temperatura baja para mayor consistencia en el JSON
-        text_response = self.generate_text(json_system_prompt, user_prompt, temperature)
+        text_response = self.generate_text(
+            json_system_prompt, user_prompt, temperature,
+            tenant_id=tenant_id, job_id=job_id,
+        )
         
         try:
             # Limpiar posible markdown si el modelo lo agrega por error

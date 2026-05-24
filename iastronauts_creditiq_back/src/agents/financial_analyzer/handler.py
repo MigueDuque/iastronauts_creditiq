@@ -11,6 +11,7 @@ def lambda_handler(event: dict, context) -> dict:
     # TODO: calcular variaciones, detectar materialidad, aplicar RAG NIIF, generar narrativa con LLM
     result = AnalyzerOutput(
         job_id=payload.job_id,
+        tenant_id=payload.tenant_id,
         business_context=payload.business_context,
         niif_standards=payload.niif_standards,
         report_language=payload.report_language,

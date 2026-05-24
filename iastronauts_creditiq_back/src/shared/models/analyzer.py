@@ -27,6 +27,7 @@ class AnalyzerOutput(BaseModel):
     """
     # Contexto global propagado desde ExtractorOutput
     job_id: str
+    tenant_id: str
     business_context: BusinessContext
     niif_standards: list[str]
     report_language: str

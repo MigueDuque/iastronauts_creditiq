@@ -1,3 +1,32 @@
+# ── Secrets y entornos locales ──────────────────────────
 .env
-.claude
+.env.local
+.env.*.local
+
+# ── Claude Code ─────────────────────────────────────────
+.claude/
+settings.local.json
+
+# ── Python / SAM ────────────────────────────────────────
 venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.aws-sam/
+samconfig.toml
+
+# ── Node / Frontend ─────────────────────────────────────
+node_modules/
+dist/
+
+# ── Sistema operativo ───────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDEs ────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo

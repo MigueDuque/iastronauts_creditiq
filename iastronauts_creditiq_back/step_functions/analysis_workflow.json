@@ -1,48 +1,155 @@
 {
-  "Comment": "CreditIQ Financial Analysis Workflow",
+  "Comment": "CreditIQ Financial Analysis Workflow — sequential agent pipeline",
   "StartAt": "DocumentExtractor",
   "States": {
     "DocumentExtractor": {
       "Type": "Task",
       "Resource": "${ExtractorFunctionArn}",
-      "Next": "FinancialAnalyzer",
+      "TimeoutSeconds": 330,
       "Retry": [
         {
-          "ErrorEquals": ["States.TaskFailed"],
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        },
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
           "IntervalSeconds": 3,
           "MaxAttempts": 2,
           "BackoffRate": 1.5
         }
-      ]
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "WorkflowFailed",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "FinancialAnalyzer"
     },
     "FinancialAnalyzer": {
       "Type": "Task",
       "Resource": "${AnalyzerFunctionArn}",
-      "Next": "RiskScorer",
+      "TimeoutSeconds": 330,
       "Retry": [
         {
-          "ErrorEquals": ["States.TaskFailed"],
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        },
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
           "IntervalSeconds": 3,
-          "MaxAttempts": 2
+          "MaxAttempts": 2,
+          "BackoffRate": 1.5
         }
-      ]
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "WorkflowFailed",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "RiskScorer"
     },
     "RiskScorer": {
       "Type": "Task",
       "Resource": "${RiskScorerFunctionArn}",
-      "Next": "ReportGenerator",
+      "TimeoutSeconds": 210,
       "Retry": [
         {
-          "ErrorEquals": ["States.TaskFailed"],
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        },
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
           "IntervalSeconds": 3,
-          "MaxAttempts": 2
+          "MaxAttempts": 2,
+          "BackoffRate": 1.5
         }
-      ]
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "WorkflowFailed",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "ReportGenerator"
     },
     "ReportGenerator": {
       "Type": "Task",
       "Resource": "${ReportGeneratorFunctionArn}",
+      "TimeoutSeconds": 330,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        },
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 3,
+          "MaxAttempts": 2,
+          "BackoffRate": 1.5
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "WorkflowFailed",
+          "ResultPath": "$.error"
+        }
+      ],
       "End": true
+    },
+    "WorkflowFailed": {
+      "Type": "Fail",
+      "Error": "WorkflowExecutionFailed",
+      "Cause": "A pipeline agent failed after all retries. Check execution history for details."
     }
   }
 }

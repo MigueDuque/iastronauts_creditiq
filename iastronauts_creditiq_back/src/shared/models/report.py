@@ -12,12 +12,12 @@ class NiifNoteDraft(BaseModel):
     affected_account_ids: list[str]
     requires_disclosure: bool
 
-
 class FinalReportOutput(BaseModel):
     """
     Output del Agente 4 (Report Generator). Entregable final del pipeline.
     """
     job_id: str
+    tenant_id: str
     company_name: str
     generated_at: datetime = Field(default_factory=datetime.utcnow)
     validation_score: int

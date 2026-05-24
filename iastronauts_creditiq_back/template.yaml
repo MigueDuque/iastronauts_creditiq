@@ -1,53 +1,216 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  CreditIQ Serverless Backend
+  CreditIQ — Multi-Agent Financial Analysis Platform
+  AI Innovation Challenge 2026 — BTG Pactual Colombia
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, uat, master]
+  LlmProvider:
+    Type: String
+    Default: anthropic_api
+    AllowedValues: [anthropic_api, bedrock]
+  AnthropicApiKey:
+    Type: String
+    Default: ""
+    NoEcho: true
 
 Globals:
   Function:
+    Runtime: python3.12
     Timeout: 30
     MemorySize: 256
-    Runtime: python3.12
+    Architectures: [arm64]
     Environment:
       Variables:
-        ENV: dev
-        ANALYSES_TABLE: !Ref AnalysesTable
-        DOCUMENTS_BUCKET: !Ref DocumentsBucket
+        STAGE: !Ref Stage
+        MAIN_BUCKET: !Ref MainBucket
+        WORKFLOW_ARN: !Ref AnalysisWorkflow
+        LLM_PROVIDER: !Ref LlmProvider
+        ANTHROPIC_API_KEY: !Ref AnthropicApiKey
+        AWS_ACCOUNT_ID: !Ref AWS::AccountId
+  Api:
+    Cors:
+      AllowMethods: "'GET,POST,OPTIONS'"
+      AllowHeaders: "'Content-Type,Authorization,X-Tenant-Id'"
+      AllowOrigin: "'*'"
 
+# ─────────────────────────────────────────────
+# STORAGE
+# ─────────────────────────────────────────────
 Resources:
-  # Base de Datos
-  AnalysesTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      TableName: !Sub "creditiq-analyses-${AWS::StackName}"
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: tenant_id
-          AttributeType: S
-        - AttributeName: analysis_id
-          AttributeType: S
-      KeySchema:
-        - AttributeName: tenant_id
-          KeyType: HASH
-        - AttributeName: analysis_id
-          KeyType: RANGE
 
-  # Almacenamiento S3
-  DocumentsBucket:
+  # Único bucket con 3 prefijos: uploads/, reports/, rag/
+  MainBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub "creditiq-documents-${AWS::AccountId}-${AWS::Region}"
+      BucketName: !Sub "iastronauts-creditiq-${AWS::Region}-${Stage}"
       CorsConfiguration:
         CorsRules:
           - AllowedHeaders: ["*"]
-            AllowedMethods: [GET, PUT, POST, DELETE, HEAD]
+            AllowedMethods: [GET, PUT, POST, HEAD]
             AllowedOrigins: ["*"]
             MaxAge: 3000
+      LifecycleConfiguration:
+        Rules:
+          # Archivos subidos por el usuario: expirar en 7 días
+          - Id: expire-uploads
+            Prefix: uploads/
+            Status: Enabled
+            ExpirationInDays: 7
 
-  # Step Function Role
+  # Bucket para el frontend (CloudFront OAC)
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "iastronauts-creditiq-frontend-${AWS::Region}-${Stage}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AllowCloudFrontOAC
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}"
+
+# ─────────────────────────────────────────────
+# CLOUDFRONT
+# ─────────────────────────────────────────────
+
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "creditiq-oac-${Stage}"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: FrontendS3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !Ref CloudFrontOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # CachingOptimized managed policy
+          AllowedMethods: [GET, HEAD, OPTIONS]
+        # SPA routing: redirigir 403/404 a index.html
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        PriceClass: PriceClass_100  # Solo US/Europa/Asia (más económico)
+
+# ─────────────────────────────────────────────
+# IAM ROLES
+# ─────────────────────────────────────────────
+
+  # Rol compartido para Lambdas de la API (Orchestrator, PresignedUrl, Status, Report)
+  ApiLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "creditiq-api-lambda-role-${Stage}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ApiLambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub "${MainBucket.Arn}/*"
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:creditiq-analysis-workflow-${Stage}"
+              - Effect: Allow
+                Action: states:DescribeExecution
+                Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:creditiq-analysis-workflow-${Stage}:*"
+
+  # Rol para Lambdas de agentes (Step Functions)
+  AgentLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "creditiq-agent-lambda-role-${Stage}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AgentLambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub "${MainBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - textract:StartDocumentAnalysis
+                  - textract:GetDocumentAnalysis
+                  - textract:AnalyzeDocument
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: "*"
+
+  WorkflowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/states/creditiq-analysis-workflow-${Stage}"
+      RetentionInDays: 30
+
+  # Rol para Step Functions
   WorkflowRole:
     Type: AWS::IAM::Role
     Properties:
+      RoleName: !Sub "creditiq-workflow-role-${Stage}"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -56,18 +219,113 @@ Resources:
               Service: states.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: LambdaInvoke
+        - PolicyName: StepFunctionsPolicy
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt ExtractorFunction.Arn
+                  - !GetAtt AnalyzerFunction.Arn
+                  - !GetAtt RiskScorerFunction.Arn
+                  - !GetAtt ReportGeneratorFunction.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutLogEvents
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
                 Resource: "*"
 
-  # Step Function Workflow
+# ─────────────────────────────────────────────
+# API GATEWAY + LAMBDAS DE ENTRADA
+# ─────────────────────────────────────────────
+
+  CreditIQApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Stage
+      Description: CreditIQ API — Financial Analysis Platform
+
+  # POST /upload-url  → genera presigned URL para subir archivo a S3
+  PresignedUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "creditiq-presigned-url-${Stage}"
+      CodeUri: src/
+      Handler: api.presigned_url.handler.lambda_handler
+      Role: !GetAtt ApiLambdaRole.Arn
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /upload-url
+            Method: POST
+
+  # POST /analyses  → Orchestrator: valida, crea job_id, dispara Step Functions
+  OrchestratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "creditiq-orchestrator-${Stage}"
+      CodeUri: src/
+      Handler: api.orchestrator.handler.lambda_handler
+      Role: !GetAtt ApiLambdaRole.Arn
+      Timeout: 60
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /analyses
+            Method: POST
+
+  # GET /analyses/{id}  → estado del análisis (polling)
+  AnalysisStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "creditiq-analysis-status-${Stage}"
+      CodeUri: src/
+      Handler: api.analysis_status.handler.lambda_handler
+      Role: !GetAtt ApiLambdaRole.Arn
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /analyses/{analysis_id}
+            Method: GET
+
+  # GET /analyses/{id}/report  → URL del reporte generado
+  ReportUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "creditiq-report-url-${Stage}"
+      CodeUri: src/
+      Handler: api.report_url.handler.lambda_handler
+      Role: !GetAtt ApiLambdaRole.Arn
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /analyses/{analysis_id}/report
+            Method: GET
+
+# ─────────────────────────────────────────────
+# STEP FUNCTIONS — AGENTES
+# ─────────────────────────────────────────────
+
   AnalysisWorkflow:
     Type: AWS::Serverless::StateMachine
     Properties:
+      Name: !Sub "creditiq-analysis-workflow-${Stage}"
       DefinitionUri: step_functions/analysis_workflow.json
       DefinitionSubstitutions:
         ExtractorFunctionArn: !GetAtt ExtractorFunction.Arn
@@ -76,37 +334,82 @@ Resources:
         ReportGeneratorFunctionArn: !GetAtt ReportGeneratorFunction.Arn
       Role: !GetAtt WorkflowRole.Arn
       Type: STANDARD
+      Logging:
+        Level: ERROR
+        IncludeExecutionData: false
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt WorkflowLogGroup.Arn
 
-  # Agentes (Lambdas)
   ExtractorFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: src/agents/document_extractor/
-      Handler: handler.lambda_handler
-      Timeout: 120
+      FunctionName: !Sub "creditiq-extractor-${Stage}"
+      CodeUri: src/
+      Handler: agents.document_extractor.handler.lambda_handler
+      Role: !GetAtt AgentLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
 
   AnalyzerFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: src/agents/financial_analyzer/
-      Handler: handler.lambda_handler
-      Timeout: 180
+      FunctionName: !Sub "creditiq-analyzer-${Stage}"
+      CodeUri: src/
+      Handler: agents.financial_analyzer.handler.lambda_handler
+      Role: !GetAtt AgentLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
 
   RiskScorerFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: src/agents/risk_scorer/
-      Handler: handler.lambda_handler
-      Timeout: 120
+      FunctionName: !Sub "creditiq-risk-scorer-${Stage}"
+      CodeUri: src/
+      Handler: agents.risk_scorer.handler.lambda_handler
+      Role: !GetAtt AgentLambdaRole.Arn
+      Timeout: 180
+      MemorySize: 256
 
   ReportGeneratorFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: src/agents/report_generator/
-      Handler: handler.lambda_handler
+      FunctionName: !Sub "creditiq-report-generator-${Stage}"
+      CodeUri: src/
+      Handler: agents.report_generator.handler.lambda_handler
+      Role: !GetAtt AgentLambdaRole.Arn
       Timeout: 300
+      MemorySize: 512
+
+# ─────────────────────────────────────────────
+# OUTPUTS
+# ─────────────────────────────────────────────
 
 Outputs:
+  ApiUrl:
+    Description: Base URL de la API
+    Value: !Sub "https://${CreditIQApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+
+  CloudFrontUrl:
+    Description: URL pública del frontend (dominio CloudFront)
+    Value: !Sub "https://${FrontendDistribution.DomainName}"
+
+  CloudFrontDistributionId:
+    Description: ID de la distribución CloudFront (necesario para invalidaciones en CI/CD)
+    Value: !Ref FrontendDistribution
+
+  FrontendBucketName:
+    Description: Bucket S3 donde se alojan los archivos del frontend
+    Value: !Ref FrontendBucket
+
+  MainBucketName:
+    Description: Bucket principal (uploads/, reports/, rag/)
+    Value: !Ref MainBucket
+
   WorkflowArn:
-    Description: ARN of the Step Function Workflow
+    Description: ARN del Step Functions workflow
     Value: !Ref AnalysisWorkflow
+
+  WorkflowLogGroup:
+    Description: CloudWatch Log Group para el workflow
+    Value: !Ref WorkflowLogGroup

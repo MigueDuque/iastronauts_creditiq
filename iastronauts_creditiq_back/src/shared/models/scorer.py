@@ -12,6 +12,7 @@ class ScorerOutput(BaseModel):
     """
     # Contexto global propagado desde AnalyzerOutput
     job_id: str
+    tenant_id: str
     business_context: BusinessContext
     niif_standards: list[str]
     report_language: str

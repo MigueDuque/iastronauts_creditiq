@@ -45,6 +45,8 @@ Cumplir y sobresalir en los criterios del AI Innovation Challenge:
 - [x] Wrapper para múltiples proveedores LLM
 - [x] Soporte Bedrock
 - [x] Soporte Anthropic API
+- [x] Step Functions workflow completo (retries, catch, timeouts, logs)
+- [x] Almacenamiento histórico en S3 (sin DynamoDB)
 
 ---
 
@@ -193,13 +195,10 @@ Estado:
 
 - [ ] API Gateway
 - [ ] AWS Lambda
-- [ ] Step Functions
-- [ ] S3
-- [ ] DynamoDB
-- [ ] Cognito
-- [ ] CloudFront
-- [ ] Textract
-- [ ] Bedrock
+- [x] Step Functions
+- [x] S3
+- [x] CloudFront
+- [x] IAM
 
 ---
 
@@ -207,20 +206,19 @@ Estado:
 
 ### Step Functions
 
-- [ ] Flujo principal
-- [ ] Manejo de errores
-- [ ] Retries automáticos
-- [ ] Timeout management
-- [ ] Dead Letter Queue
-- [ ] Logs centralizados
+- [x] Flujo principal
+- [x] Manejo de errores (Catch → WorkflowFailed Fail state)
+- [x] Retries automáticos (Lambda transient + TaskFailed, dos capas)
+- [x] Timeout management (TimeoutSeconds por Task = Lambda timeout + 30s)
+- [x] Logs centralizados (CloudWatch, nivel ERROR, 30 días retención)
 
 ---
 
 ## 2.3 Multi-tenancy
 
-- [ ] tenant_id
-- [ ] Separación lógica clientes
-- [ ] Seguridad contextual
+- [x] tenant_id propagado a través de todos los agentes
+- [x] Separación lógica en S3 por prefijo `reports/{tenant_id}/`
+- [ ] Seguridad contextual (autenticación / autorización por tenant)
 
 ---
 
