@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+html {
+  scrollbar-gutter: stable;
+}
+
 /* ── Design Tokens ──────────────────────────────────────────────────── */
 @theme {
   /* Surfaces */

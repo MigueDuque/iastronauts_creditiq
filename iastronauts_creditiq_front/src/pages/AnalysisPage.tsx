@@ -1,6 +1,4 @@
 import { useState } from 'react'
-import Header from '../components/Header'
-import Footer from '../components/Footer'
 
 const steps = [
   {
@@ -84,10 +82,7 @@ export default function AnalysisPage() {
   const [chatInput, setChatInput] = useState('')
 
   return (
-    <div className="bg-background text-on-surface font-body-md text-body-md antialiased min-h-screen flex flex-col selection:bg-primary-container selection:text-on-primary-container">
-      <Header />
-
-      <main className="flex-grow w-full px-margin-mobile md:px-margin-desktop py-6 max-w-container-max-width mx-auto flex flex-col md:flex-row gap-gutter">
+    <div className="p-margin-mobile md:p-margin-desktop flex flex-col md:flex-row gap-gutter">
 
         {/* ── Left: AI Reasoning Panel ──────────────────────────────── */}
         <aside className="w-full md:w-[320px] flex-shrink-0 flex flex-col gap-4">
@@ -291,9 +286,6 @@ export default function AnalysisPage() {
           </div>
 
         </div>
-      </main>
-
-      <Footer />
     </div>
   )
 }

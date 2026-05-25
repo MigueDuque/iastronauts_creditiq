@@ -1,6 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
 Description: >
-  CreditIQ — Frontend Infrastructure (S3 + CloudFront)
+  CreditIQ — Frontend Infrastructure (S3 + CloudFront + Upload API)
   Standalone stack, deployed independently of the backend SAM stack.
 
 Parameters:
@@ -8,6 +9,16 @@ Parameters:
     Type: String
     Default: dev
     AllowedValues: [dev, uat, master]
+  MainBucketName:
+    Type: String
+    Default: iastronauts-creditiq-us-east-1-dev
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 128
+    Architectures: [arm64]
 
 Resources:
 
@@ -69,7 +80,6 @@ Resources:
           CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # CachingOptimized
           AllowedMethods: [GET, HEAD, OPTIONS]
           Compress: true
-        # SPA routing: serve index.html for any 403/404 (React Router handles the rest)
         CustomErrorResponses:
           - ErrorCode: 403
             ResponseCode: 200
@@ -79,7 +89,56 @@ Resources:
             ResponseCode: 200
             ResponsePagePath: /index.html
             ErrorCachingMinTTL: 0
-        PriceClass: PriceClass_100  # US + Europe + Asia (most economical)
+        PriceClass: PriceClass_100
+
+  # ── Upload Presigned URL API ──────────────────────────────────────────
+  UploadApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Stage
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowHeaders:
+          - Content-Type
+        AllowMethods:
+          - POST
+          - OPTIONS
+
+  UploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "creditiq-upload-url-${Stage}"
+      Handler: index.lambda_handler
+      Environment:
+        Variables:
+          MAIN_BUCKET: !Ref MainBucketName
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref MainBucketName
+      Events:
+        PostUploadUrl:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref UploadApi
+            Path: /upload-url
+            Method: POST
+      InlineCode: |
+        import json, boto3, os
+        s3 = boto3.client('s3')
+        BUCKET = os.environ['MAIN_BUCKET']
+        def lambda_handler(event, context):
+          headers = {'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'POST,OPTIONS'}
+          try:
+            body = json.loads(event.get('body') or '{}')
+            folder = body.get('folder_name', 'default').strip().strip('/')
+            file_name = body.get('file_name', 'document')
+            content_type = body.get('content_type', 'application/octet-stream')
+            key = f"uploads/{folder}/{file_name}"
+            url = s3.generate_presigned_url('put_object', Params={'Bucket': BUCKET, 'Key': key, 'ContentType': content_type}, ExpiresIn=3600)
+            return {'statusCode': 200, 'headers': headers, 'body': json.dumps({'url': url, 's3_key': key})}
+          except Exception as e:
+            return {'statusCode': 500, 'headers': headers, 'body': json.dumps({'error': str(e)})}
 
 Outputs:
   CloudFrontUrl:
@@ -99,3 +158,9 @@ Outputs:
     Value: !Ref FrontendBucket
     Export:
       Name: !Sub "creditiq-frontend-bucket-${Stage}"
+
+  UploadApiUrl:
+    Description: URL of the presigned upload API
+    Value: !Sub "https://${UploadApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
+    Export:
+      Name: !Sub "creditiq-upload-api-url-${Stage}"
