@@ -121,6 +121,30 @@ reports/{tenant_id}/{company_slug}/{YYYY}/{MM:02d}/report_{job_id}.md
 
 `ReportGenerator` calls `fetch_historical_reports` at startup. The resulting `list[FinalReportOutput]` gives the `FinancialAnalyzer` per-account historical values via `report.analysis_results` for `previous_value` calculation and trend context.
 
+### S3 Bucket Structure (`MAIN_BUCKET`)
+
+The bucket `iastronauts-creditiq-us-east-1-dev` has three top-level prefixes:
+
+```
+iastronauts-creditiq-us-east-1-dev/
+├── instructions/
+│   └── template_reporte_final_eeff.md     ← RAG input for ReportGenerator
+├── uploads/
+│   └── junio-2025/
+│       ├── EEFF_BTGPactual_COMPLETO.xlsx  (19.6 KB, subido 2026-05-24)
+│       └── Rendición Cuentas Acciones Colombia Junio 2025.pdf  (748.0 KB, subido 2026-05-24)
+└── reports/
+    └── {tenant_id}/{company_slug}/{YYYY}/{MM}/report_{job_id}.md
+```
+
+**`instructions/`** — archivos de instrucciones estáticos para los agentes. `template_reporte_final_eeff.md` es el template oficial del output: documenta campo a campo la estructura JSON del bloque `<!-- CREDITIQ_REPORT -->` y el esquema de las 6 secciones Markdown del reporte. El `ReportGenerator` (y cualquier agente que genere el reporte final) debe leer este archivo como parte de su contexto RAG antes de llamar al LLM, para que el modelo sepa exactamente qué estructura producir.
+
+**`uploads/`** — documentos financieros subidos por los clientes, organizados por carpeta de período (ej. `junio-2025/`). El `DocumentExtractor` lee desde este prefijo.
+
+**`reports/`** — reportes `.md` generados por el pipeline, escritos por `s3_report_store.save_report()`. Ver sección *Historical Report Storage* para la lógica de fetch.
+
+---
+
 ### `tenant_id` Propagation
 
 `tenant_id` must flow through every agent output so the report is stored under the correct S3 prefix. The full chain:

@@ -4,6 +4,7 @@ from .extractor import ExtractedAccount, ExtractorOutput
 from .analyzer import AccountAnalysis, AnalyzerOutput
 from .scorer import ScorerOutput
 from .report import NiifNoteDraft, FinalReportOutput
+from .revisor import ValidationFlag, ValidationSeverity, ValidationCategory, RevisorOutput
 
 __all__ = [
     "MaterialityLevel", "RiskLevel", "FinancialHealth", "OutputFormat",
@@ -12,4 +13,5 @@ __all__ = [
     "AccountAnalysis", "AnalyzerOutput",
     "ScorerOutput",
     "NiifNoteDraft", "FinalReportOutput",
+    "ValidationFlag", "ValidationSeverity", "ValidationCategory", "RevisorOutput",
 ]
