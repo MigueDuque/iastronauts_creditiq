@@ -86,22 +86,25 @@ class LLMProvider:
         temperature: float = 0.7,
         tenant_id: Optional[str] = None,
         job_id: Optional[str] = None,
+        max_tokens: int = 4096,
     ) -> str:
         """
         Genera una respuesta en texto plano (Markdown, reportes, etc).
 
         tenant_id / job_id: when provided, a tenant boundary is injected into
         the system prompt to prevent cross-tenant AI context contamination.
+        max_tokens: override output token limit (default 4096; use up to 16384
+        for extraction calls that return large JSON arrays).
         """
         scoped_system = self._inject_tenant_boundary(system_prompt, tenant_id, job_id)
         logger.info(
-            "llm_call | provider=%s model=%s tenant=%s job=%s",
-            self.provider, self.model, tenant_id or "anon", job_id or "N/A",
+            "llm_call | provider=%s model=%s tenant=%s job=%s max_tokens=%d",
+            self.provider, self.model, tenant_id or "anon", job_id or "N/A", max_tokens,
         )
         if self.provider == "anthropic_api":
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=4096,
+                max_tokens=max_tokens,
                 temperature=temperature,
                 system=scoped_system,
                 messages=[{"role": "user", "content": user_prompt}]
@@ -120,7 +123,7 @@ class LLMProvider:
                 ],
                 system=[{"text": scoped_system}],
                 inferenceConfig={
-                    "maxTokens": 4096,
+                    "maxTokens": max_tokens,
                     "temperature": temperature
                 }
             )
@@ -133,6 +136,7 @@ class LLMProvider:
         temperature: float = 0.0,
         tenant_id: Optional[str] = None,
         job_id: Optional[str] = None,
+        max_tokens: int = 4096,
     ) -> Dict[str, Any]:
         """
         Genera una respuesta estructurada en formato JSON.
@@ -144,7 +148,7 @@ class LLMProvider:
         # Temperatura baja para mayor consistencia en el JSON
         text_response = self.generate_text(
             json_system_prompt, user_prompt, temperature,
-            tenant_id=tenant_id, job_id=job_id,
+            tenant_id=tenant_id, job_id=job_id, max_tokens=max_tokens,
         )
         
         try:
