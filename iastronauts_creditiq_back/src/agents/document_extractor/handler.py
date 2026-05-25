@@ -108,7 +108,6 @@ def extract_pdf(s3_key: str, textract_client, lambda_context) -> str:
     logger.info("textract_done  | job=%s blocks=%d", job_id, len(blocks))
     return _blocks_to_table_text(blocks)
 
-
 # ---------------------------------------------------------------------------
 # Excel / CSV → pandas
 # ---------------------------------------------------------------------------

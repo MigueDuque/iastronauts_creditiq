@@ -8,7 +8,7 @@
 =================================================================
   PASO 1 -- Excel desde S3 --> pandas --> LLM
 =================================================================
-[19:57:10] Descargando s3://iastronauts-creditiq-us-east-1-dev/uploads/junio-2025/EEFF_BTGPactual_COMPLETO.xlsx
+[20:08:46] Descargando s3://iastronauts-creditiq-us-east-1-dev/uploads/junio-2025/EEFF_BTGPactual_COMPLETO.xlsx
   [OK]  Descargado: 20,049 bytes
   [OK]  Texto extraido: 8,901 chars en 18 hojas
 
@@ -22,8 +22,8 @@
                           Total activos   39813377       52704217
                       Cuentas por pagar      19447           9841
             
-[19:57:10] Llamando Claude (normalizacion NIIF)...
-  [OK]  Cuentas extraidas: 61
+[20:08:47] Llamando Claude (normalizacion NIIF)...
+  [OK]  Cuentas extraidas: 60
   [OK]  Periodos: ['2025-06', '2024-12']
   [OK]  statement_type: mixed
 
@@ -60,43 +60,42 @@
   act-029  other        Flujo de efectivo de operaciones                   24,784.8      -1,978.0
   act-030  other        Flujo de efectivo de financiaci�n                 -24,659.9       2,004.9
   act-031  other        Aumento neto de efectivo                              124.9          26.9
-  act-032  other        Efectivo inicial                                      137.2         144.4
-  act-033  assets       Acciones locales (Nivel 1 - Cotizadas)             38,551.2      52,287.2
-  act-034  assets       Fondos de inversi�n (Nivel 2 - No cotizados)          970.1         272.4
-  act-035  assets       Total instrumentos de patrimonio                   39,521.3      52,559.6
-  act-036  assets       Efectivo en Banco de Occidente                        192.3         129.8
-  act-037  assets       Efectivo en Banco BTG Pactual                          56.5           2.7
-  act-038  assets       Efectivo en Bancolombia                                13.3           4.6
-  act-039  assets       Inversi�n en Grupo Cibest                          15,617.9           0.0
-  act-040  assets       Inversi�n en ISA                                    5,066.1       3,160.4
-  act-041  assets       Inversi�n en Ecopetrol                              3,668.6       4,433.2
-  act-042  assets       Inversi�n en Grupo Energ�a Bogot�                   3,448.9       2,831.2
-  act-043  assets       Inversi�n en Grupo Sura                             3,389.4       5,720.9
-  act-044  assets       Inversi�n en Grupo Argos                            2,771.5       4,339.7
-  act-045  assets       Inversi�n en Cementos Argos                         2,417.1       9,172.6
-  act-046  assets       Inversi�n en BAC Holding                            1,557.7       2,647.4
-  act-047  assets       Inversi�n en BTG Fondo Liquidez                       970.1         272.4
-  act-048  assets       Inversi�n en Almacenes �xito                          614.1           0.0
-  act-049  assets       Inversi�n en Bancolombia                                0.0      19,981.9
-  act-050  liabilities  Acreedores                                             11.9           0.0
-  act-051  liabilities  Comisi�n de administraci�n por pagar                    7.5           9.5
-  act-052  liabilities  Retenci�n por pagar                                     0.0           0.3
-  act-053  equity       Patrimonio - Clase P                               19,582.2      29,668.6
-  act-054  equity       Patrimonio - Clase A                                7,829.1       4,859.8
-  act-055  equity       Patrimonio - Clase I4                               5,513.1           0.0
-  act-056  equity       Patrimonio - Clase B2                               5,103.4       1,768.4
-  act-057  equity       Patrimonio - Clase F3                               1,766.2      11,167.5
-  act-058  equity       Patrimonio - Clase I3                                   0.0       5,230.1
-  act-059  revenue      Ingresos de mercado monetario                           5.1           0.0
-  act-060  expense      Gravamen a movimientos financieros                     -1.3          -0.6
-  act-061  expense      Gastos bancarios                                       -0.3          -0.3
+  act-032  assets       Acciones locales (Nivel 1 - Cotizadas)             38,551.2      52,287.2
+  act-033  assets       Fondos de inversi�n (Nivel 2 - No cotizados)          970.1         272.4
+  act-034  assets       Total instrumentos de patrimonio                   39,521.3      52,559.6
+  act-035  assets       Efectivo en Banco de Occidente                        192.3         129.8
+  act-036  assets       Efectivo en Banco BTG Pactual                          56.5           2.7
+  act-037  assets       Efectivo en Bancolombia                                13.3           4.6
+  act-038  assets       Inversi�n en Grupo Cibest                          15,617.9           0.0
+  act-039  assets       Inversi�n en ISA                                    5,066.1       3,160.4
+  act-040  assets       Inversi�n en Ecopetrol                              3,668.6       4,433.2
+  act-041  assets       Inversi�n en Grupo Energ�a Bogot�                   3,448.9       2,831.2
+  act-042  assets       Inversi�n en Grupo Sura                             3,389.4       5,720.9
+  act-043  assets       Inversi�n en Grupo Argos                            2,771.5       4,339.7
+  act-044  assets       Inversi�n en Cementos Argos                         2,417.1       9,172.6
+  act-045  assets       Inversi�n en BAC Holding                            1,557.7       2,647.4
+  act-046  assets       Inversi�n en BTG Fondo Liquidez                       970.1         272.4
+  act-047  assets       Inversi�n en Almacenes �xito                          614.1           0.0
+  act-048  assets       Inversi�n en Bancolombia                                0.0      19,981.9
+  act-049  liabilities  Acreedores                                             11.9           0.0
+  act-050  liabilities  Comisi�n de administraci�n por pagar                    7.5           9.5
+  act-051  liabilities  Retenci�n por pagar                                     0.0           0.3
+  act-052  equity       Patrimonio - Clase P                               19,582.2      29,668.6
+  act-053  equity       Patrimonio - Clase A                                7,829.1       4,859.8
+  act-054  equity       Patrimonio - Clase I4                               5,513.1           0.0
+  act-055  equity       Patrimonio - Clase B2                               5,103.4       1,768.4
+  act-056  equity       Patrimonio - Clase F3                               1,766.2      11,167.5
+  act-057  revenue      Ingresos del mercado monetario                          5.1           0.0
+  act-058  expense      Gravamen a movimientos financieros                     -1.3          -0.6
+  act-059  expense      Gastos bancarios                                       -0.3          -0.3
+  act-060  expense      Otros gastos operacionales                            -21.3          -0.1
 
 =================================================================
   PASO 2 -- PDF desde S3 --> Textract async --> LLM
 =================================================================
-[19:57:40] Iniciando Textract para s3://iastronauts-creditiq-us-east-1-dev/uploads/junio-2025/Rendici�n Cuentas Acciones Colombia Junio 2025.pdf
-  [OK]  Textract job iniciado: 073b51cb91553a5ece0da5d4ba7bbddb57f6ab0e73abcc8a5e614ea357566ccb
-[19:57:41] Esperando resultado de Textract (polling cada 5s)...
+[20:09:16] Iniciando Textract para s3://iastronauts-creditiq-us-east-1-dev/uploads/junio-2025/Rendici�n Cuentas Acciones Colombia Junio 2025.pdf
+  [OK]  Textract job iniciado: edcac33ce5005f8c5dc35cc269cd6464ce54ef45cc61a868330e12224a46e8a9
+[20:09:17] Esperando resultado de Textract (polling cada 5s)...
   [OK]  Textract completo en 12.5s � 4,763 bloques
   [OK]  Tablas detectadas: 22
   [OK]  Texto de tablas: 8,263 chars
@@ -114,8 +113,8 @@
   	1 Mes	6 Meses	A�o Corrido	�ltimo A�o	2 A�os	3 A�os	1 Mes	6 Meses	A�o Corrido	�ltimo A�o	2 A�os	3 A�os
   CLASE A	58.351%	64.915%	64.915%	35.795%	38.880%	22.397%	12.847%	18.416%	18.416%	15.462%	15.158%	17.378%
   CLASE B2	58.978%	65.567%	65.567%	0.000%	0.000
-[19:57:54] Llamando Claude (normalizacion NIIF del PDF)...
-  [OK]  Cuentas extraidas del PDF: 66
+[20:09:30] Llamando Claude (normalizacion NIIF del PDF)...
+  [OK]  Cuentas extraidas del PDF: 64
   [OK]  Periodos: ['2025-06', '2024-06']
 
   act       cat          Nombre NIIF                                     Actual (MM)
@@ -134,32 +133,64 @@
   act-012  revenue      Ganancia en venta de inversiones                      608.0
   act-013  revenue      Ganancia en operaciones con futuros                 1,863.8
   act-014  revenue      Ingresos por operaciones repo                           5.1
-  act-015  revenue      Total ingresos operacionales                       46,234.9
-  act-016  expense      Comisiones de administraci�n                          279.1
-  act-017  expense      P�rdida en venta de inversiones                       495.9
-  act-018  expense      P�rdida en operaciones con futuros                  1,863.8
-  act-019  expense      P�rdida por valoraci�n de inversiones              31,776.4
-  act-020  expense      Otros gastos operacionales                             60.3
-  ... (46 cuentas mas)
+  act-015  revenue      Otros ingresos operacionales                            0.0
+  act-016  revenue      Total ingresos operacionales                       46,234.9
+  act-017  expense      Comisiones de administraci�n                          279.1
+  act-018  expense      P�rdida en venta de inversiones                       495.9
+  act-019  expense      P�rdida en operaciones con futuros                  1,863.8
+  act-020  expense      P�rdida por valoraci�n de inversiones              31,776.4
+  ... (44 cuentas mas)
 
 =================================================================
   PASO 3 -- Ensamblado Pydantic (ExtractedAccount)
 =================================================================
-  [OK]  Total cuentas ensambladas: 127
+  [OK]  Total cuentas ensambladas: 124
   [OK]  account_id con patron act-NNN
   [OK]  confidence_score en rango [0,1]
   [OK]  Sin warnings de parseo
 
   Distribucion por categoria:
-    assets           25 cuentas
-    equity           16 cuentas
-    expense          19 cuentas
+    assets           34 cuentas
+    equity           15 cuentas
+    expense          20 cuentas
     liabilities       7 cuentas
-    other            45 cuentas
-    revenue          15 cuentas
+    other            32 cuentas
+    revenue          16 cuentas
 
-  Confianza promedio: 0.992
+  Confianza promedio: 0.985
 
 =================================================================
-  [OK] Extraccion S3 completa -- Agente 1 validado
+  PASO 4 -- Contrato lambda_handler -> Agente 2 (ExtractorOutput)
+=================================================================
+[20:10:03] Invocando lambda_handler (extraccion completa con S3 + Textract + LLM)...
+  [OK]  lambda_handler retorno sin excepciones
+  [OK]  Output es un dict con 13 campos
+  [OK]  ExtractorOutput.model_validate() paso -- contrato con Agente 2 VALIDO
+  [OK]  job_id presente: 93cddc7a-19b7-4142-be67-647445784f43
+  [OK]  tenant_id presente: btg-demo
+  [OK]  company_name: Fondo de Inversion Colectiva Abierto BTG Pactual Acciones Colombia
+  [OK]  periods: ['2025-06', '2024-12']
+  [OK]  currency: COP
+  [OK]  statement_type: mixed
+  [OK]  extraction_confidence: 1.000
+  [OK]  cuentas en accounts: 122
+  [OK]  Sin warnings de extraccion
+
+  Output completo que recibira el Agente 2 (ExtractorOutput):
+  Campo                          Valor
+  ------------------------------ ------------------------------
+  job_id                         93cddc7a-19b7-4142-be67-647445784f43
+  tenant_id                      btg-demo
+  company_name                   Fondo de Inversion Colectiva Abierto BTG
+  statement_type                 mixed
+  currency                       COP
+  periods                        ['2025-06', '2024-12']
+  accounts (count)               122
+  extraction_confidence          1.000
+  niif_standards                 ['NIIF 7', 'NIIF 9', 'NIIF 13']
+  output_formats                 ['markdown']
+  warnings (count)               0
+
+=================================================================
+  [OK] Agente 1 validado -- contrato con Agente 2 verificado
 =================================================================

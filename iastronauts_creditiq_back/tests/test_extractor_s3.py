@@ -206,6 +206,105 @@ def run_assembly(excel_result: dict, pdf_result: dict) -> None:
     print(f"\n  Confianza promedio: {conf_avg:.3f}")
 
 
+# ── paso 4: contrato lambda_handler → Agente 2 ───────────────────────────────
+
+def run_contract(s3_client, textract_client) -> None:
+    """
+    Llama a lambda_handler() completo con un OrchestratorOutput real y valida que:
+    1. El output es un dict JSON-serializable
+    2. ExtractorOutput.model_validate() lo acepta sin errores (contrato con Agente 2)
+    3. Todos los campos obligatorios estan presentes y con tipos correctos
+    """
+    section("PASO 4 -- Contrato lambda_handler -> Agente 2 (ExtractorOutput)")
+
+    from agents.document_extractor.handler import lambda_handler
+    from shared.models import ExtractorOutput, OrchestratorOutput
+    from shared.models.orchestrator import BusinessContext, FileToProcess
+    from shared.models.base import OutputFormat
+    import datetime
+
+    # Construir el mismo OrchestratorOutput que el orquestador construiria en produccion
+    orchestrator_event = OrchestratorOutput(
+        tenant_id="btg-demo",
+        business_context=BusinessContext(
+            company_name="Fondo de Inversion Colectiva Abierto BTG Pactual Acciones Colombia",
+            industry="Fondo de inversion colectiva / Renta variable colombiana",
+            reporting_period="2025-06",
+            raw_context="Estados financieros junio 2025 vs diciembre 2024",
+        ),
+        files_to_process=[
+            FileToProcess(
+                file_name="EEFF_BTGPactual_COMPLETO.xlsx",
+                s3_location=EXCEL_KEY,
+                file_type="excel",
+            ),
+            FileToProcess(
+                file_name="Rendicion Cuentas Acciones Colombia Junio 2025.pdf",
+                s3_location=PDF_KEY,
+                file_type="pdf",
+            ),
+        ],
+        niif_standards=["NIIF 7", "NIIF 9", "NIIF 13"],
+        report_language="es",
+        output_formats=[OutputFormat.MARKDOWN],
+    ).model_dump(mode="json")
+
+    log("Invocando lambda_handler (extraccion completa con S3 + Textract + LLM)...")
+
+    # Contexto mock: sin limite de tiempo (lambda_context=None en el poll)
+    class MockContext:
+        def get_remaining_time_in_millis(self):
+            return 290_000
+
+    raw_output = lambda_handler(orchestrator_event, MockContext())
+
+    ok("lambda_handler retorno sin excepciones")
+    ok(f"Output es un dict con {len(raw_output)} campos")
+
+    # Validacion del contrato: Agente 2 debe poder consumir este output
+    try:
+        extractor_output = ExtractorOutput.model_validate(raw_output)
+        ok("ExtractorOutput.model_validate() paso -- contrato con Agente 2 VALIDO")
+    except Exception as e:
+        fail(f"ExtractorOutput.model_validate() fallo -- Agente 2 NO podria arrancar: {e}")
+
+    # Verificar campos criticos del contrato
+    ok(f"job_id presente: {extractor_output.job_id}")
+    ok(f"tenant_id presente: {extractor_output.tenant_id}")
+    ok(f"company_name: {extractor_output.company_name}")
+    ok(f"periods: {extractor_output.periods}")
+    ok(f"currency: {extractor_output.currency}")
+    ok(f"statement_type: {extractor_output.statement_type}")
+    ok(f"extraction_confidence: {extractor_output.extraction_confidence:.3f}")
+    ok(f"cuentas en accounts: {len(extractor_output.accounts)}")
+
+    if extractor_output.extraction_warnings:
+        print(f"\n  [!] Warnings del pipeline ({len(extractor_output.extraction_warnings)}):")
+        for w in extractor_output.extraction_warnings:
+            print(f"      {w}")
+    else:
+        ok("Sin warnings de extraccion")
+
+    print(f"\n  Output completo que recibira el Agente 2 (ExtractorOutput):")
+    print(f"  {'Campo':<30} {'Valor'}")
+    print(f"  {'-'*30} {'-'*30}")
+    fields = [
+        ("job_id",               extractor_output.job_id),
+        ("tenant_id",            extractor_output.tenant_id),
+        ("company_name",         extractor_output.company_name[:40]),
+        ("statement_type",       extractor_output.statement_type),
+        ("currency",             extractor_output.currency),
+        ("periods",              str(extractor_output.periods)),
+        ("accounts (count)",     str(len(extractor_output.accounts))),
+        ("extraction_confidence",f"{extractor_output.extraction_confidence:.3f}"),
+        ("niif_standards",       str(extractor_output.niif_standards)),
+        ("output_formats",       str([f.value for f in extractor_output.output_formats])),
+        ("warnings (count)",     str(len(extractor_output.extraction_warnings))),
+    ]
+    for name, value in fields:
+        print(f"  {name:<30} {value}")
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -222,9 +321,10 @@ if __name__ == "__main__":
         _, excel_result = run_excel(s3_client)
         _, pdf_result   = run_pdf(textract_client)
         run_assembly(excel_result, pdf_result)
+        run_contract(s3_client, textract_client)
 
         print(f"\n{'=' * 65}")
-        print("  [OK] Extraccion S3 completa -- Agente 1 validado")
+        print("  [OK] Agente 1 validado -- contrato con Agente 2 verificado")
         print("=" * 65 + "\n")
 
     except AssertionError as e:

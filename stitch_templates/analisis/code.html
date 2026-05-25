@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>AI Analysis - CreditIQ</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;600;700&amp;family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "inverse-primary": "#024cec",
+                        "risk-low": "#3FB950",
+                        "background": "#0A0C10",
+                        "surface-dim": "#11131c",
+                        "on-secondary-fixed-variant": "#004e60",
+                        "primary": "#b7c4ff",
+                        "on-primary": "#002682",
+                        "surface-container-highest": "#33343e",
+                        "on-secondary": "#003543",
+                        "surface-container-low": "#191b24",
+                        "inverse-on-surface": "#2e303a",
+                        "inverse-surface": "#e2e1ee",
+                        "on-tertiary-container": "#fff5f2",
+                        "on-tertiary": "#5a1c00",
+                        "secondary-container": "#14d1ff",
+                        "surface-container": "#1d1f28",
+                        "primary-container": "#2e62ff",
+                        "tertiary-fixed-dim": "#ffb599",
+                        "secondary-fixed": "#b7eaff",
+                        "on-primary-fixed": "#001552",
+                        "on-surface": "#e2e1ee",
+                        "on-error": "#690005",
+                        "tertiary-fixed": "#ffdbce",
+                        "surface-tint": "#b7c4ff",
+                        "on-surface-variant": "#c3c5d8",
+                        "primary-fixed": "#dce1ff",
+                        "on-tertiary-fixed": "#370e00",
+                        "on-background": "#e2e1ee",
+                        "border": "#30363D",
+                        "primary-fixed-dim": "#b7c4ff",
+                        "risk-high": "#F85149",
+                        "outline-variant": "#434656",
+                        "surface": "#161B22",
+                        "data-indigo": "#6366F1",
+                        "on-tertiary-fixed-variant": "#7f2b00",
+                        "surface-container-lowest": "#0c0e16",
+                        "on-primary-container": "#f7f6ff",
+                        "error-container": "#93000a",
+                        "risk-medium": "#D29922",
+                        "secondary-fixed-dim": "#4cd6ff",
+                        "surface-bright": "#373943",
+                        "tertiary": "#ffb599",
+                        "on-error-container": "#ffdad6",
+                        "secondary": "#a6e6ff",
+                        "surface-container-high": "#282933",
+                        "surface-variant": "#33343e",
+                        "outline": "#8d90a2",
+                        "on-primary-fixed-variant": "#0039b5",
+                        "error": "#ffb4ab",
+                        "on-secondary-container": "#00566b",
+                        "tertiary-container": "#c64700",
+                        "on-secondary-fixed": "#001f28"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.125rem",
+                        "lg": "0.25rem",
+                        "xl": "0.5rem",
+                        "full": "0.75rem"
+                    },
+                    "spacing": {
+                        "container-max-width": "1440px",
+                        "margin-desktop": "32px",
+                        "base-unit": "4px",
+                        "margin-mobile": "16px",
+                        "gutter": "24px"
+                    },
+                    "fontFamily": {
+                        "headline-md": ["Geist"],
+                        "label-sm": ["JetBrains Mono"],
+                        "headline-lg-mobile": ["Geist"],
+                        "display-lg": ["Geist"],
+                        "body-sm": ["Inter"],
+                        "label-md": ["JetBrains Mono"],
+                        "body-md": ["Inter"],
+                        "headline-lg": ["Geist"],
+                        "body-lg": ["Inter"]
+                    },
+                    "fontSize": {
+                        "headline-md": ["24px", { "lineHeight": "32px", "fontWeight": "600" }],
+                        "label-sm": ["10px", { "lineHeight": "14px", "letterSpacing": "0.05em", "fontWeight": "500" }],
+                        "headline-lg-mobile": ["28px", { "lineHeight": "36px", "fontWeight": "600" }],
+                        "display-lg": ["48px", { "lineHeight": "56px", "letterSpacing": "-0.02em", "fontWeight": "700" }],
+                        "body-sm": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
+                        "label-md": ["12px", { "lineHeight": "16px", "letterSpacing": "0.05em", "fontWeight": "500" }],
+                        "body-md": ["16px", { "lineHeight": "24px", "fontWeight": "400" }],
+                        "headline-lg": ["32px", { "lineHeight": "40px", "letterSpacing": "-0.01em", "fontWeight": "600" }],
+                        "body-lg": ["18px", { "lineHeight": "28px", "fontWeight": "400" }]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        .glass-panel {
+            background: rgba(22, 27, 34, 0.6);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(48, 54, 61, 0.5);
+        }
+        .ai-glow {
+            box-shadow: 0 0 15px rgba(183, 196, 255, 0.15);
+        }
+        /* Custom Scrollbar for data density */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #0A0C10;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #30363D;
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #434656;
+        }
+    </style>
+</head>
+<body class="bg-background text-on-surface font-body-md antialiased min-h-screen flex flex-col selection:bg-primary-container selection:text-on-primary-container">
+<!-- TopAppBar -->
+<header class="bg-background dark:bg-background text-primary dark:text-primary docked full-width top-0 bg-background dark:bg-background flat no shadows z-50 sticky">
+<div class="flex justify-between items-center w-full px-margin-mobile md:px-margin-desktop py-4 max-w-container-max-width mx-auto">
+<div class="flex items-center gap-3">
+<img alt="CreditIQ Logo" class="w-8 h-8 rounded-sm object-cover" src="https://lh3.googleusercontent.com/aida/ADBb0uha5KxMZlEdTq6nJFKekalvX7CTu-l4aVTwrXLGN5axEoEWqnnQK0hl_T4aVISS70fw1FZ3mCRQ12erw13KG69MnwtkyMM_SEim5DMUosOzJIkb-4L3-TreDFD7hwGOkHGf8zHXlY2Zs5Ll2l29shJ-KutiqMCKhPHV1orkcVXcK-Vgah46qcgTy1WovI5x_jrKZgor0zCQ7qmZfyOLYLeaCeNNVkoXO5uSZbV-Ni5dN9-dKdjPg8AC0cg"/>
+<h1 class="text-headline-md font-headline-md font-bold tracking-tight text-on-surface dark:text-on-surface">CreditIQ</h1>
+</div>
+<!-- Navigation Logic: Suppressed for high-density analysis canvas, but retaining actions -->
+<div class="flex items-center gap-4">
+<button aria-label="help" class="p-2 rounded hover:bg-surface-container transition-colors text-on-surface-variant hover:text-primary">
+<span class="material-symbols-outlined text-[20px]">help</span>
+</button>
+<button aria-label="language" class="p-2 rounded hover:bg-surface-container transition-colors text-on-surface-variant hover:text-primary">
+<span class="material-symbols-outlined text-[20px]">language</span>
+</button>
+</div>
+</div>
+</header>
+<!-- Main Content Grid: Fixed-Fluid Hybrid -->
+<main class="flex-grow w-full px-margin-mobile md:px-margin-desktop py-6 max-w-container-max-width mx-auto flex flex-col md:flex-row gap-gutter">
+<!-- Left Sidebar: AI Reasoning Panel -->
+<aside class="w-full md:w-[320px] flex-shrink-0 flex flex-col gap-4">
+<div class="surface surface-container-low border border-border rounded p-4 h-full glass-panel ai-glow">
+<div class="flex items-center justify-between mb-6 pb-4 border-b border-border">
+<h2 class="text-label-md font-label-md text-primary uppercase tracking-wider">AI Reasoning Pipeline</h2>
+<span class="material-symbols-outlined text-primary text-[18px]">memory</span>
+</div>
+<div class="relative">
+<!-- Vertical Line -->
+<div class="absolute left-3 top-2 bottom-2 w-[1px] bg-border"></div>
+<!-- Steps -->
+<div class="flex flex-col gap-6 relative z-10">
+<!-- Step 1 -->
+<div class="flex gap-4 items-start">
+<div class="w-6 h-6 rounded-full bg-surface border border-border flex items-center justify-center shrink-0 mt-0.5">
+<span class="material-symbols-outlined text-[12px] text-risk-low">check</span>
+</div>
+<div>
+<p class="text-label-sm font-label-sm text-on-surface-variant uppercase mb-1">Step 1</p>
+<p class="text-body-sm font-body-sm text-on-surface">Document Ingestion &amp; OCR</p>
+<p class="text-label-sm font-label-sm text-outline mt-1">Processed 45 pages in 1.2s</p>
+</div>
+</div>
+<!-- Step 2 -->
+<div class="flex gap-4 items-start">
+<div class="w-6 h-6 rounded-full bg-surface border border-border flex items-center justify-center shrink-0 mt-0.5">
+<span class="material-symbols-outlined text-[12px] text-risk-low">check</span>
+</div>
+<div>
+<p class="text-label-sm font-label-sm text-on-surface-variant uppercase mb-1">Step 2</p>
+<p class="text-body-sm font-body-sm text-on-surface">NIIF Policy Extraction</p>
+<p class="text-label-sm font-label-sm text-outline mt-1">Identified 12 key accounting policies</p>
+</div>
+</div>
+<!-- Step 3 (Active) -->
+<div class="flex gap-4 items-start">
+<div class="w-6 h-6 rounded-full bg-primary-container border border-primary flex items-center justify-center shrink-0 mt-0.5 shadow-[0_0_8px_rgba(46,98,255,0.4)]">
+<div class="w-2 h-2 rounded-full bg-on-primary-container animate-pulse"></div>
+</div>
+<div>
+<p class="text-label-sm font-label-sm text-primary uppercase mb-1">Step 3 (Active)</p>
+<p class="text-body-sm font-body-sm text-on-surface font-medium">Materiality Analysis</p>
+<div class="mt-2 bg-surface p-2 rounded border border-border text-label-sm font-label-sm font-mono text-secondary-fixed">
+                                    &gt; Analyzing variance in Note 4...<br/>
+                                    &gt; Cross-referencing prior year...<br/>
+                                    &gt; Anomaly detected.
+                                </div>
+</div>
+</div>
+<!-- Step 4 (Pending) -->
+<div class="flex gap-4 items-start opacity-50">
+<div class="w-6 h-6 rounded-full bg-surface border border-border flex items-center justify-center shrink-0 mt-0.5">
+<div class="w-1.5 h-1.5 rounded-full bg-outline"></div>
+</div>
+<div>
+<p class="text-label-sm font-label-sm text-on-surface-variant uppercase mb-1">Step 4</p>
+<p class="text-body-sm font-body-sm text-on-surface">Final Risk Synthesis</p>
+</div>
+</div>
+</div>
+</div>
+</div>
+</aside>
+<!-- Right Content: High-Density Canvas -->
+<div class="flex-1 flex flex-col gap-6 overflow-hidden">
+<!-- Top Row: KPIs & Anomalies -->
+<div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+<!-- KPI 1 -->
+<div class="bg-surface border border-border rounded p-4 relative overflow-hidden group">
+<div class="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
+<div class="flex justify-between items-start mb-2">
+<span class="text-label-sm font-label-sm text-on-surface-variant uppercase">Overall Data Confidence</span>
+<span class="material-symbols-outlined text-[16px] text-primary">verified_user</span>
+</div>
+<div class="flex items-baseline gap-2">
+<span class="text-headline-lg font-headline-lg text-on-surface">98.4%</span>
+<span class="text-label-sm font-label-sm text-risk-low flex items-center"><span class="material-symbols-outlined text-[14px]">arrow_upward</span> 1.2%</span>
+</div>
+</div>
+<!-- KPI 2: Anomaly Alert -->
+<div class="bg-surface border border-risk-high/30 rounded p-4 relative overflow-hidden bg-gradient-to-r from-risk-high/10 to-transparent">
+<div class="flex justify-between items-start mb-2">
+<span class="text-label-sm font-label-sm text-risk-high uppercase">High Risk Anomalies</span>
+<span class="material-symbols-outlined text-[16px] text-risk-high">warning</span>
+</div>
+<div class="flex items-baseline gap-2">
+<span class="text-headline-lg font-headline-lg text-on-surface">2</span>
+<span class="text-label-sm font-label-sm text-on-surface-variant">Requires Review</span>
+</div>
+</div>
+<!-- KPI 3 -->
+<div class="bg-surface border border-border rounded p-4">
+<div class="flex justify-between items-start mb-2">
+<span class="text-label-sm font-label-sm text-on-surface-variant uppercase">Materiality Threshold</span>
+<span class="material-symbols-outlined text-[16px] text-outline">tune</span>
+</div>
+<div class="flex items-baseline gap-2">
+<span class="text-headline-lg font-headline-lg text-on-surface">$5.2M</span>
+<span class="text-label-sm font-label-sm text-outline">Base: Total Assets</span>
+</div>
+</div>
+</div>
+<!-- Middle Row: Financial Comparison Table -->
+<div class="bg-surface border border-border rounded flex flex-col flex-1 min-h-[300px]">
+<div class="p-4 border-b border-border flex justify-between items-center bg-surface-container-low rounded-t">
+<h3 class="text-body-md font-body-md font-semibold text-on-surface">Financial Comparison &amp; NIIF Variance</h3>
+<div class="flex gap-2">
+<button class="px-3 py-1 text-label-sm font-label-sm border border-border rounded hover:bg-surface-container text-on-surface-variant transition-colors flex items-center gap-1">
+<span class="material-symbols-outlined text-[14px]">filter_list</span> Filter
+                        </button>
+<button class="px-3 py-1 text-label-sm font-label-sm bg-primary text-on-primary rounded hover:bg-primary/90 transition-colors">
+                            Export CSV
+                        </button>
+</div>
+</div>
+<div class="overflow-x-auto flex-1">
+<table class="w-full text-left whitespace-nowrap">
+<thead class="bg-surface-container-lowest border-b border-border text-label-sm font-label-sm text-on-surface-variant uppercase">
+<tr>
+<th class="py-3 px-4 font-medium">Account Description</th>
+<th class="py-3 px-4 font-medium text-right">Current PERIOD(M)</th>
+<th class="py-3 px-4 font-medium text-right">Prior Year (M)</th>
+<th class="py-3 px-4 font-medium text-right">Variance</th>
+<th class="py-3 px-4 font-medium">NIIF Note Reference</th>
+<th class="py-3 px-4 font-medium text-center">AI Status</th>
+</tr>
+</thead>
+<tbody class="text-body-sm font-body-sm font-mono text-on-surface divide-y divide-border">
+<tr class="hover:bg-surface-container-lowest/50 transition-colors group">
+<td class="py-3 px-4 font-sans">Cash and Cash Equivalents</td>
+<td class="py-3 px-4 text-right">124.5</td>
+<td class="py-3 px-4 text-right">110.2</td>
+<td class="py-3 px-4 text-right text-risk-low">+13.0%</td>
+<td class="py-3 px-4 text-outline">Note 3</td>
+<td class="py-3 px-4 text-center">
+<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium bg-risk-low/10 text-risk-low border border-risk-low/20">
+                                        Verified
+                                    </span>
+</td>
+</tr>
+<tr class="hover:bg-surface-container-lowest/50 transition-colors bg-risk-high/5 border-l-2 border-l-risk-high">
+<td class="py-3 px-4 font-sans">Accounts Receivable</td>
+<td class="py-3 px-4 text-right">342.1</td>
+<td class="py-3 px-4 text-right">280.4</td>
+<td class="py-3 px-4 text-right text-risk-high">+22.0%</td>
+<td class="py-3 px-4 text-outline">Note 4</td>
+<td class="py-3 px-4 text-center">
+<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium bg-risk-high/10 text-risk-high border border-risk-high/20">
+                                        Anomaly
+                                    </span>
+</td>
+</tr>
+<tr class="hover:bg-surface-container-lowest/50 transition-colors">
+<td class="py-3 px-4 font-sans">Inventory</td>
+<td class="py-3 px-4 text-right">89.4</td>
+<td class="py-3 px-4 text-right">92.1</td>
+<td class="py-3 px-4 text-right text-outline">-2.9%</td>
+<td class="py-3 px-4 text-outline">Note 5</td>
+<td class="py-3 px-4 text-center">
+<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium bg-risk-low/10 text-risk-low border border-risk-low/20">
+                                        Verified
+                                    </span>
+</td>
+</tr>
+<tr class="hover:bg-surface-container-lowest/50 transition-colors bg-risk-medium/5 border-l-2 border-l-risk-medium">
+<td class="py-3 px-4 font-sans">Property, Plant &amp; Equipment</td>
+<td class="py-3 px-4 text-right">850.0</td>
+<td class="py-3 px-4 text-right">790.0</td>
+<td class="py-3 px-4 text-right text-risk-medium">+7.6%</td>
+<td class="py-3 px-4 text-outline">Note 7</td>
+<td class="py-3 px-4 text-center">
+<span class="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium bg-risk-medium/10 text-risk-medium border border-risk-medium/20">
+                                        Review
+                                    </span>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<!-- Bottom Row: Visual Analytics Placeholder -->
+<div class="bg-surface border border-border rounded flex flex-col h-[400px] shadow-sm overflow-hidden">
+<!-- Chat Header -->
+<div class="px-4 py-3 border-b border-border bg-surface-container-low flex items-center justify-between">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-primary text-[18px]">smart_toy</span>
+<h4 class="text-label-md font-label-md text-on-surface uppercase tracking-wider">AI Analysis Assistant</h4>
+</div>
+<div class="flex items-center gap-2">
+<span class="text-[10px] font-medium px-2 py-0.5 rounded bg-primary/10 text-primary border border-primary/20 uppercase tracking-tighter">NIIF-LLM Active</span>
+</div>
+</div>
+<!-- Message History -->
+<div class="flex-1 overflow-y-auto p-4 space-y-4 bg-background/50">
+<div class="flex flex-col gap-1 max-w-[80%]">
+<p class="text-label-sm font-label-sm text-outline px-1">CreditIQ AI</p>
+<div class="bg-surface-container-highest p-3 rounded-xl rounded-tl-none border border-border">
+<p class="text-body-sm text-on-surface">I've completed the initial materiality analysis. The 22% variance in Accounts Receivable (Note 4) appears anomalous compared to historical trends. Would you like me to drill down into the specific transactions?</p>
+</div>
+</div>
+<div class="flex flex-col gap-1 items-end ml-auto max-w-[80%]">
+<p class="text-label-sm font-label-sm text-outline px-1">Analyst</p>
+<div class="bg-primary-container/20 p-3 rounded-xl rounded-tr-none border border-primary/30">
+<p class="text-body-sm text-on-surface">Yes, please summarize the top 5 transactions contributing to this variance.</p>
+</div>
+</div>
+</div>
+<!-- Chat Input Bar -->
+<div class="p-4 border-t border-border bg-surface">
+<div class="relative flex items-center">
+<span class="material-symbols-outlined absolute left-3 text-primary text-[20px]">auto_awesome</span>
+<input class="w-full bg-surface-container-lowest border border-border rounded-full py-3 pl-10 pr-12 text-body-sm focus:border-primary focus:ring-1 focus:ring-primary transition-all outline-none placeholder:text-outline/50" placeholder="Ask about the analysis or request specific data deep-dives..." type="text"/>
+<button class="absolute right-2 p-2 text-primary hover:bg-primary/10 rounded-full transition-colors">
+<span class="material-symbols-outlined">send</span>
+</button>
+</div>
+<div class="mt-2 flex gap-3 px-1">
+<button class="text-[10px] text-outline-variant hover:text-primary transition-colors"># VarianceDetails</button>
+<button class="text-[10px] text-outline-variant hover:text-primary transition-colors"># Note4Review</button>
+<button class="text-[10px] text-outline-variant hover:text-primary transition-colors"># PolicyCheck</button>
+</div>
+</div>
+</div>
+</div>
+</main>
+<!-- Footer -->
+<footer class="bg-background dark:bg-background text-outline dark:text-outline docked full-width bottom-0 border-t border-border dark:border-border flat no shadows mt-auto">
+<div class="w-full px-margin-mobile md:px-margin-desktop py-6 flex flex-col md:flex-row justify-between items-center gap-4 max-w-container-max-width mx-auto">
+<div class="text-label-md font-label-md font-bold text-outline">
+                © 2024 CreditIQ Intelligence Systems. All rights reserved.
+            </div>
+<div class="flex gap-4 text-label-sm font-label-sm">
+<a class="text-outline-variant hover:text-on-surface transition-colors duration-200" href="#">Privacy Policy</a>
+<a class="text-outline-variant hover:text-on-surface transition-colors duration-200" href="#">Terms of Service</a>
+<a class="text-outline-variant hover:text-on-surface transition-colors duration-200" href="#">Security Architecture</a>
+<a class="text-outline-variant hover:text-on-surface transition-colors duration-200" href="#">Contact Support</a>
+</div>
+</div>
+</footer>
+</body></html>

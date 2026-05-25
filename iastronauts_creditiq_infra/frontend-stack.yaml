@@ -1,0 +1,101 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CreditIQ — Frontend Infrastructure (S3 + CloudFront)
+  Standalone stack, deployed independently of the backend SAM stack.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, uat, master]
+
+Resources:
+
+  # ── S3 Bucket (private, served only via CloudFront OAC) ──────────────
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub "iastronauts-creditiq-frontend-${AWS::Region}-${Stage}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AllowCloudFrontOAC
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}"
+
+  # ── CloudFront Origin Access Control ─────────────────────────────────
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "creditiq-oac-${Stage}"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # ── CloudFront Distribution ───────────────────────────────────────────
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Comment: !Sub "CreditIQ Frontend — ${Stage}"
+        Origins:
+          - Id: FrontendS3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !Ref CloudFrontOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # CachingOptimized
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          Compress: true
+        # SPA routing: serve index.html for any 403/404 (React Router handles the rest)
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+        PriceClass: PriceClass_100  # US + Europe + Asia (most economical)
+
+Outputs:
+  CloudFrontUrl:
+    Description: Public URL of the frontend
+    Value: !Sub "https://${FrontendDistribution.DomainName}"
+    Export:
+      Name: !Sub "creditiq-frontend-url-${Stage}"
+
+  CloudFrontDistributionId:
+    Description: CloudFront Distribution ID (needed for cache invalidation on deploy)
+    Value: !Ref FrontendDistribution
+    Export:
+      Name: !Sub "creditiq-frontend-dist-id-${Stage}"
+
+  FrontendBucketName:
+    Description: S3 bucket where frontend assets are uploaded
+    Value: !Ref FrontendBucket
+    Export:
+      Name: !Sub "creditiq-frontend-bucket-${Stage}"
