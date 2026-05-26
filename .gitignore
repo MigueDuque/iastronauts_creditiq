@@ -2,6 +2,7 @@
 .env
 .env.local
 .env.*.local
+local-dev/env.json 
 
 # ── Claude Code ─────────────────────────────────────────
 .claude/
