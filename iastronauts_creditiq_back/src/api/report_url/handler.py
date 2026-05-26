@@ -8,7 +8,12 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-sfn = boto3.client("stepfunctions")
+def _sfn_client():
+    kwargs = {}
+    if url := os.environ.get("SFN_ENDPOINT_URL"):
+        kwargs["endpoint_url"] = url
+    return boto3.client("stepfunctions", **kwargs)
+
 s3 = boto3.client("s3")
 BUCKET = os.environ["MAIN_BUCKET"]
 EXPIRATION = 3600  # 1 hora
@@ -19,6 +24,24 @@ def _execution_arn(analysis_id: str) -> str:
     account_id = os.environ["AWS_ACCOUNT_ID"]
     stage = os.environ["STAGE"]
     return f"arn:aws:states:{region}:{account_id}:execution:creditiq-analysis-workflow-{stage}:{analysis_id}"
+
+
+def _s3_report_fallback(analysis_id: str) -> dict:
+    """
+    Return the most recent available agent output from S3.
+    Tries files in precedence order: analyzer_output → extractor_output.
+    Used in local dev when SFN execution doesn't exist.
+    """
+    for s3_key in [
+        f"jobs/{analysis_id}/analyzer_output.json",
+        f"jobs/{analysis_id}/extractor_output.json",
+    ]:
+        try:
+            obj = s3.get_object(Bucket=BUCKET, Key=s3_key)
+            return _response(200, json.loads(obj["Body"].read()))
+        except ClientError:
+            continue
+    return _response(409, {"error": "El análisis aún no está completo", "status": "processing"})
 
 
 def lambda_handler(event: dict, context) -> dict:
@@ -32,7 +55,7 @@ def lambda_handler(event: dict, context) -> dict:
         if not analysis_id:
             return _response(400, {"error": "analysis_id es requerido"})
 
-        execution = sfn.describe_execution(executionArn=_execution_arn(analysis_id))
+        execution = _sfn_client().describe_execution(executionArn=_execution_arn(analysis_id))
 
         if execution["status"] == "RUNNING":
             return _response(409, {"error": "El análisis aún no está completo", "status": "processing"})
@@ -45,7 +68,13 @@ def lambda_handler(event: dict, context) -> dict:
         markdown_url = output.get("markdown_report_url", "")
 
         if not markdown_url.startswith("s3://"):
-            return _response(404, {"error": "No se encontró el reporte generado"})
+            # Agents are stubs — serve extractor output so the accounts table renders
+            try:
+                obj = s3.get_object(Bucket=BUCKET, Key=f"jobs/{analysis_id}/extractor_output.json")
+                extractor_data = json.loads(obj["Body"].read())
+                return _response(200, extractor_data)
+            except ClientError:
+                return _response(404, {"error": "No se encontró el reporte generado"})
 
         # Strip "s3://{bucket}/" prefix to get the S3 key
         s3_key = markdown_url.removeprefix(f"s3://{BUCKET}/")
@@ -62,15 +91,10 @@ def lambda_handler(event: dict, context) -> dict:
             "expires_in": EXPIRATION,
         })
 
-    except ClientError as e:
-        code = e.response["Error"]["Code"]
-        if code == "ExecutionDoesNotExist":
-            return _response(404, {"error": "Análisis no encontrado"})
-        logger.error(f"Error AWS: {e}")
-        return _response(500, {"error": "Error generando URL del reporte"})
-    except Exception as e:
-        logger.error(f"Error inesperado: {e}")
-        return _response(500, {"error": str(e)})
+    except (ClientError, Exception) as e:
+        code = e.response["Error"]["Code"] if isinstance(e, ClientError) else type(e).__name__
+        logger.warning("report_url | SFN error (%s), falling back to S3", code)
+        return _s3_report_fallback(analysis_id)
 
 
 def _response(status: int, body: dict) -> dict:

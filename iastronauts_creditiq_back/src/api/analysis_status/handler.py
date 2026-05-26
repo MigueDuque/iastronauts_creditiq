@@ -8,7 +8,14 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-sfn = boto3.client("stepfunctions")
+def _sfn_client():
+    kwargs = {}
+    if url := os.environ.get("SFN_ENDPOINT_URL"):
+        kwargs["endpoint_url"] = url
+    return boto3.client("stepfunctions", **kwargs)
+
+s3     = boto3.client("s3")
+BUCKET = os.environ["MAIN_BUCKET"]
 
 _SFN_TO_STATUS = {
     "RUNNING": "processing",
@@ -26,6 +33,20 @@ def _execution_arn(analysis_id: str) -> str:
     return f"arn:aws:states:{region}:{account_id}:execution:creditiq-analysis-workflow-{stage}:{analysis_id}"
 
 
+def _s3_status_fallback(analysis_id: str) -> dict:
+    """Read status from S3 — written by the orchestrator background thread in local dev."""
+    try:
+        obj = s3.get_object(Bucket=BUCKET, Key=f"jobs/{analysis_id}/status.json")
+        data = json.loads(obj["Body"].read())
+        return _response(200, {
+            "analysis_id": analysis_id,
+            "status": data.get("status", "pending"),
+            "error": data.get("error"),
+        })
+    except ClientError:
+        return _response(200, {"analysis_id": analysis_id, "status": "pending"})
+
+
 def lambda_handler(event: dict, context) -> dict:
     """
     GET /analyses/{analysis_id}
@@ -36,7 +57,7 @@ def lambda_handler(event: dict, context) -> dict:
         if not analysis_id:
             return _response(400, {"error": "analysis_id es requerido"})
 
-        execution = sfn.describe_execution(executionArn=_execution_arn(analysis_id))
+        execution = _sfn_client().describe_execution(executionArn=_execution_arn(analysis_id))
 
         status = _SFN_TO_STATUS.get(execution["status"], "unknown")
 
@@ -52,15 +73,10 @@ def lambda_handler(event: dict, context) -> dict:
 
         return _response(200, payload)
 
-    except ClientError as e:
-        code = e.response["Error"]["Code"]
-        if code == "ExecutionDoesNotExist":
-            return _response(404, {"error": "Análisis no encontrado"})
-        logger.error(f"Error AWS: {e}")
-        return _response(500, {"error": "Error consultando el análisis"})
-    except Exception as e:
-        logger.error(f"Error inesperado: {e}")
-        return _response(500, {"error": str(e)})
+    except (ClientError, Exception) as e:
+        code = e.response["Error"]["Code"] if isinstance(e, ClientError) else type(e).__name__
+        logger.warning("analysis_status | SFN error (%s), falling back to S3", code)
+        return _s3_status_fallback(analysis_id)
 
 
 def _response(status: int, body: dict) -> dict:

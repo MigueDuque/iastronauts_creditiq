@@ -1,20 +1,70 @@
 import json
 import logging
 import os
+import threading
 
 import boto3
 from botocore.exceptions import ClientError
 
 from shared.audit_logger import AuditAction, log_audit_event
 from shared.models import BusinessContext, FileToProcess, OrchestratorOutput, OutputFormat
+from shared.s3_report_store import slugify
 from shared.tenant_context import TenantBoundaryViolation
 from shared.tenant_middleware import extract_tenant_context, source_ip, validate_requested_tenant
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-sfn = boto3.client("stepfunctions")
-WORKFLOW_ARN = os.environ["WORKFLOW_ARN"]
+def _sfn_client():
+    kwargs = {}
+    if url := os.environ.get("SFN_ENDPOINT_URL"):
+        kwargs["endpoint_url"] = url
+    return boto3.client("stepfunctions", **kwargs)
+
+s3  = boto3.client("s3")
+WORKFLOW_ARN     = os.environ["WORKFLOW_ARN"]
+BUCKET           = os.environ["MAIN_BUCKET"]
+LOCAL_DEV_BYPASS = os.environ.get("LOCAL_DEV_BYPASS_SFN", "").lower() == "true"
+
+
+def _report_exists(tenant_id: str, company_name: str, reporting_period: str) -> bool:
+    """Return True if at least one report .md already exists for this period."""
+    try:
+        parts = reporting_period.split("-")
+        if len(parts) < 2:
+            return False
+        year, month = parts[0], parts[1].zfill(2)
+        company_slug = slugify(company_name) if company_name else "unknown"
+        prefix = f"reports/{tenant_id}/{company_slug}/{year}/{month}/"
+        resp = s3.list_objects_v2(Bucket=BUCKET, Prefix=prefix, MaxKeys=1)
+        return bool(resp.get("Contents"))
+    except ClientError:
+        return False
+
+
+def _save_job_status(job_id: str, status: str, error: str | None = None) -> None:
+    body: dict = {"status": status}
+    if error:
+        body["error"] = error
+    s3.put_object(Bucket=BUCKET, Key=f"jobs/{job_id}/status.json", Body=json.dumps(body))
+
+
+def _run_extractor_bg(event: dict) -> None:
+    """Local-dev only: runs the ExtractorFunction in-process and saves output to S3."""
+    job_id = event.get("job_id", "unknown")
+    try:
+        from agents.document_extractor.handler import lambda_handler as extractor_handler  # noqa: PLC0415
+        result = extractor_handler(event, None)
+        s3.put_object(
+            Bucket=BUCKET,
+            Key=f"jobs/{job_id}/extractor_output.json",
+            Body=json.dumps(result),
+        )
+        _save_job_status(job_id, "extraction_complete")
+        logger.info("local_dev_extractor | done job_id=%s", job_id)
+    except Exception as exc:
+        logger.error("local_dev_extractor | failed job_id=%s error=%s", job_id, exc, exc_info=True)
+        _save_job_status(job_id, "failed", error=str(exc))
 
 
 def lambda_handler(event: dict, context) -> dict:
@@ -69,13 +119,14 @@ def lambda_handler(event: dict, context) -> dict:
                 "error": "Forbidden — tenant_id in body does not match authenticated tenant"
             })
 
-        # Validate uploaded S3 keys belong to this tenant
-        files_raw = body.get("files", [])
+        # Accept both "files_to_process" (frontend) and "files" (legacy)
+        files_raw = body.get("files_to_process") or body.get("files", [])
         if not files_raw:
-            return _response(400, {"error": "Se requiere al menos un archivo en 'files'"})
+            return _response(400, {"error": "Se requiere al menos un archivo en 'files_to_process'"})
 
         for f in files_raw:
-            s3_key = f.get("s3_key", "")
+            # Accept both "s3_location" (frontend) and "s3_key" (legacy)
+            s3_key = f.get("s3_location") or f.get("s3_key", "")
             try:
                 tenant_ctx.assert_s3_key(s3_key)
             except TenantBoundaryViolation:
@@ -85,29 +136,31 @@ def lambda_handler(event: dict, context) -> dict:
                     status="failure",
                     resource=s3_key,
                     ip_address=source_ip(event),
-                    metadata={"reason": "s3_key belongs to a different tenant"},
+                    metadata={"reason": "s3_location belongs to a different tenant"},
                 )
                 return _response(403, {
-                    "error": f"Forbidden — s3_key '{s3_key}' does not belong to your tenant"
+                    "error": f"Forbidden — s3_location '{s3_key}' does not belong to your tenant"
                 })
 
         # ── Build pipeline input ──────────────────────────────────────────────
+        # Accept both flat fields and nested business_context object
+        biz = body.get("business_context") or {}
         business_context = BusinessContext(
-            company_name=body.get("company_name"),
-            industry=body.get("industry"),
-            fiscal_year=body.get("fiscal_year"),
-            reporting_period=body.get("reporting_period"),
-            key_events=body.get("key_events", []),
-            strategic_context=body.get("strategic_context"),
-            regulatory_context=body.get("regulatory_context"),
-            analyst_instructions=body.get("analyst_instructions", []),
-            raw_context=body.get("raw_context", ""),
+            company_name=body.get("company_name") or biz.get("company_name"),
+            industry=body.get("industry") or biz.get("industry"),
+            fiscal_year=body.get("fiscal_year") or biz.get("fiscal_year"),
+            reporting_period=body.get("reporting_period") or biz.get("reporting_period"),
+            key_events=body.get("key_events") or biz.get("key_events", []),
+            strategic_context=body.get("strategic_context") or biz.get("strategic_context"),
+            regulatory_context=body.get("regulatory_context") or biz.get("regulatory_context"),
+            analyst_instructions=body.get("analyst_instructions") or biz.get("analyst_instructions", []),
+            raw_context=body.get("raw_context") or biz.get("raw_context", ""),
         )
 
         files_to_process = [
             FileToProcess(
                 file_name=f["file_name"],
-                s3_location=f["s3_key"],
+                s3_location=f.get("s3_location") or f.get("s3_key", ""),
                 file_type=f.get("file_type", "pdf"),
             )
             for f in files_raw
@@ -117,6 +170,34 @@ def lambda_handler(event: dict, context) -> dict:
             OutputFormat(fmt) for fmt in body.get("output_formats", ["markdown"])
             if fmt in OutputFormat._value2member_map_
         ] or [OutputFormat.MARKDOWN]
+
+        # ── Duplicate analysis guard ──────────────────────────────────────────
+        force_rerun = body.get("force_rerun", False)
+        company_name_raw = (
+            body.get("company_name")
+            or body.get("business_context", {}).get("company_name", "")
+        )
+        reporting_period_raw = (
+            body.get("reporting_period")
+            or body.get("business_context", {}).get("reporting_period", "")
+        )
+
+        if not force_rerun and company_name_raw and reporting_period_raw:
+            if _report_exists(tenant_ctx.tenant_id, company_name_raw, reporting_period_raw):
+                logger.info(
+                    "orchestrator | duplicate detected tenant=%s company=%s period=%s",
+                    tenant_ctx.tenant_id, company_name_raw, reporting_period_raw,
+                )
+                return _response(409, {
+                    "error": "duplicate_analysis",
+                    "message": (
+                        f"Ya existe un análisis completado para '{company_name_raw}' "
+                        f"en el período {reporting_period_raw}. "
+                        "Confirme si desea ejecutarlo nuevamente."
+                    ),
+                    "company_name": company_name_raw,
+                    "reporting_period": reporting_period_raw,
+                })
 
         # tenant_id comes exclusively from the verified tenant context
         orchestrator_output = OrchestratorOutput(
@@ -128,11 +209,45 @@ def lambda_handler(event: dict, context) -> dict:
             output_formats=output_formats,
         )
 
-        sfn.start_execution(
-            stateMachineArn=WORKFLOW_ARN,
-            name=orchestrator_output.job_id,
-            input=json.dumps(orchestrator_output.model_dump(mode="json")),
-        )
+        if LOCAL_DEV_BYPASS:
+            # LOCAL_DEV_BYPASS_SFN=true — skip Step Functions and run the extractor
+            # directly in a background thread. The status/report handlers fall back to
+            # S3 (jobs/{id}/status.json and extractor_output.json) when the execution
+            # doesn't exist in SFN, so no Terminal 3 (sam local start-lambda) is needed.
+            logger.warning(
+                "orchestrator | LOCAL_DEV_BYPASS_SFN active, skipping SFN. job_id=%s",
+                orchestrator_output.job_id,
+            )
+            _save_job_status(orchestrator_output.job_id, "processing")
+            thread = threading.Thread(
+                target=_run_extractor_bg,
+                args=(orchestrator_output.model_dump(mode="json"),),
+                daemon=True,
+            )
+            thread.start()
+        else:
+            try:
+                _sfn_client().start_execution(
+                    stateMachineArn=WORKFLOW_ARN,
+                    name=orchestrator_output.job_id,
+                    input=json.dumps(orchestrator_output.model_dump(mode="json")),
+                )
+            except ClientError as e:
+                code = e.response["Error"]["Code"]
+                if code in ("StateMachineDoesNotExist", "AccessDeniedException"):
+                    logger.warning(
+                        "orchestrator | SFN not available (%s), running extractor locally. job_id=%s",
+                        code, orchestrator_output.job_id,
+                    )
+                    _save_job_status(orchestrator_output.job_id, "processing")
+                    thread = threading.Thread(
+                        target=_run_extractor_bg,
+                        args=(orchestrator_output.model_dump(mode="json"),),
+                        daemon=True,
+                    )
+                    thread.start()
+                else:
+                    raise
 
         log_audit_event(
             tenant_id=tenant_ctx.tenant_id,

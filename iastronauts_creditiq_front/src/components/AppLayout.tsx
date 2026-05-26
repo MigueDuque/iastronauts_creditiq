@@ -6,8 +6,6 @@ import Sidebar from './Sidebar'
 import Footer from './Footer'
 import UploadDialog from './UploadDialog'
 
-const DRAWER_WIDTH = 240
-
 export default function AppLayout() {
   const [mobileOpen, setMobileOpen] = useState(false)
   const [uploadOpen, setUploadOpen] = useState(false)

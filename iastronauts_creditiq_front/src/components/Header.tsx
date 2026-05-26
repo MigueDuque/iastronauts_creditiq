@@ -1,8 +1,6 @@
 import { Link, useLocation } from 'react-router-dom'
 import IconButton from '@mui/material/IconButton'
 
-const ICONS = '/icons'
-
 interface HeaderProps {
   onMenuToggle?: () => void
 }

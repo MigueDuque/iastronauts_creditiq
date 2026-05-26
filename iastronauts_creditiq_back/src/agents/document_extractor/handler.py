@@ -1,4 +1,5 @@
 import io
+import json
 import logging
 import os
 import time
@@ -9,6 +10,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from shared.llm_provider import LLMProvider
 from shared.models import ExtractedAccount, ExtractorOutput, OrchestratorOutput
+from shared.s3_instructions import load_text as load_instruction
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -18,6 +20,9 @@ _TEXTRACT_POLL_INTERVAL_SEC = 5
 _TEXTRACT_POLL_MAX_ATTEMPTS = 50   # 250 s max wait
 _LLM_TEXT_CAP = 20_000             # chars sent to LLM per file
 
+# S3 key for this agent's prompt
+_PROMPT_S3_KEY = "instructions/prompts/01_prompt_agent_extractor.md"
+
 
 # ---------------------------------------------------------------------------
 # S3
@@ -25,7 +30,6 @@ _LLM_TEXT_CAP = 20_000             # chars sent to LLM per file
 
 def _download(s3_key: str, s3_client) -> bytes:
     return s3_client.get_object(Bucket=BUCKET, Key=s3_key)["Body"].read()
-
 
 # ---------------------------------------------------------------------------
 # PDF → Textract async
@@ -141,20 +145,19 @@ def extract_csv(content: bytes) -> str:
 # LLM normalization / homologation
 # ---------------------------------------------------------------------------
 
-_EXTRACTION_SYSTEM_PROMPT = """
+# Inline fallback — used when the S3 prompt file is not yet uploaded or unreachable
+_EXTRACTION_SYSTEM_PROMPT_FALLBACK = """
 Eres un extractor especializado en estados financieros colombianos bajo NIIF (IFRS).
 Recibirás texto crudo de tablas extraídas de documentos financieros (PDFs y Excel).
 
 Devuelve ÚNICAMENTE un JSON con esta estructura:
 {
-  "statement_type": "balance_sheet" | "income_statement" | "cash_flow" | "mixed",
   "periods": ["YYYY-MM", "YYYY-MM"],
   "accounts": [
     {
       "raw_account_name": "nombre exacto del documento",
       "normalized_account_name": "nombre NIIF estándar en español",
       "category": "assets" | "liabilities" | "equity" | "revenue" | "expense" | "other",
-      "subcategory": "clasificación específica",
       "current_value": número en COP MM,
       "previous_value": número en COP MM o null,
       "confidence_score": 0.0 a 1.0
@@ -176,6 +179,22 @@ Reglas:
 - confidence_score: 1.0 si el valor es claro, 0.5 si hubo ambigüedad, 0.2 si fue inferido.
 """
 
+# Lazy-loaded prompt — populated on first LLM call, cached for container lifetime
+_extraction_system_prompt_cache: str | None = None
+
+
+def _get_extraction_prompt() -> str:
+    """Return the extraction system prompt, loading from S3 on first call."""
+    global _extraction_system_prompt_cache
+    if _extraction_system_prompt_cache is None:
+        _extraction_system_prompt_cache = load_instruction(
+            _PROMPT_S3_KEY,
+            fallback=_EXTRACTION_SYSTEM_PROMPT_FALLBACK,
+        )
+        source = "s3" if _extraction_system_prompt_cache != _EXTRACTION_SYSTEM_PROMPT_FALLBACK else "local_fallback"
+        logger.info("extractor_prompt_loaded | source=%s chars=%d", source, len(_extraction_system_prompt_cache))
+    return _extraction_system_prompt_cache
+
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
 def _call_llm_extraction(
@@ -190,14 +209,14 @@ def _call_llm_extraction(
         f"Texto extraído del documento:\n{raw_text[:_LLM_TEXT_CAP]}"
     )
     result = llm.generate_json(
-        system_prompt=_EXTRACTION_SYSTEM_PROMPT,
+        system_prompt=_get_extraction_prompt(),
         user_prompt=user_prompt,
         temperature=0.0,
         tenant_id=tenant_id,
         job_id=job_id,
         max_tokens=16384,
     )
-    return result if isinstance(result, dict) else {"accounts": result, "periods": [], "statement_type": "mixed"}
+    return result if isinstance(result, dict) else {"accounts": result, "periods": []}
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +234,6 @@ def _build_accounts(raw_items: list[dict], source_file: str) -> tuple[list[Extra
                 raw_account_name=str(item.get("raw_account_name", "")),
                 normalized_account_name=str(item.get("normalized_account_name", "")),
                 category=str(item.get("category", "other")),
-                subcategory=str(item.get("subcategory", "")),
                 current_value=float(item.get("current_value") or 0),
                 previous_value=float(prev) if prev is not None else None,
                 currency="COP",
@@ -261,8 +279,8 @@ def lambda_handler(event: dict, context) -> dict:
 
     all_accounts: list[ExtractedAccount] = []
     all_periods: list[str] = []
-    statement_types: list[str] = []
     warnings: list[str] = []
+    rendicion_text_s3_key: str | None = None
 
     for file in payload.files_to_process:
         file_type = file.file_type.lower().lstrip(".")
@@ -271,6 +289,25 @@ def lambda_handler(event: dict, context) -> dict:
         try:
             if file_type == "pdf":
                 raw_text = extract_pdf(file.s3_location, textract_client, context)
+                if not raw_text.strip():
+                    warnings.append(f"Sin contenido extraído de la rendición de cuentas '{file.file_name}'")
+                    continue
+                
+                # Save accountability report text in S3 for later qualitative use
+                s3_key = f"uploads/{payload.tenant_id}/{payload.job_id}_rendicion.txt"
+                try:
+                    s3_client.put_object(
+                        Bucket=BUCKET,
+                        Key=s3_key,
+                        Body=raw_text.encode("utf-8"),
+                    )
+                    rendicion_text_s3_key = s3_key
+                    logger.info("rendicion_saved | key=%s bytes=%d", s3_key, len(raw_text))
+                except Exception as exc:
+                    warnings.append(f"No se pudo guardar el texto de rendición en S3: {exc}")
+                    logger.error("rendicion_save_failed | job=%s error=%s", payload.job_id, exc)
+                continue  # Skip account extraction for PDF (narrative only)
+
             elif file_type in ("excel", "xlsx", "xls"):
                 raw_text = extract_excel(_download(file.s3_location, s3_client))
             elif file_type == "csv":
@@ -297,8 +334,6 @@ def lambda_handler(event: dict, context) -> dict:
             warnings.extend(file_warnings)
 
             all_periods.extend(llm_result.get("periods", []))
-            if llm_result.get("statement_type"):
-                statement_types.append(llm_result["statement_type"])
 
             logger.info("accounts_extracted | file=%s count=%d", file.file_name, len(file_accounts))
 
@@ -315,7 +350,6 @@ def lambda_handler(event: dict, context) -> dict:
     if not unique_periods and payload.business_context.reporting_period:
         unique_periods = [payload.business_context.reporting_period]
 
-    statement_type = statement_types[0] if statement_types else "balance_sheet"
     company_name = payload.business_context.company_name or ""
 
     result = ExtractorOutput(
@@ -326,12 +360,12 @@ def lambda_handler(event: dict, context) -> dict:
         report_language=payload.report_language,
         output_formats=payload.output_formats,
         company_name=company_name,
-        statement_type=statement_type,
         currency="COP",
         periods=unique_periods,
         accounts=_reindex(all_accounts),
         extraction_confidence=_avg_confidence(all_accounts),
         extraction_warnings=warnings,
+        rendicion_text_s3_key=rendicion_text_s3_key,
     )
 
     logger.info(
@@ -339,4 +373,17 @@ def lambda_handler(event: dict, context) -> dict:
         payload.job_id, len(result.accounts), result.periods,
         result.extraction_confidence, len(result.extraction_warnings),
     )
-    return result.model_dump(mode="json")
+
+    output = result.model_dump(mode="json")
+
+    # Save output so report_url can serve it while downstream agents are stubs
+    try:
+        s3_client.put_object(
+            Bucket=BUCKET,
+            Key=f"jobs/{result.job_id}/extractor_output.json",
+            Body=json.dumps(output),
+        )
+    except Exception as exc:
+        logger.warning("extractor_output_save_failed | job=%s error=%s", result.job_id, exc)
+
+    return output

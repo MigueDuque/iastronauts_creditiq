@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import uuid
 
 import boto3
 from botocore.exceptions import ClientError
@@ -43,12 +42,15 @@ def lambda_handler(event: dict, context) -> dict:
         body = json.loads(event.get("body") or "{}")
         file_name = body.get("file_name")
         file_type = body.get("file_type", "pdf")
+        folder    = body.get("folder", "").strip("/")
 
         if not file_name:
             return _response(400, {"error": "file_name es requerido"})
 
-        # Key is scoped to the authenticated tenant — cannot be overridden by caller
-        object_key = f"uploads/{tenant_ctx.tenant_id}/{uuid.uuid4()}_{file_name}"
+        # tenant_id is always the first segment so assert_s3_key passes.
+        # folder (org/fund/date) is appended when provided.
+        folder_path = f"{folder}/" if folder else ""
+        object_key  = f"uploads/{tenant_ctx.tenant_id}/{folder_path}{file_name}"
 
         presigned_url = s3.generate_presigned_url(
             "put_object",

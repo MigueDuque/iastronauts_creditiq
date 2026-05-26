@@ -35,8 +35,12 @@ class AnalyzerOutput(BaseModel):
 
     # Output del analyzer
     company_name: str
+    currency: str
+    periods: list[str]
+    financial_ratios: dict
     analysis_results: list[AccountAnalysis]
     high_materiality_accounts: list[str]
     niif_notes_required: list[str]
     overall_financial_health: FinancialHealth
     executive_narrative: str
+    niif18_compliance: dict = {}
