@@ -93,30 +93,72 @@ async def get_report(analysis_id: str, request: Request):
     return _resp(lambda_handler(_event(request, None, {"analysis_id": analysis_id}), None))
 
 
-def _save_status(job_id: str, status: str, error: str | None = None) -> None:
+# ── Progress helpers ───────────────────────────────────────────────────────────
+
+def _save_status(job_id: str, status: str, error: str | None = None, progress: dict | None = None) -> None:
     from shared.job_store import save as job_save, STATUS
     body: dict = {"status": status}
     if error:
         body["error"] = error
+    if progress is not None:
+        body["progress"] = progress
     job_save(job_id, STATUS, body)
 
+
+def _extractor_summary(job_id: str) -> str:
+    """Return a human-readable Agent 1 completion label from the extractor output."""
+    try:
+        from shared.job_store import load as job_load, EXTRACTOR
+        ext = job_load(job_id, EXTRACTOR)
+        n = len(ext.get("accounts", []))
+        c = ext.get("extraction_confidence", 0)
+        return f"{n} accounts extracted · {c * 100:.1f}% confidence"
+    except Exception:
+        return "Accounts extracted"
+
+
+# ── Agent runners ──────────────────────────────────────────────────────────────
 
 def _run_agent2(job_id: str) -> None:
     """Run FinancialAnalyzer (Agent 2) and pause at analysis_complete."""
     from shared.job_store import load as job_load, EXTRACTOR
+    from shared.progress_store import build_progress, register as reg_cb, unregister as unreg_cb
+
     if job_id in _cancelled_jobs:
         return
+
+    agent1_step = _extractor_summary(job_id)
+    done1 = {1: agent1_step}
+
+    def _step(label: str) -> None:
+        if job_id not in _cancelled_jobs:
+            _save_status(job_id, "processing", progress=build_progress(
+                running_agent=2, current_step=label,
+                done_agents=[1], done_steps=done1,
+            ))
+
     try:
-        _save_status(job_id, "processing")
+        _step("Loading historical data")
         if job_id in _cancelled_jobs:
             return
+
         payload = job_load(job_id, EXTRACTOR)
+
         from agents.financial_analyzer.handler import lambda_handler as analyzer
         if job_id in _cancelled_jobs:
             return
-        analyzer(payload, None)  # saves financial_analyzer_response.json to S3 internally
+
+        reg_cb(job_id, _step)
+        try:
+            analyzer(payload, None)  # saves financial_analyzer_response.json to S3 internally
+        finally:
+            unreg_cb(job_id)
+
         if job_id not in _cancelled_jobs:
-            _save_status(job_id, "analysis_complete")
+            _save_status(job_id, "analysis_complete", progress=build_progress(
+                running_agent=None, current_step=None,
+                done_agents=[1, 2], done_steps={**done1, 2: "Analysis complete"},
+            ))
     except Exception as exc:
         import traceback
         traceback.print_exc()
@@ -126,28 +168,106 @@ def _run_agent2(job_id: str) -> None:
 def _run_agents3_4(job_id: str) -> None:
     """Run RiskScorer + ReportGenerator (Agents 3-4) through to completed."""
     from shared.job_store import load as job_load, save as job_save, FINANCIAL_ANALYZER, REPORT_GENERATOR
+    from shared.progress_store import build_progress
+
     if job_id in _cancelled_jobs:
         return
+
+    agent1_step = _extractor_summary(job_id)
+    done_12 = {1: agent1_step, 2: "Analysis complete"}
+
     try:
-        _save_status(job_id, "processing")
+        _save_status(job_id, "processing", progress=build_progress(
+            running_agent=3, current_step="Validating math & compliance",
+            done_agents=[1, 2], done_steps=done_12,
+        ))
         if job_id in _cancelled_jobs:
             return
+
         payload = job_load(job_id, FINANCIAL_ANALYZER)
         from agents.risk_scorer.handler import lambda_handler as scorer
         if job_id in _cancelled_jobs:
             return
         payload = scorer(payload, None)
+
+        _save_status(job_id, "processing", progress=build_progress(
+            running_agent=4, current_step="Generating report narrative",
+            done_agents=[1, 2, 3], done_steps={**done_12, 3: "Risk validated"},
+        ))
         from agents.report_generator.handler import lambda_handler as report_gen
         if job_id in _cancelled_jobs:
             return
         result = report_gen(payload, None)
         job_save(job_id, REPORT_GENERATOR, result)
+
         if job_id not in _cancelled_jobs:
-            _save_status(job_id, "completed")
+            _save_status(job_id, "completed", progress=build_progress(
+                running_agent=None, current_step=None,
+                done_agents=[1, 2, 3, 4],
+                done_steps={**done_12, 3: "Risk validated", 4: "Report generated"},
+            ))
     except Exception as exc:
         import traceback
         traceback.print_exc()
         _save_status(job_id, "failed", str(exc))
+
+
+# ── Job listing ────────────────────────────────────────────────────────────────
+
+@app.get("/jobs")
+async def list_jobs():
+    """List all jobs from S3 sorted newest first. Used by the GUI job picker."""
+    import boto3
+
+    s3 = boto3.client("s3")
+    bucket = os.environ.get("MAIN_BUCKET", "")
+    if not bucket:
+        return JSONResponse(content={"jobs": []})
+
+    from shared.job_store import job_key
+
+    status_keys: list[str] = []
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix="jobs/"):
+        for obj in page.get("Contents", []):
+            key: str = obj["Key"]
+            if key.endswith("/status.json"):
+                status_keys.append(key)
+
+    jobs: list[dict] = []
+    for key in status_keys:
+        # key shape: jobs/YYYY-MM-DD/job_id/status.json
+        parts = key.split("/")
+        if len(parts) != 4:
+            continue
+        date_folder, job_id = parts[1], parts[2]
+
+        try:
+            obj = s3.get_object(Bucket=bucket, Key=key)
+            status = json.loads(obj["Body"].read()).get("status", "unknown")
+        except Exception:
+            status = "unknown"
+
+        company_name: str | None = None
+        periods: list[str] = []
+        try:
+            ext_obj = s3.get_object(Bucket=bucket, Key=job_key(job_id, "extractor_response"))
+            ext = json.loads(ext_obj["Body"].read())
+            company_name = ext.get("company_name")
+            periods = ext.get("periods", [])
+        except Exception:
+            pass
+
+        jobs.append({
+            "job_id": job_id,
+            "date": date_folder,
+            "status": status,
+            "company_name": company_name,
+            "periods": periods,
+        })
+
+    jobs.sort(key=lambda j: j["date"], reverse=True)
+    return JSONResponse(content={"jobs": jobs})
 
 
 @app.delete("/analyses/{analysis_id}")

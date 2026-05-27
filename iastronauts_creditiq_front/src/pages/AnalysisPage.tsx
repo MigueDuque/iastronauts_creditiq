@@ -58,10 +58,34 @@ const RISK_COLOR: Record<string, string> = {
 
 type ProcessingPhase = 'agent1' | 'agent2' | 'final' | null
 
+interface JobSummary {
+  job_id: string
+  date: string
+  status: string
+  company_name: string | null
+  periods: string[]
+}
+
+interface AgentProgressEntry {
+  index: number
+  label: string
+  title: string
+  detail: string
+  state: 'done' | 'running' | 'pending' | 'failed'
+  step: string | null
+}
+
+interface PipelineProgress {
+  current_agent: number | null
+  current_step: string | null
+  agents: AgentProgressEntry[]
+}
+
 interface JobStatus {
   analysis_id?: string
   status: 'pending' | 'processing' | 'extraction_complete' | 'analysis_complete' | 'completed' | 'failed'
   error?: string | null
+  progress?: PipelineProgress
 }
 
 interface Account {
@@ -144,6 +168,11 @@ export default function AnalysisPage() {
   const [elapsed, setElapsed] = useState(0)
   const [catFilter, setCatFilter] = useState('all')
   const [showCancelDialog, setShowCancelDialog] = useState(false)
+  const [showJobPicker, setShowJobPicker] = useState(false)
+  const [previousJobs, setPreviousJobs] = useState<JobSummary[]>([])
+  const [loadingJobs, setLoadingJobs] = useState(false)
+  const [showRestartDialog, setShowRestartDialog] = useState(false)
+  const [restartIntent, setRestartIntent] = useState<'agent2' | 'final' | null>(null)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // ── localStorage sync ──────────────────────────────────────────────────
@@ -205,7 +234,7 @@ export default function AnalysisPage() {
           const rep = await fetch(`${API}/analyses/${jobId}/report`, { headers: HEADERS })
           if (rep.ok && alive) setReport(await rep.json())
         }
-        if (data.status === 'analysis_complete') {
+        if (data.status === 'analysis_complete' || data.status === 'completed') {
           const rep = await fetch(`${API}/analyses/${jobId}/report`, { headers: HEADERS })
           if (rep.ok && alive) setAnalyzerData(await rep.json())
         }
@@ -252,6 +281,45 @@ export default function AnalysisPage() {
     _doClean()
   }
 
+  async function openJobPicker() {
+    setShowJobPicker(true)
+    setLoadingJobs(true)
+    try {
+      const res = await fetch(`${API}/jobs`, { headers: HEADERS })
+      if (res.ok) {
+        const data = await res.json()
+        setPreviousJobs(data.jobs ?? [])
+      }
+    } catch (e) {
+      console.error('[jobs]', e)
+    } finally {
+      setLoadingJobs(false)
+    }
+  }
+
+  async function selectJob(job: JobSummary) {
+    setShowJobPicker(false)
+    ;[STORAGE_KEY, STATUS_KEY, REPORT_KEY, ANALYZER_KEY, PHASE_KEY].forEach(k => localStorage.removeItem(k))
+    setJobStatus(null); setReport(null); setAnalyzerData(null); setPhase(null); setElapsed(0)
+    localStorage.setItem(STORAGE_KEY, job.job_id)
+
+    // Eagerly restore existing S3 data so the UI renders immediately without a blank flash.
+    // /report returns load_first([financial_analyzer, extractor]) — the most complete available.
+    const s = job.status
+    if (s === 'extraction_complete' || s === 'analysis_complete' || s === 'completed') {
+      try {
+        const rep = await fetch(`${API}/analyses/${job.job_id}/report`, { headers: HEADERS })
+        if (rep.ok) {
+          const data = await rep.json()
+          if (s === 'extraction_complete') setReport(data)
+          else setAnalyzerData(data)
+        }
+      } catch { /* poll will retry */ }
+    }
+
+    setJobId(job.job_id)
+  }
+
   function _startPolling(onStatus: (d: JobStatus) => void) {
     let alive = true
     const poll = async () => {
@@ -272,11 +340,16 @@ export default function AnalysisPage() {
     return () => { alive = false }
   }
 
-  async function handleRunAgent2() {
+  function handleRunAgent2Click() {
     if (!jobId) return
-    setPhase('agent2')
-    setReport(null)       // clear accounts table — Agent 2 is now the focus
-    setElapsed(0)
+    // If Agent 2 results already exist, ask the user before overwriting
+    if (analyzerData) { setRestartIntent('agent2'); setShowRestartDialog(true); return }
+    _doRunAgent2()
+  }
+
+  async function _doRunAgent2() {
+    if (!jobId) return
+    setPhase('agent2'); setReport(null); setAnalyzerData(null); setElapsed(0)
     await fetch(`${API}/analyses/${jobId}/continue`, { method: 'POST', headers: HEADERS })
     _startPolling(async (data) => {
       if (data.status === 'analysis_complete') {
@@ -286,13 +359,31 @@ export default function AnalysisPage() {
     })
   }
 
-  async function handleRunFinal() {
+  function handleRunFinalClick() {
     if (!jobId) return
-    setPhase('final')
-    setAnalyzerData(null)  // clear analysis panel — Agents 3-4 are now the focus
-    setElapsed(0)
+    // For completed jobs, always confirm before re-running
+    if (jobStatus?.status === 'completed') { setRestartIntent('final'); setShowRestartDialog(true); return }
+    _doRunFinal()
+  }
+
+  async function _doRunFinal() {
+    if (!jobId) return
+    setPhase('final'); setAnalyzerData(null); setElapsed(0)
     await fetch(`${API}/analyses/${jobId}/continue`, { method: 'POST', headers: HEADERS })
     _startPolling(() => {})
+  }
+
+  async function confirmRestart() {
+    setShowRestartDialog(false)
+    if (restartIntent === 'agent2') await _doRunAgent2()
+    else if (restartIntent === 'final') await _doRunFinal()
+    setRestartIntent(null)
+  }
+
+  function skipToFinal() {
+    setShowRestartDialog(false)
+    setRestartIntent(null)
+    _doRunFinal()
   }
 
   // ── Derived state ──────────────────────────────────────────────────────
@@ -311,7 +402,9 @@ export default function AnalysisPage() {
     failed:               '#F85149',
   }[jobStatus?.status ?? 'pending']
 
-  const isProcessing = jobStatus?.status === 'processing' || jobStatus?.status === 'pending' || jobStatus == null
+  // Show spinner only when genuinely running — not while loading historical data into state
+  const isProcessing = jobStatus?.status === 'processing' || jobStatus?.status === 'pending' ||
+    (jobStatus == null && !report && !analyzerData)
 
   const currentSteps = phase === 'agent2' ? ANALYZER_STEPS : EXTRACTION_STEPS
   const processingLabel =
@@ -326,19 +419,26 @@ export default function AnalysisPage() {
     <div className="p-margin-mobile md:p-margin-desktop flex flex-col md:flex-row gap-gutter min-h-0">
 
       {/* Left: AI Reasoning Pipeline */}
-      <AiReasoningPipeline status={jobStatus?.status ?? null} jobId={jobId ?? undefined} />
+      <AiReasoningPipeline status={jobStatus?.status ?? null} jobId={jobId ?? undefined} progress={jobStatus?.progress} />
 
       {/* Right: Main canvas */}
       <div className="flex-1 flex flex-col gap-5 overflow-hidden min-w-0">
 
         {/* No active job */}
         {!jobId && (
-          <div className="bg-surface border border-border rounded flex flex-col items-center justify-center gap-4 py-20 text-center">
+          <div className="bg-surface border border-border rounded flex flex-col items-center justify-center gap-6 py-20 text-center">
             <span className="material-symbols-outlined text-outline text-[48px]">analytics</span>
             <div>
               <p className="text-body-md font-body-md text-on-surface mb-1">No active analysis</p>
               <p className="text-label-sm font-label-sm text-outline">Upload financial documents and start an analysis to see results here.</p>
             </div>
+            <button
+              onClick={openJobPicker}
+              className="flex items-center gap-2 px-4 py-2 rounded border border-border text-outline hover:text-on-surface hover:border-on-surface-variant transition-colors text-[12px] font-mono"
+            >
+              <span className="material-symbols-outlined text-[16px]">history</span>
+              Load previous job
+            </button>
           </div>
         )}
 
@@ -384,6 +484,14 @@ export default function AnalysisPage() {
                     color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#8d90a2'}
                   />
                 )}
+                <button
+                  onClick={openJobPicker}
+                  title="Load a different previous job"
+                  className="flex items-center gap-1 px-2.5 py-1 rounded border border-border text-outline hover:text-on-surface hover:border-on-surface-variant transition-colors text-[11px] font-mono"
+                >
+                  <span className="material-symbols-outlined text-[14px]">history</span>
+                  Jobs
+                </button>
                 <button
                   onClick={handleClearClick}
                   title="Clear current analysis and start a new one"
@@ -510,7 +618,7 @@ export default function AnalysisPage() {
                     </div>
                   </div>
                   <button
-                    onClick={handleRunAgent2}
+                    onClick={handleRunAgent2Click}
                     className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95 shrink-0"
                     style={{ background: '#D29922', color: '#0d1117' }}
                   >
@@ -531,8 +639,8 @@ export default function AnalysisPage() {
               </>
             )}
 
-            {/* ── AGENT 2 COMPLETE: analysis summary + continue to Agents 3-4 ── */}
-            {analyzerData && jobStatus?.status === 'analysis_complete' && (
+            {/* ── AGENT 2 COMPLETE: analysis summary (shown for analysis_complete AND completed) ── */}
+            {analyzerData && (jobStatus?.status === 'analysis_complete' || jobStatus?.status === 'completed') && (
               <>
                 {/* Key metrics grid */}
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -676,45 +784,77 @@ export default function AnalysisPage() {
                   </div>
                 )}
 
-                {/* Agent 2 continue banner */}
-                <div className="bg-surface border rounded p-5 flex flex-col md:flex-row items-center justify-between gap-4"
-                     style={{ borderColor: '#b7c4ff', background: 'rgba(183,196,255,0.06)' }}>
-                  <div className="flex items-start gap-3">
-                    <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: '#b7c4ff' }}>
-                      analytics
-                    </span>
-                    <div>
-                      <p className="text-body-md font-body-md font-semibold text-on-surface mb-0.5">
-                        Agent 2 complete — review financial analysis
-                      </p>
-                      <p className="text-label-sm font-label-sm text-outline">
-                        Analysis looks correct? Continue to risk scoring and report generation.
-                      </p>
+                {/* Agent 2 continue / completed banner */}
+                {jobStatus?.status === 'analysis_complete' && (
+                  <div className="bg-surface border rounded p-5 flex flex-col md:flex-row items-center justify-between gap-4"
+                       style={{ borderColor: '#b7c4ff', background: 'rgba(183,196,255,0.06)' }}>
+                    <div className="flex items-start gap-3">
+                      <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: '#b7c4ff' }}>analytics</span>
+                      <div>
+                        <p className="text-body-md font-body-md font-semibold text-on-surface mb-0.5">
+                          Agent 2 complete — review financial analysis
+                        </p>
+                        <p className="text-label-sm font-label-sm text-outline">
+                          Analysis looks correct? Continue to risk scoring and report generation.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 shrink-0">
+                      <button
+                        onClick={handleRunAgent2Click}
+                        className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors"
+                      >
+                        <span className="material-symbols-outlined text-[13px]">replay</span>
+                        Re-run Agent 2
+                      </button>
+                      <button
+                        onClick={handleRunFinalClick}
+                        className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95"
+                        style={{ background: '#b7c4ff', color: '#0d1117' }}
+                      >
+                        <span className="material-symbols-outlined text-[16px]">play_arrow</span>
+                        Run Agents 3–4
+                      </button>
                     </div>
                   </div>
-                  <button
-                    onClick={handleRunFinal}
-                    className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95 shrink-0"
-                    style={{ background: '#b7c4ff', color: '#0d1117' }}
-                  >
-                    <span className="material-symbols-outlined text-[16px]">play_arrow</span>
-                    Run Agents 3–4
-                  </button>
-                </div>
+                )}
+                {jobStatus?.status === 'completed' && (
+                  <div className="bg-surface border rounded p-5 flex flex-col md:flex-row items-center justify-between gap-4"
+                       style={{ borderColor: '#3FB950', background: 'rgba(63,185,80,0.04)' }}>
+                    <div className="flex items-center gap-3">
+                      <span className="material-symbols-outlined text-[22px]" style={{ color: '#3FB950' }}>check_circle</span>
+                      <div>
+                        <p className="text-body-md font-body-md font-semibold text-on-surface mb-0.5">Pipeline complete</p>
+                        <p className="text-label-sm font-label-sm text-outline">All agents finished. Report saved to S3.</p>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 shrink-0">
+                      <button
+                        onClick={handleRunAgent2Click}
+                        className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors"
+                      >
+                        <span className="material-symbols-outlined text-[13px]">replay</span>
+                        Re-run Agent 2
+                      </button>
+                      <button
+                        onClick={handleRunFinalClick}
+                        className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors"
+                      >
+                        <span className="material-symbols-outlined text-[13px]">replay</span>
+                        Re-run Agents 3–4
+                      </button>
+                    </div>
+                  </div>
+                )}
               </>
             )}
 
-            {/* ── COMPLETED ── */}
-            {jobStatus?.status === 'completed' && (
-              <div className="bg-surface border border-border rounded p-8 flex flex-col items-center gap-4 text-center"
+            {/* ── COMPLETED with no analyzer data (edge case: Agent 2 never ran) ── */}
+            {jobStatus?.status === 'completed' && !analyzerData && (
+              <div className="bg-surface border rounded p-6 flex items-center gap-3"
                    style={{ borderColor: '#3FB950', background: 'rgba(63,185,80,0.04)' }}>
-                <span className="material-symbols-outlined text-[40px]" style={{ color: '#3FB950' }}>check_circle</span>
-                <div>
-                  <p className="text-body-md font-body-md font-semibold text-on-surface mb-1">Pipeline complete</p>
-                  <p className="text-label-sm font-label-sm text-outline">
-                    All agents finished. Report saved to S3.
-                  </p>
-                </div>
+                <span className="material-symbols-outlined text-[22px]" style={{ color: '#3FB950' }}>check_circle</span>
+                <p className="text-body-sm font-body-sm text-on-surface">Pipeline complete — report saved to S3.</p>
               </div>
             )}
 
@@ -725,6 +865,123 @@ export default function AnalysisPage() {
       <style>{`
         @keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
       `}</style>
+
+      {/* Restart confirmation dialog */}
+      {showRestartDialog && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,0.65)' }}
+          onClick={() => setShowRestartDialog(false)}
+        >
+          <div
+            className="bg-surface border border-border rounded-lg p-6 max-w-sm w-full mx-4 shadow-2xl"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3 mb-5">
+              <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: '#D29922' }}>replay</span>
+              <div>
+                <p className="text-body-md font-body-md font-semibold text-on-surface mb-1">
+                  {restartIntent === 'agent2' ? 'Agent 2 already has results' : 'Pipeline already completed'}
+                </p>
+                <p className="text-label-sm font-label-sm text-outline">
+                  {restartIntent === 'agent2'
+                    ? 'Re-running Agent 2 will overwrite the existing financial analysis.'
+                    : 'Re-running Agents 3–4 will overwrite the existing report.'}
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-col gap-2">
+              {restartIntent === 'agent2' && (
+                <button
+                  onClick={skipToFinal}
+                  className="w-full px-4 py-2.5 rounded border font-mono text-[12px] text-left flex items-center gap-2 hover:bg-surface-container transition-colors"
+                  style={{ borderColor: '#b7c4ff', color: '#b7c4ff' }}
+                >
+                  <span className="material-symbols-outlined text-[15px]">skip_next</span>
+                  Skip Agent 2 — continue to Agents 3–4
+                </button>
+              )}
+              <button
+                onClick={confirmRestart}
+                className="w-full px-4 py-2.5 rounded border border-border text-outline font-mono text-[12px] text-left flex items-center gap-2 hover:bg-surface-container transition-colors"
+              >
+                <span className="material-symbols-outlined text-[15px]">replay</span>
+                {restartIntent === 'agent2' ? 'Re-run Agent 2 (overwrite analysis)' : 'Re-run Agents 3–4 (overwrite report)'}
+              </button>
+              <button
+                onClick={() => setShowRestartDialog(false)}
+                className="w-full px-4 py-2 rounded text-outline font-mono text-[11px] hover:text-on-surface transition-colors text-center"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Job picker modal */}
+      {showJobPicker && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,0.65)' }}
+          onClick={() => setShowJobPicker(false)}
+        >
+          <div
+            className="bg-surface border border-border rounded-lg p-6 max-w-lg w-full mx-4 shadow-2xl flex flex-col gap-4"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-[18px] text-outline">history</span>
+                <span className="text-body-md font-body-md font-semibold text-on-surface">Previous Jobs</span>
+              </div>
+              <button
+                onClick={() => setShowJobPicker(false)}
+                className="text-outline hover:text-on-surface transition-colors"
+              >
+                <span className="material-symbols-outlined text-[18px]">close</span>
+              </button>
+            </div>
+
+            {loadingJobs && (
+              <div className="flex items-center justify-center py-8 gap-3 text-outline">
+                <span className="material-symbols-outlined text-[18px] animate-spin">autorenew</span>
+                <span className="text-label-sm font-label-sm font-mono">Fetching from S3…</span>
+              </div>
+            )}
+
+            {!loadingJobs && previousJobs.length === 0 && (
+              <p className="text-label-sm font-label-sm text-outline text-center py-8">
+                No previous jobs found in S3.
+              </p>
+            )}
+
+            {!loadingJobs && previousJobs.length > 0 && (
+              <div className="flex flex-col gap-2 max-h-80 overflow-y-auto pr-1">
+                {previousJobs.map(job => (
+                  <button
+                    key={job.job_id}
+                    onClick={() => selectJob(job)}
+                    className="w-full text-left bg-surface-container-low hover:bg-surface-container rounded border border-border hover:border-on-surface-variant transition-all p-3 flex flex-col gap-1"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-body-sm font-body-sm font-semibold text-on-surface truncate">
+                        {job.company_name ?? job.job_id}
+                      </span>
+                      <StatusBadge status={job.status} />
+                    </div>
+                    <div className="flex items-center gap-3 text-[10px] font-mono text-outline">
+                      <span>{job.date}</span>
+                      {job.periods.length > 0 && <span>· {job.periods.join(' → ')}</span>}
+                      <span className="truncate opacity-60">{job.job_id}</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Cancel confirmation dialog */}
       {showCancelDialog && (
@@ -774,6 +1031,23 @@ export default function AnalysisPage() {
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────
+
+function StatusBadge({ status }: { status: string }) {
+  const color =
+    status === 'completed'          ? '#3FB950' :
+    status === 'analysis_complete'  ? '#b7c4ff' :
+    status === 'extraction_complete'? '#D29922' :
+    status === 'failed'             ? '#F85149' :
+    status === 'cancelled'          ? '#F85149' : '#8d90a2'
+  return (
+    <span
+      className="text-[9px] font-mono px-2 py-0.5 rounded shrink-0"
+      style={{ color, background: `${color}18`, border: `1px solid ${color}40` }}
+    >
+      {status.replace(/_/g, ' ').toUpperCase()}
+    </span>
+  )
+}
 
 function Kpi({ label, value, color }: { label: string; value: string; color: string }) {
   return (

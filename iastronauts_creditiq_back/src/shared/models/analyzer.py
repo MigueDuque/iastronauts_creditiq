@@ -37,6 +37,13 @@ class AccountAnalysis(BaseModel):
     # ── Improvement #2: Causality Chain ─────────────────────────────────────
     causality_chain: list[str] = []           # causal effects this account participates in
 
+    # ── Related-party detection (NIC 24) ────────────────────────────────────
+    is_related_party: bool = False
+    related_party_counterpart: str | None = None
+
+    # ── Dashboard investment signal (asset accounts only) ────────────────────
+    investment_signal: str | None = None
+
 
 class AnalyzerOutput(BaseModel):
     """

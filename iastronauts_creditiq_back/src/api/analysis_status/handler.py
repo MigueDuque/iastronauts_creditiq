@@ -39,11 +39,14 @@ def _s3_status_fallback(analysis_id: str) -> dict:
     """Read status from S3 — written by the orchestrator background thread in local dev."""
     try:
         data = job_load(analysis_id, STATUS)
-        return _response(200, {
+        payload: dict = {
             "analysis_id": analysis_id,
             "status": data.get("status", "pending"),
             "error": data.get("error"),
-        })
+        }
+        if "progress" in data:
+            payload["progress"] = data["progress"]
+        return _response(200, payload)
     except ClientError:
         return _response(200, {"analysis_id": analysis_id, "status": "pending"})
 
@@ -64,16 +67,23 @@ def lambda_handler(event: dict, context) -> dict:
 
         # When RUNNING, check S3 for a pause status written by PauseFunction.
         # This distinguishes "agent actively running" from "paused waiting for analyst".
+        s3_progress: dict | None = None
         if sfn_status == "RUNNING":
             try:
                 s3_data = job_load(analysis_id, STATUS)
                 s3_status = s3_data.get("status", "processing")
                 # Only trust pause statuses from S3 — not "processing" written by /continue
                 status = s3_status if s3_status in ("extraction_complete", "analysis_complete") else "processing"
+                s3_progress = s3_data.get("progress")
             except ClientError:
                 status = "processing"
         else:
             status = _SFN_TO_STATUS.get(sfn_status, "unknown")
+            try:
+                s3_data = job_load(analysis_id, STATUS)
+                s3_progress = s3_data.get("progress")
+            except ClientError:
+                pass
 
         payload = {
             "analysis_id": analysis_id,
@@ -81,6 +91,8 @@ def lambda_handler(event: dict, context) -> dict:
             "started_at": execution.get("startDate"),
             "stopped_at": execution.get("stopDate"),
         }
+        if s3_progress:
+            payload["progress"] = s3_progress
 
         if status == "failed":
             payload["error"] = "El pipeline falló. Revisa los logs de Step Functions para detalles."

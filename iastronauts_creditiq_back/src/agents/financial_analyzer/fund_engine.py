@@ -56,13 +56,16 @@ _FUND_SIGNALS = (
     "total activo neto", "fondo de inversión",
 )
 
-_OPENING_NAV_KW  = ("activos netos iniciales", "patrimonio inicial", "saldo inicial nav")
+_OPENING_NAV_KW   = ("activos netos iniciales", "patrimonio inicial", "saldo inicial nav")
+_CLOSING_NAV_KW   = ("total patrimonio", "total activo neto", "total activos netos",
+                      "activo neto de inversionistas")
 _CONTRIBUTIONS_KW = ("aportes de inversionistas", "aporte inversionistas", "suscripciones")
 _REDEMPTIONS_KW  = ("retiros de inversionistas", "retiro inversionistas", "redenciones")
 _PERIOD_RETURN_KW = ("ganancia del período", "utilidad del período", "resultado del período",
                      "pérdida del período", "resultado neto del período")
 
-_EQUITY_ASSET_KW    = ("acciones", "renta variable", "equity", "acción")
+_EQUITY_ASSET_KW    = ("acciones", "renta variable", "equity", "acción",
+                        "inversión en ")   # "inversión en [company]" → equity by default
 _FIXED_INCOME_KW    = ("bono", "tes", "cdt", "título de deuda", "renta fija",
                        "título de renta", "deuda pública", "deuda privada")
 _CASH_KW            = ("efectivo", "banco ", "caja", "bancos", "banco de", "bancolombia",
@@ -205,9 +208,10 @@ def _detect_fund_type(
             f"El {cash_pct + inv_fund_pct:.0f}% de los activos está en efectivo e instrumentos "
             f"de corto plazo → fondo de mercado monetario / liquidez."
         )
-    if equities_pct > 60:
+    if equities_pct >= 50:
         return FundType.EQUITY, (
-            f"El {equities_pct:.0f}% de los activos son acciones listadas → fondo de renta variable."
+            f"El {equities_pct:.0f}% de los activos son acciones e inversiones en renta variable "
+            f"→ fondo de renta variable."
         )
     if fi_pct > 60:
         return FundType.FIXED_INCOME, (
@@ -231,14 +235,17 @@ def _detect_fund_type(
 
 def _compute_nav_reconciliation(
     accounts: list[ExtractedAccount],
-    closing_nav: float,
+    fallback_closing_nav: float,
 ) -> NavReconciliation | None:
     opening_nav = contributions = redemptions = period_return = None
+    closing_nav = fallback_closing_nav
 
     for acc in accounts:
         name = acc.normalized_account_name.lower()
         val = acc.current_value
-        if _hit(name, _OPENING_NAV_KW):
+        if _hit(name, _CLOSING_NAV_KW):
+            closing_nav = val  # prefer explicit total over calculated sum
+        elif _hit(name, _OPENING_NAV_KW):
             opening_nav = val
         elif _hit(name, _CONTRIBUTIONS_KW):
             contributions = val
@@ -496,9 +503,10 @@ def analyze_fund(
     # Fund type
     fund_type, fund_type_rationale = _detect_fund_type(accounts, asset_breakdown_cop_mm)
 
-    # NAV reconciliation — closing NAV is the total equity/patrimonio
-    closing_nav = totals.total_equity if totals.total_equity > 0 else totals.total_assets
-    nav = _compute_nav_reconciliation(accounts, closing_nav)
+    # NAV reconciliation — prefer explicit "Total patrimonio" from accounts list;
+    # fall back to totals.total_equity only if no named total account was found.
+    fallback_nav = totals.total_equity if totals.total_equity > 0 else totals.total_assets
+    nav = _compute_nav_reconciliation(accounts, fallback_nav)
 
     # Derived metrics
     cash_cop_mm = asset_breakdown_cop_mm.get(AssetClass.CASH.value, 0.0)

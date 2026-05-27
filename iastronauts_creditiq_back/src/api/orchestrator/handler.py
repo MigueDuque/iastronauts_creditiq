@@ -43,25 +43,40 @@ def _report_exists(tenant_id: str, company_name: str, reporting_period: str) -> 
         return False
 
 
-def _save_job_status(job_id: str, status: str, error: str | None = None) -> None:
+def _save_job_status(job_id: str, status: str, error: str | None = None, progress: dict | None = None) -> None:
     body: dict = {"status": status}
     if error:
         body["error"] = error
+    if progress is not None:
+        body["progress"] = progress
     job_save(job_id, STATUS, body)
 
 
 def _run_extractor_bg(event: dict) -> None:
     """Local-dev only: runs the ExtractorFunction in-process and saves output to S3."""
+    from shared.progress_store import build_progress
     job_id = event.get("job_id", "unknown")
     try:
         from agents.document_extractor.handler import lambda_handler as extractor_handler  # noqa: PLC0415
         result = extractor_handler(event, None)
-        # extractor handler already calls job_save internally; this is a no-op duplicate guard
-        _save_job_status(job_id, "extraction_complete")
+        # extractor handler already calls job_save internally; build completion summary
+        n_accounts = len((result or {}).get("accounts", []))
+        confidence = (result or {}).get("extraction_confidence", 0)
+        agent1_step = (
+            f"{n_accounts} accounts extracted · {confidence * 100:.1f}% confidence"
+            if n_accounts else "Accounts extracted"
+        )
+        _save_job_status(job_id, "extraction_complete", progress=build_progress(
+            running_agent=None, current_step=None,
+            done_agents=[1], done_steps={1: agent1_step},
+        ))
         logger.info("local_dev_extractor | done job_id=%s", job_id)
     except Exception as exc:
         logger.error("local_dev_extractor | failed job_id=%s error=%s", job_id, exc, exc_info=True)
-        _save_job_status(job_id, "failed", error=str(exc))
+        _save_job_status(job_id, "failed", error=str(exc), progress=build_progress(
+            running_agent=None, current_step=None,
+            done_agents=[], failed_agent=1,
+        ))
 
 
 def lambda_handler(event: dict, context) -> dict:
@@ -211,11 +226,15 @@ def lambda_handler(event: dict, context) -> dict:
             # directly in a background thread. The status/report handlers fall back to
             # S3 (jobs/{id}/status.json and extractor_output.json) when the execution
             # doesn't exist in SFN, so no Terminal 3 (sam local start-lambda) is needed.
+            from shared.progress_store import build_progress
             logger.warning(
                 "orchestrator | LOCAL_DEV_BYPASS_SFN active, skipping SFN. job_id=%s",
                 orchestrator_output.job_id,
             )
-            _save_job_status(orchestrator_output.job_id, "processing")
+            _save_job_status(orchestrator_output.job_id, "processing", progress=build_progress(
+                running_agent=1, current_step="Processing documents",
+                done_agents=[],
+            ))
             thread = threading.Thread(
                 target=_run_extractor_bg,
                 args=(orchestrator_output.model_dump(mode="json"),),
@@ -232,11 +251,14 @@ def lambda_handler(event: dict, context) -> dict:
             except ClientError as e:
                 code = e.response["Error"]["Code"]
                 if code in ("StateMachineDoesNotExist", "AccessDeniedException"):
+                    from shared.progress_store import build_progress
                     logger.warning(
                         "orchestrator | SFN not available (%s), running extractor locally. job_id=%s",
                         code, orchestrator_output.job_id,
                     )
-                    _save_job_status(orchestrator_output.job_id, "processing")
+                    _save_job_status(orchestrator_output.job_id, "processing", progress=build_progress(
+                        running_agent=1, current_step="Processing documents", done_agents=[],
+                    ))
                     thread = threading.Thread(
                         target=_run_extractor_bg,
                         args=(orchestrator_output.model_dump(mode="json"),),

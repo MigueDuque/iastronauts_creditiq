@@ -183,7 +183,17 @@ def calculate_financial_totals(accounts: List[ExtractedAccount]) -> FinancialTot
                 t.payables += val
 
         elif cat == "equity":
-            t.total_equity += val
+            # Exclude flow/statement-of-changes accounts that double-count equity.
+            # These are already reflected in closing balance-sheet equity accounts.
+            if not _matches(name, (
+                "aportes de inversionistas", "aporte inversionistas",
+                "retiros de inversionistas", "retiro inversionistas",
+                "patrimonio neto inicial", "patrimonio neto final",
+                "saldo inicial", "suscripciones", "redenciones",
+                "utilidad del período", "ganancia del período",
+                "pérdida del período", "resultado del período",
+            )):
+                t.total_equity += val
 
         elif cat == "revenue":
             t.total_revenue += val

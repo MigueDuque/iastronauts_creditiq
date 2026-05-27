@@ -84,6 +84,11 @@ class AccountLLMInsight:
     # Improvement #8: confidence signals from LLM (validated + clamped deterministically)
     llm_confidence_hint: float = 0.8       # LLM's self-reported confidence (0.0–1.0)
     llm_evidence_sources: list[str] = field(default_factory=list)
+    # Related-party detection (NIC 24)
+    is_related_party: bool = False
+    related_party_counterpart: str | None = None
+    # Dashboard signal for asset accounts
+    investment_signal: str | None = None
 
 
 @dataclass
@@ -282,7 +287,14 @@ REGLAS DE RAZONAMIENTO RESTRINGIDO (OBLIGATORIO)
      CONCENTRATED (alta concentración en pocas cuentas o emisores)
    Usa los nuevos valores cuando el análisis los justifique; de lo contrario usa los clásicos.
 
-5. CONFIDENCE HONESTA.
+5. POSSIBLE_CAUSES: CAUSAS ESPECÍFICAS, NO REPETICIONES.
+   Para cada cuenta, genera 2-3 causas CONCRETAS usando el contexto del fondo/empresa.
+   PROHIBIDO: repetir la variación porcentual como causa (ej. "Variación de -40.7%...").
+   PROHIBIDO: frases genéricas como "cambios en el mercado" sin datos específicos.
+   OBLIGATORIO: referenciar datos del prompt (flujos de inversionistas, posiciones
+   nuevas/cerradas, cadenas causales, ratios, eventos corporativos).
+
+6. CONFIDENCE HONESTA.
    En llm_confidence_hint: usa 0.9–0.99 solo si tienes ≥3 evidencias concretas.
    Usa 0.5–0.7 para cuentas nuevas o con variaciones no confiables.
 ══════════════════════════════════════════════════════
@@ -345,6 +357,9 @@ def _parse_response(raw: dict) -> LLMAnalysisResult:
         llm_conf = float(item.get("llm_confidence_hint", 0.8))
         llm_conf = max(0.0, min(1.0, llm_conf))
 
+        counterpart_raw = item.get("related_party_counterpart")
+        investment_signal_raw = item.get("investment_signal")
+
         result.account_insights[account_id] = AccountLLMInsight(
             account_id=account_id,
             risk_level=str(item.get("risk_level", "LOW")).upper(),
@@ -355,6 +370,9 @@ def _parse_response(raw: dict) -> LLMAnalysisResult:
             anomaly_override=bool(item.get("anomaly_override", False)),
             llm_confidence_hint=llm_conf,
             llm_evidence_sources=list(item.get("evidence_sources", [])),
+            is_related_party=bool(item.get("is_related_party", False)),
+            related_party_counterpart=str(counterpart_raw) if counterpart_raw else None,
+            investment_signal=str(investment_signal_raw) if investment_signal_raw else None,
         )
 
     return result
