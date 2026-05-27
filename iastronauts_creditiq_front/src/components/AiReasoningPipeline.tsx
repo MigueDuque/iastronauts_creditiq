@@ -62,13 +62,13 @@ function derivedStep(index: number, status: Status): string | null {
 
 export default function AiReasoningPipeline({ status, jobId, progress, phase }: Props) {
   const statusLabel =
-    status === 'completed'           ? { text: 'COMPLETED', color: '#3FB950' } :
-    status === 'failed'              ? { text: 'FAILED',    color: '#F85149' } :
-    status === 'analysis_complete'   ? { text: 'ANALYZED',  color: '#D29922' } :
-    status === 'extraction_complete' ? { text: 'REVIEW',    color: '#D29922' } :
-    status === 'processing'          ? { text: 'RUNNING',   color: '#b7c4ff' } :
-    status === 'pending'             ? { text: 'QUEUED',    color: '#D29922' } :
-                                       { text: 'IDLE',      color: '#8d90a2' }
+    status === 'completed'           ? { text: 'COMPLETED', cls: 'text-success border-success bg-surface' } :
+    status === 'failed'              ? { text: 'FAILED',    cls: 'text-risk-high border-risk-high bg-surface' } :
+    status === 'analysis_complete'   ? { text: 'ANALYZED',  cls: 'text-risk-medium border-risk-medium bg-surface' } :
+    status === 'extraction_complete' ? { text: 'REVIEW',    cls: 'text-risk-medium border-risk-medium bg-surface' } :
+    status === 'processing'          ? { text: 'RUNNING',   cls: 'text-primary border-primary bg-surface' } :
+    status === 'pending'             ? { text: 'QUEUED',    cls: 'text-risk-medium border-risk-medium bg-surface' } :
+                                       { text: 'IDLE',      cls: 'text-outline border-outline bg-surface' }
 
   // Build the steps array — prefer real progress data, fall back to derived
   const steps: { label: string; title: string; detail: string; state: 'done' | 'active' | 'pending' | 'failed'; step: string | null }[] =
@@ -95,14 +95,7 @@ export default function AiReasoningPipeline({ status, jobId, progress, phase }: 
           <h2 className="text-label-md font-label-md text-primary uppercase tracking-wider">AI Pipeline</h2>
           <div className="flex items-center gap-2">
             {status && status !== null && (
-              <span
-                className="text-[9px] font-mono px-2 py-0.5 rounded border"
-                style={{
-                  color: statusLabel.color,
-                  borderColor: `${statusLabel.color}40`,
-                  background: `${statusLabel.color}12`,
-                }}
-              >
+              <span className={`text-[9px] font-mono px-2 py-0.5 rounded border ${statusLabel.cls}`}>
                 {statusLabel.text}
               </span>
             )}

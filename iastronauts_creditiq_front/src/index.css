@@ -6,72 +6,66 @@ html {
 
 /* ── Design Tokens ──────────────────────────────────────────────────── */
 @theme {
-  /* Surfaces */
-  --color-background: #0A0C10;
-  --color-surface: #161B22;
-  --color-surface-dim: #11131c;
-  --color-surface-bright: #373943;
-  --color-surface-container-lowest: #0c0e16;
-  --color-surface-container-low: #191b24;
-  --color-surface-container: #1d1f28;
-  --color-surface-container-high: #282933;
-  --color-surface-container-highest: #33343e;
-  --color-surface-variant: #33343e;
-  --color-surface-tint: #b7c4ff;
+  /* Semantic colors — sourced from creditiq_theme.json */
+  --color-background: #050816; /* background */
+  --color-surface: #0B1023; /* surface */
+  --color-surface-dim: #0b0f1a;
+  --color-surface-bright: #141728;
+  --color-surface-container-lowest: #06070a;
+  --color-surface-container-low: #0b111a;
+  --color-surface-container: #0f1420;
+  --color-surface-container-high: #171a25;
+  --color-surface-container-highest: #20232e;
+  --color-surface-variant: #202533;
+  --color-surface-tint: #2F80FF;
 
   /* On-surface */
-  --color-on-surface: #e2e1ee;
-  --color-on-surface-variant: #c3c5d8;
-  --color-on-background: #e2e1ee;
-  --color-inverse-surface: #e2e1ee;
-  --color-inverse-on-surface: #2e303a;
+  --color-on-surface: #F5F7FA; /* text_primary */
+  --color-on-surface-variant: #94A3B8; /* text_secondary */
+  --color-on-background: #F5F7FA;
+  --color-inverse-surface: #F5F7FA;
+  --color-inverse-on-surface: #0B1023;
 
-  /* Outline */
-  --color-outline: #8d90a2;
-  --color-outline-variant: #434656;
-  --color-border: #30363D;
+  /* Outline / borders */
+  --color-outline: rgba(255,255,255,0.12);
+  --color-outline-variant: rgba(255,255,255,0.06);
+  --color-border: rgba(255,255,255,0.08);
+  --color-surface-deep: #0A0C10;
+  --color-surface-card: #161B22;
+  --color-surface-soft: #1d1f28;
+  --color-surface-muted: #282933;
+  --color-brand-accent: #b7c4ff;
+  --color-on-surface-muted-strong: #c3c5d8;
+  --color-success-low: #3FB950;
+  --color-warning-soft: #D29922;
+  --color-danger-soft: #F85149;
+  --color-button-text: #f7f6ff;
 
-  /* Primary */
-  --color-primary: #b7c4ff;
-  --color-on-primary: #002682;
-  --color-primary-container: #2e62ff;
-  --color-on-primary-container: #f7f6ff;
-  --color-inverse-primary: #024cec;
-  --color-primary-fixed: #dce1ff;
-  --color-primary-fixed-dim: #b7c4ff;
-  --color-on-primary-fixed: #001552;
-  --color-on-primary-fixed-variant: #0039b5;
+  /* Primary / accents */
+  --color-primary: #2F80FF; /* electric_blue */
+  --color-on-primary: #050816;
+  --color-primary-container: linear-gradient(90deg,#2F80FF,#56F2C1);
+  --color-on-primary-container: #050816;
+  --color-inverse-primary: #00203b;
+  --color-primary-fixed: #2F80FF;
+  --color-primary-fixed-dim: #56CCF2;
+  --color-on-primary-fixed: #07122a;
 
   /* Secondary */
-  --color-secondary: #a6e6ff;
-  --color-on-secondary: #003543;
-  --color-secondary-container: #14d1ff;
-  --color-on-secondary-container: #00566b;
-  --color-secondary-fixed: #b7eaff;
-  --color-secondary-fixed-dim: #4cd6ff;
-  --color-on-secondary-fixed: #001f28;
-  --color-on-secondary-fixed-variant: #004e60;
+  --color-secondary: #56CCF2; /* cyan_glow */
+  --color-on-secondary: #050816;
+  --color-secondary-container: #56F2C1;
+  --color-on-secondary-container: #050816;
 
-  /* Tertiary */
-  --color-tertiary: #ffb599;
-  --color-on-tertiary: #5a1c00;
-  --color-tertiary-container: #c64700;
-  --color-on-tertiary-container: #fff5f2;
-  --color-tertiary-fixed: #ffdbce;
-  --color-tertiary-fixed-dim: #ffb599;
-  --color-on-tertiary-fixed: #370e00;
-  --color-on-tertiary-fixed-variant: #7f2b00;
-
-  /* Error */
-  --color-error: #ffb4ab;
-  --color-on-error: #690005;
-  --color-error-container: #93000a;
-  --color-on-error-container: #ffdad6;
+  /* Semantic intent colors */
+  --color-success: #56F2C1; /* mint_ai_green */
+  --color-warning: #FFB020; /* warning_orange */
+  --color-danger: #FF4D6D; /* critical_red */
 
   /* Risk */
-  --color-risk-high: #F85149;
-  --color-risk-medium: #D29922;
-  --color-risk-low: #3FB950;
+  --color-risk-high: #FF4D6D;
+  --color-risk-medium: #FFB020;
+  --color-risk-low: #56F2C1;
 
   /* Data */
   --color-data-indigo: #6366F1;
@@ -165,7 +159,7 @@ html {
 }
 
 .ai-glow {
-  box-shadow: 0 0 20px rgba(183, 196, 255, 0.1);
+  box-shadow: 0 0 24px rgba(47,128,255,0.12);
 }
 
 .ai-gradient-border {
@@ -177,7 +171,7 @@ html {
   inset: 0;
   border-radius: inherit;
   padding: 1px;
-  background: linear-gradient(45deg, #b7c4ff, #a6e6ff);
+  background: linear-gradient(45deg, #2F80FF, #56F2C1);
   -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
@@ -188,8 +182,8 @@ html {
   display: inline-block;
   width: 60px;
   height: 20px;
-  background: linear-gradient(to right, transparent, rgba(46, 98, 255, 0.1));
-  border-bottom: 2px solid #2e62ff;
+  background: linear-gradient(to right, transparent, rgba(47,128,255,0.08));
+  border-bottom: 2px solid #2F80FF;
   position: relative;
 }
 .sparkline-positive { border-color: #3FB950; }
@@ -197,16 +191,42 @@ html {
 
 /* ── Custom scrollbar ───────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: #0A0C10; }
-::-webkit-scrollbar-thumb { background: #30363D; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #434656; }
+::-webkit-scrollbar-track { background: var(--color-background); }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.10); }
 
 /* ── Base ───────────────────────────────────────────────────────────── */
 * { box-sizing: border-box; }
 body {
-  background-color: #0A0C10;
-  color: #e2e1ee;
+  background-color: var(--color-background);
+  color: var(--color-on-surface);
   font-family: 'Inter', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
+
+/* ── Simple utility mappings for semantic tokens (fallbacks) ─────────── */
+.text-primary { color: var(--color-primary) !important; }
+.text-on-surface { color: var(--color-on-surface) !important; }
+.text-on-surface-variant { color: var(--color-on-surface-variant) !important; }
+.text-outline { color: var(--color-outline) !important; }
+.text-outline-variant { color: var(--color-outline-variant) !important; }
+.text-risk-low { color: var(--color-risk-low) !important; }
+.text-risk-medium { color: var(--color-risk-medium) !important; }
+.text-risk-high { color: var(--color-risk-high) !important; }
+.text-success { color: var(--color-success) !important; }
+.bg-surface { background-color: var(--color-surface) !important; }
+.bg-surface-container { background-color: var(--color-surface-container) !important; }
+.bg-primary { background-color: var(--color-primary) !important; }
+.bg-primary-container { background: var(--color-primary-container) !important; }
+.border-primary { border-color: var(--color-primary) !important; }
+.border-border { border-color: var(--color-border) !important; }
+.bg-primary\/10 { background-color: rgba(47,128,255,0.08) !important; }
+.border-primary\/20 { border-color: rgba(47,128,255,0.12) !important; }
+
+.border-success { border-color: var(--color-success) !important; }
+.border-risk-low { border-color: var(--color-risk-low) !important; }
+.border-risk-medium { border-color: var(--color-risk-medium) !important; }
+.border-risk-high { border-color: var(--color-risk-high) !important; }
+.border-outline { border-color: var(--color-outline) !important; }
+

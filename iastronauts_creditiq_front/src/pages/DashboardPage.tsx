@@ -84,8 +84,8 @@ export default function DashboardPage() {
 
           <div className="relative w-48 h-48 mt-8 flex items-center justify-center">
             <svg className="w-full h-full -rotate-90" viewBox="0 0 100 100">
-              <circle cx="50" cy="50" fill="none" r="45" stroke="#282933" strokeWidth="8" />
-              <circle cx="50" cy="50" fill="none" r="45" stroke="#D29922" strokeDasharray="283" strokeDashoffset="100" strokeWidth="8" className="transition-all duration-1000 ease-out" />
+              <circle cx="50" cy="50" fill="none" r="45" stroke="var(--color-surface-muted)" strokeWidth="8" />
+              <circle cx="50" cy="50" fill="none" r="45" stroke="var(--color-warning-soft)" strokeDasharray="283" strokeDashoffset="100" strokeWidth="8" className="transition-all duration-1000 ease-out" />
             </svg>
             <div className="absolute flex flex-col items-center justify-center text-center">
               <span className="text-display-lg font-display-lg text-risk-medium leading-none">64</span>
