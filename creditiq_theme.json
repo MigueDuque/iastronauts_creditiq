@@ -1,0 +1,47 @@
+{
+  "creditiq_theme": {
+    "name": "CreditIQ Executive Intelligence Theme",
+    "version": "1.0.0",
+    "primary_palette": {
+      "deep_space_navy": "#050816",
+      "midnight_blue": "#0B1023",
+      "electric_blue": "#2F80FF",
+      "cyan_glow": "#56CCF2",
+      "mint_ai_green": "#56F2C1",
+      "soft_white": "#F5F7FA",
+      "muted_gray": "#94A3B8",
+      "warning_orange": "#FFB020",
+      "critical_red": "#FF4D6D"
+    },
+    "gradients": {
+      "ai_intelligence_glow": {
+        "from": "#2F80FF",
+        "to": "#56F2C1"
+      },
+      "executive_dark": {
+        "from": "#050816",
+        "to": "#0B1023"
+      },
+      "risk_warning": {
+        "from": "#FF6B00",
+        "to": "#FFB020"
+      },
+      "critical_risk": {
+        "from": "#C1124D",
+        "to": "#FF4D6D"
+      }
+    },
+    "semantic_colors": {
+      "background": "#050816",
+      "surface": "#0B1023",
+      "primary": "#2F80FF",
+      "secondary": "#56CCF2",
+      "success": "#56F2C1",
+      "warning": "#FFB020",
+      "danger": "#FF4D6D",
+      "text_primary": "#F5F7FA",
+      "text_secondary": "#94A3B8",
+      "border": "rgba(255,255,255,0.08)"
+    }
+  }
+}
