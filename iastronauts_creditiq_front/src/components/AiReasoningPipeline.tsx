@@ -15,10 +15,13 @@ interface PipelineProgress {
   agents: AgentProgressEntry[]
 }
 
+type Phase = 'agent1' | 'agent2' | 'final' | null
+
 interface Props {
   status: Status
   jobId?: string
   progress?: PipelineProgress
+  phase?: Phase
 }
 
 // Fallback static definitions (used when no progress data in status.json yet)
@@ -29,23 +32,35 @@ const STATIC_STEPS = [
   { label: 'Agent 4', title: 'Report Generation',         detail: 'LLM narrative · NIIF notes draft' },
 ]
 
-function derivedState(index: number, status: Status): 'done' | 'active' | 'pending' | 'failed' {
+function derivedState(index: number, status: Status, phase?: Phase): 'done' | 'active' | 'pending' | 'failed' {
   if (status === 'failed')              return index === 0 ? 'failed' : 'pending'
   if (status === 'completed')           return 'done'
-  if (status === 'analysis_complete')   return index <= 1 ? 'done' : index === 2 ? 'active' : 'pending'
-  if (status === 'extraction_complete') return index === 0 ? 'done' : index === 1 ? 'active' : 'pending'
-  if (status === 'processing')          return index === 0 ? 'active' : 'pending'
+  // Terminal wait states: agents that have run are done; nothing is shown as active
+  // (the "continue" banner in the main canvas tells the user what to do next)
+  if (status === 'analysis_complete')   return index <= 1 ? 'done' : 'pending'
+  if (status === 'extraction_complete') return index === 0 ? 'done' : 'pending'
+  if (status === 'processing') {
+    if (phase === 'agent2') return index < 1 ? 'done' : index === 1 ? 'active' : 'pending'
+    if (phase === 'final')   return index < 2 ? 'done' : index === 2 ? 'active' : 'pending'
+    // agent1 / null: Agent 1 is running
+    return index === 0 ? 'active' : 'pending'
+  }
+  if (status === 'pending') return index === 0 ? 'active' : 'pending'
   return 'pending'
 }
 
 function derivedStep(index: number, status: Status): string | null {
-  if (status === 'completed' || (status === 'analysis_complete' && index <= 1)) {
-    return index === 0 ? 'Accounts extracted' : index === 1 ? 'Analysis complete' : null
+  if (status === 'completed') {
+    const labels = ['Accounts extracted', 'Analysis complete', 'Risk scored', 'Report generated']
+    return labels[index] ?? null
   }
+  if (status === 'analysis_complete' && index <= 1)
+    return index === 0 ? 'Accounts extracted' : 'Analysis complete'
+  if (status === 'extraction_complete' && index === 0) return 'Accounts extracted'
   return null
 }
 
-export default function AiReasoningPipeline({ status, jobId, progress }: Props) {
+export default function AiReasoningPipeline({ status, jobId, progress, phase }: Props) {
   const statusLabel =
     status === 'completed'           ? { text: 'COMPLETED', color: '#3FB950' } :
     status === 'failed'              ? { text: 'FAILED',    color: '#F85149' } :
@@ -67,7 +82,7 @@ export default function AiReasoningPipeline({ status, jobId, progress }: Props) 
         }))
       : STATIC_STEPS.map((s, i) => ({
           ...s,
-          state: derivedState(i, status),
+          state: derivedState(i, status, phase),
           step:  derivedStep(i, status),
         }))
 

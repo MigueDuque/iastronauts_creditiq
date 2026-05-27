@@ -244,6 +244,9 @@ export default function UploadDialog({ open, onClose }: UploadDialogProps) {
       const data = await res.json()
       const id = data.job_id ?? data.analysis_id
       localStorage.setItem('creditiq_analysis_id', id)
+      // Notify AnalysisPage in the same tab so it resets state immediately,
+      // even if it's already mounted (storage event only fires in other tabs).
+      window.dispatchEvent(new CustomEvent('creditiq:newjob', { detail: { jobId: id } }))
       setTimeout(() => { onClose(); reset(); navigate('/analysis') }, 600)
     } catch (err) {
       setLaunchError((err as Error).message)

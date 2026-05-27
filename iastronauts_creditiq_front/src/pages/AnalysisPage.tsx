@@ -227,9 +227,16 @@ interface AnalyzerOutput {
 // ── Component ──────────────────────────────────────────────────────────────
 
 export default function AnalysisPage() {
-  const [jobId, setJobId]   = useState<string | null>(() => localStorage.getItem(STORAGE_KEY))
+  // Read job ID once at mount so we can validate the stored status against it.
+  const _mountJobId = localStorage.getItem(STORAGE_KEY)
+  const [jobId, setJobId]   = useState<string | null>(_mountJobId)
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(() => {
-    try { return JSON.parse(localStorage.getItem(STATUS_KEY) ?? 'null') } catch { return null }
+    try {
+      const cached = JSON.parse(localStorage.getItem(STATUS_KEY) ?? 'null') as JobStatus | null
+      // Drop the cached status when it clearly belongs to a different job.
+      if (cached?.analysis_id && cached.analysis_id !== _mountJobId) return null
+      return cached
+    } catch { return null }
   })
   const [report, setReport] = useState<ExtractorOutput | null>(() => {
     try { return JSON.parse(localStorage.getItem(REPORT_KEY) ?? 'null') } catch { return null }
@@ -272,6 +279,28 @@ export default function AnalysisPage() {
     else localStorage.removeItem(PHASE_KEY)
   }, [phase])
 
+  // ── New-job notification from UploadDialog (same-tab custom event) ─────
+  // localStorage's 'storage' event only fires in other tabs, so UploadDialog
+  // dispatches a custom event that we catch here to reset all state immediately.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const newId = (e as CustomEvent<{ jobId: string }>).detail?.jobId
+      if (!newId || newId === jobId) return
+      if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
+      ;[STATUS_KEY, REPORT_KEY, ANALYZER_KEY, PHASE_KEY].forEach(k => localStorage.removeItem(k))
+      localStorage.setItem(STORAGE_KEY, newId)
+      setJobId(newId)
+      setJobStatus(null)
+      setReport(null)
+      setAnalyzerData(null)
+      setPhase(null)
+      setElapsed(0)
+      setCatFilter('all')
+    }
+    window.addEventListener('creditiq:newjob', handler)
+    return () => window.removeEventListener('creditiq:newjob', handler)
+  }, [jobId])
+
   // ── Main polling effect ────────────────────────────────────────────────
 
   const TERMINAL = new Set(['completed', 'failed', 'extraction_complete', 'analysis_complete'])
@@ -300,7 +329,8 @@ export default function AnalysisPage() {
         if (!res.ok || !alive) { console.error('[poll]', res.status, await res.text()); return }
         const data: JobStatus = await res.json()
         if (!alive) return
-        setJobStatus(data)
+        // Always stamp analysis_id so the stale-status check works on remount.
+        setJobStatus({ ...data, analysis_id: data.analysis_id ?? jobId })
 
         if (TERMINAL.has(data.status)) {
           if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
@@ -412,7 +442,7 @@ export default function AnalysisPage() {
         if (!res.ok || !alive) return
         const data: JobStatus = await res.json()
         if (!alive) return
-        setJobStatus(data)
+        setJobStatus({ ...data, analysis_id: data.analysis_id ?? jobId })
         onStatus(data)
         if (TERMINAL.has(data.status)) {
           if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
@@ -434,6 +464,8 @@ export default function AnalysisPage() {
   async function _doRunAgent2() {
     if (!jobId) return
     setPhase('agent2'); setReport(null); setAnalyzerData(null); setElapsed(0)
+    // Optimistically set processing so the sidebar updates immediately — don't wait for first poll.
+    setJobStatus({ analysis_id: jobId, status: 'processing' })
     // Use /reanalyze — always routes to Agent 2 regardless of current S3 status.
     // /continue is status-aware and would run Agents 3+4 if status is analysis_complete.
     await fetch(`${API}/analyses/${jobId}/reanalyze`, { method: 'POST', headers: HEADERS })
@@ -455,6 +487,8 @@ export default function AnalysisPage() {
   async function _doRunFinal() {
     if (!jobId) return
     setPhase('final'); setAnalyzerData(null); setElapsed(0)
+    // Optimistically set processing so the sidebar updates immediately — don't wait for first poll.
+    setJobStatus({ analysis_id: jobId, status: 'processing' })
     await fetch(`${API}/analyses/${jobId}/continue`, { method: 'POST', headers: HEADERS })
     _startPolling(() => {})
   }
@@ -505,7 +539,7 @@ export default function AnalysisPage() {
     <div className="p-margin-mobile md:p-margin-desktop flex flex-col md:flex-row gap-gutter min-h-0">
 
       {/* Left: AI Reasoning Pipeline */}
-      <AiReasoningPipeline status={jobStatus?.status ?? null} jobId={jobId ?? undefined} progress={jobStatus?.progress} />
+      <AiReasoningPipeline status={jobStatus?.status ?? null} jobId={jobId ?? undefined} progress={jobStatus?.progress} phase={phase} />
 
       {/* Right: Main canvas */}
       <div className="flex-1 flex flex-col gap-5 overflow-hidden min-w-0">
