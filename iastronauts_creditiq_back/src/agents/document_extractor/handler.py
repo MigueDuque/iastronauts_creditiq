@@ -11,6 +11,8 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from shared.llm_provider import LLMProvider
 from shared.models import ExtractedAccount, ExtractorOutput, OrchestratorOutput
 from shared.s3_instructions import load_text as load_instruction
+from shared.job_store import save as job_save, EXTRACTOR
+from .niif_validator import validate_niif
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -153,6 +155,15 @@ Recibirás texto crudo de tablas extraídas de documentos financieros (PDFs y Ex
 Devuelve ÚNICAMENTE un JSON con esta estructura:
 {
   "periods": ["YYYY-MM", "YYYY-MM"],
+  "fund_metadata": {
+    "fund_type": "tipo de fondo o null",
+    "creation_date": "YYYY-MM-DD o null",
+    "administrator": "nombre del gestor/administrador o null",
+    "custodian": "entidad custodio o null",
+    "risk_profile": "conservador | moderado | agresivo | null",
+    "benchmark": "índice de referencia o null",
+    "investment_policy_summary": "máx 2 oraciones sobre política de inversión o null"
+  },
   "accounts": [
     {
       "raw_account_name": "nombre exacto del documento",
@@ -165,18 +176,66 @@ Devuelve ÚNICAMENTE un JSON con esta estructura:
   ]
 }
 
-Reglas:
-- Unidades: si el documento está en pesos colombianos, dividir entre 1,000,000 para convertir a COP MM.
-  Si ya está en millones (MM), usar el valor directamente.
-- Numeros negativos: (1,234) = -1234.
+fund_metadata debe incluirse siempre. Si el documento NO es un fondo de inversión, devuelve
+todos sus campos como null. Si SÍ es un fondo, extrae los datos de la primera página (carátula,
+encabezado o sección de información general del fondo).
+
+═══════════════════════════════════════════════════════
+REGLAS DE SELECCIÓN DE COLUMNAS (CRÍTICO)
+═══════════════════════════════════════════════════════
+
+1. IDENTIFICAR current_value y previous_value:
+   - current_value  → la columna del período MÁS RECIENTE (mayor año, o mayor mes dentro del mismo año).
+   - previous_value → la columna del período ANTERIOR COMPARABLE:
+       * Para balance general (activos/pasivos/patrimonio): el cierre del año anterior (Dic YYYY).
+       * Para estado de resultados (ingresos/gastos): el mismo período acumulado del año anterior
+         (ej. "Jun 2024" es el comparable de "Jun 2025", NO "Trim 2025").
+       * Para flujo de efectivo: el mismo período acumulado del año anterior.
+
+2. TABLAS CON MÁS DE 2 COLUMNAS DE VALORES:
+   Si la tabla tiene 4 columnas (ej. "Jun 2025 | Jun 2024 | Trim 2025 | Trim 2024"):
+   - Usar "Jun 2025" como current_value.
+   - Usar "Jun 2024" como previous_value (mismo período, año anterior).
+   - IGNORAR las columnas trimestrales — no son comparables con el acumulado.
+
+   Si la tabla de inversiones tiene columnas "Nominal YYYY | Valor YYYY":
+   - Usar SOLO las columnas "Valor YYYY" (valor de mercado o razonable).
+   - IGNORAR las columnas "Nominal YYYY" (cantidad de unidades, no monetario).
+
+3. POSICIONES NUEVAS O CERRADAS (valor = 0 en un período):
+   - Si el valor del período anterior es 0 y el actual es > 0 → es una posición NUEVA.
+     Establecer previous_value: null (NO poner 0).
+   - Si el valor actual es 0 y el anterior es > 0 → es una posición CERRADA/LIQUIDADA.
+     Establecer current_value: 0, previous_value: el valor anterior.
+   - Nunca extraer un 0 como previous_value cuando el campo "0" claramente indica ausencia.
+
+4. previous_value debe ser null (no 0, no omitido) cuando:
+   - La cuenta o posición NO EXISTÍA en el período anterior.
+   - Solo hay UNA columna de valores en la tabla (sin dato comparativo).
+   - El encabezado del período anterior no es comparable con el actual
+     (ej. no mezclar acumulado anual con trimestral).
+
+═══════════════════════════════════════════════════════
+REGLAS GENERALES
+═══════════════════════════════════════════════════════
+
+- Unidades: determinar la unidad del documento (COP, COP miles, COP MM).
+  * Si los valores parecen estar en pesos COP (números muy grandes, ej. 39,000,000,000):
+    dividir entre 1,000,000 para convertir a COP MM.
+  * Si parecen estar en miles de COP (ej. 39,000,000 para un fondo mediano):
+    dividir entre 1,000 para convertir a COP MM.
+  * Si ya están en millones COP (MM): usar directamente.
+  Aplicar la MISMA conversión a current_value y previous_value.
+- Números negativos: (1,234) = -1234. Gastos y costos pueden ser negativos.
 - Separador de miles: puede ser coma o punto según el documento.
 - periods: inferir de los encabezados de columna. Formato YYYY-MM. Si no hay mes, usar -12.
-- La primera columna de valores es el período más reciente (current_value).
-- Incluir SOLO las cuentas materiales (máximo 60): totales de sección, subtotales clave,
+  Solo reportar los DOS períodos seleccionados (current y previous), no todos los encabezados.
+- Incluir SOLO cuentas materiales (máximo 60): totales de sección, subtotales clave,
   utilidad del período, aportes/retiros de inversionistas, instrumentos financieros principales.
   Omitir líneas de detalle menor que no aporten al análisis de variaciones.
 - Omitir filas de encabezado, notas al pie y celdas sin valor numérico.
-- confidence_score: 1.0 si el valor es claro, 0.5 si hubo ambigüedad, 0.2 si fue inferido.
+- confidence_score: 1.0 si valor y período son claros; 0.5 si hubo ambigüedad en columna
+  o unidad; 0.2 si fue inferido o el período comparativo no es directamente comparable.
 """
 
 # Lazy-loaded prompt — populated on first LLM call, cached for container lifetime
@@ -223,19 +282,56 @@ def _call_llm_extraction(
 # Account assembly
 # ---------------------------------------------------------------------------
 
+# Investment-type keywords: when previous_value=0.0 and current_value>1 COP MM for these,
+# the LLM likely wrote 0 where null was correct (new position, not a zero balance).
+_INVESTMENT_NEW_POSITION_KEYWORDS = (
+    "inversión en", "inversion en", "acciones", "fondo", "bono",
+    "patrimonio clase", "etf", "título", "titulo",
+)
+_NEW_POSITION_CURRENT_FLOOR_COP_MM = 1.0   # positions below this threshold keep 0.0 as-is
+
+
+def _coerce_zero_previous_to_null(
+    category: str,
+    normalized_name: str,
+    current_value: float,
+    previous_value: float | None,
+) -> float | None:
+    """
+    Convert previous_value=0.0 to None for investment accounts where 0 clearly
+    means the position did not exist in the prior period.
+    Accounts with genuine zero balances (e.g. small liabilities) are left unchanged.
+    """
+    if previous_value != 0.0 or previous_value is None:
+        return previous_value
+    if current_value < _NEW_POSITION_CURRENT_FLOOR_COP_MM:
+        return previous_value  # too small to be confident
+    name_lower = normalized_name.lower()
+    if any(kw in name_lower for kw in _INVESTMENT_NEW_POSITION_KEYWORDS):
+        return None
+    return previous_value
+
+
 def _build_accounts(raw_items: list[dict], source_file: str) -> tuple[list[ExtractedAccount], list[str]]:
     accounts: list[ExtractedAccount] = []
     warnings: list[str] = []
     for i, item in enumerate(raw_items):
         try:
-            prev = item.get("previous_value")
+            prev_raw = item.get("previous_value")
+            category = str(item.get("category", "other"))
+            normalized_name = str(item.get("normalized_account_name", ""))
+            current_value = float(item.get("current_value") or 0)
+            prev_float = float(prev_raw) if prev_raw is not None else None
+            previous_value = _coerce_zero_previous_to_null(
+                category, normalized_name, current_value, prev_float
+            )
             accounts.append(ExtractedAccount(
                 account_id=f"act-{i+1:03d}",   # re-indexed globally after merge
                 raw_account_name=str(item.get("raw_account_name", "")),
-                normalized_account_name=str(item.get("normalized_account_name", "")),
-                category=str(item.get("category", "other")),
-                current_value=float(item.get("current_value") or 0),
-                previous_value=float(prev) if prev is not None else None,
+                normalized_account_name=normalized_name,
+                category=category,
+                current_value=current_value,
+                previous_value=previous_value,
                 currency="COP",
                 confidence_score=min(1.0, max(0.0, float(item.get("confidence_score", 0.5)))),
                 source_file=source_file,
@@ -279,6 +375,7 @@ def lambda_handler(event: dict, context) -> dict:
 
     all_accounts: list[ExtractedAccount] = []
     all_periods: list[str] = []
+    all_fund_metadata: list[dict] = []
     warnings: list[str] = []
     rendicion_text_s3_key: str | None = None
 
@@ -293,8 +390,9 @@ def lambda_handler(event: dict, context) -> dict:
                     warnings.append(f"Sin contenido extraído de la rendición de cuentas '{file.file_name}'")
                     continue
                 
-                # Save accountability report text in S3 for later qualitative use
-                s3_key = f"uploads/{payload.tenant_id}/{payload.job_id}_rendicion.txt"
+                # Save accountability report text alongside the uploaded files
+                pdf_folder = "/".join(file.s3_location.rsplit("/", 1)[:-1])
+                s3_key = f"{pdf_folder}/{payload.job_id}_rendicion.txt"
                 try:
                     s3_client.put_object(
                         Bucket=BUCKET,
@@ -335,6 +433,11 @@ def lambda_handler(event: dict, context) -> dict:
 
             all_periods.extend(llm_result.get("periods", []))
 
+            # Collect fund metadata if the LLM detected it (non-null fields only)
+            fm = llm_result.get("fund_metadata") or {}
+            if any(v is not None for v in fm.values()):
+                all_fund_metadata.append(fm)
+
             logger.info("accounts_extracted | file=%s count=%d", file.file_name, len(file_accounts))
 
         except Exception as e:
@@ -351,6 +454,20 @@ def lambda_handler(event: dict, context) -> dict:
         unique_periods = [payload.business_context.reporting_period]
 
     company_name = payload.business_context.company_name or ""
+    reindexed_accounts = _reindex(all_accounts)
+
+    niif_validation = validate_niif(reindexed_accounts, unique_periods)
+    if not niif_validation.is_niif_compliant:
+        logger.warning(
+            "niif_not_compliant | job=%s score=%d errors=%d warnings=%d",
+            payload.job_id,
+            niif_validation.compliance_score,
+            sum(1 for f in niif_validation.flags if f.severity == "ERROR"),
+            sum(1 for f in niif_validation.flags if f.severity == "WARNING"),
+        )
+
+    # Merge fund metadata from all files — use the first non-empty result
+    merged_fund_metadata: dict | None = all_fund_metadata[0] if all_fund_metadata else None
 
     result = ExtractorOutput(
         job_id=payload.job_id,
@@ -362,10 +479,12 @@ def lambda_handler(event: dict, context) -> dict:
         company_name=company_name,
         currency="COP",
         periods=unique_periods,
-        accounts=_reindex(all_accounts),
+        accounts=reindexed_accounts,
         extraction_confidence=_avg_confidence(all_accounts),
         extraction_warnings=warnings,
         rendicion_text_s3_key=rendicion_text_s3_key,
+        niif_validation=niif_validation,
+        fund_metadata=merged_fund_metadata,
     )
 
     logger.info(
@@ -376,13 +495,8 @@ def lambda_handler(event: dict, context) -> dict:
 
     output = result.model_dump(mode="json")
 
-    # Save output so report_url can serve it while downstream agents are stubs
     try:
-        s3_client.put_object(
-            Bucket=BUCKET,
-            Key=f"jobs/{result.job_id}/extractor_output.json",
-            Body=json.dumps(output),
-        )
+        job_save(result.job_id, EXTRACTOR, output, s3_client=s3_client)
     except Exception as exc:
         logger.warning("extractor_output_save_failed | job=%s error=%s", result.job_id, exc)
 

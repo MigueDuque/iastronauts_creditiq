@@ -26,6 +26,7 @@ def lambda_handler(event: dict, context) -> dict:
         overall_financial_health=payload.overall_financial_health,
         executive_narrative=payload.executive_narrative,
         niif18_compliance=payload.niif18_compliance,
+        niif_validation=payload.niif_validation,
         validation_score=0,
         overall_risk_score=RiskLevel.LOW,
         issues_found=[],

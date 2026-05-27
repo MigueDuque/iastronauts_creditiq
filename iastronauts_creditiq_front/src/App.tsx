@@ -1,17 +1,19 @@
+import { lazy, Suspense } from 'react'
 import { createBrowserRouter, RouterProvider } from 'react-router-dom'
 import AppLayout from './components/AppLayout'
-import DashboardPage from './pages/DashboardPage'
-import AnalysisPage from './pages/AnalysisPage'
-import JobResultPage from './pages/JobResultPage'
+
+const DashboardPage = lazy(() => import('./pages/DashboardPage'))
+const AnalysisPage  = lazy(() => import('./pages/AnalysisPage'))
+const JobResultPage = lazy(() => import('./pages/JobResultPage'))
 
 const router = createBrowserRouter([
   {
     path: '/',
     element: <AppLayout />,
     children: [
-      { index: true, element: <DashboardPage /> },
-      { path: 'analysis', element: <AnalysisPage /> },
-      { path: 'jobs/:jobId', element: <JobResultPage /> },
+      { index: true,        element: <Suspense fallback={null}><DashboardPage /></Suspense> },
+      { path: 'analysis',   element: <Suspense fallback={null}><AnalysisPage /></Suspense> },
+      { path: 'jobs/:jobId', element: <Suspense fallback={null}><JobResultPage /></Suspense> },
     ],
   },
 ])

@@ -30,6 +30,9 @@ class ScorerOutput(BaseModel):
     executive_narrative: str
     niif18_compliance: dict = {}
 
+    # NIIF structural compliance result from DocumentExtractor (passed through)
+    niif_validation: dict = {}
+
     # Output del scorer
     validation_score: int = Field(ge=0, le=100)
     overall_risk_score: RiskLevel

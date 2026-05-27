@@ -11,6 +11,7 @@ from shared.models import BusinessContext, FileToProcess, OrchestratorOutput, Ou
 from shared.s3_report_store import slugify
 from shared.tenant_context import TenantBoundaryViolation
 from shared.tenant_middleware import extract_tenant_context, source_ip, validate_requested_tenant
+from shared.job_store import save as job_save, load as job_load, STATUS, EXTRACTOR
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -46,7 +47,7 @@ def _save_job_status(job_id: str, status: str, error: str | None = None) -> None
     body: dict = {"status": status}
     if error:
         body["error"] = error
-    s3.put_object(Bucket=BUCKET, Key=f"jobs/{job_id}/status.json", Body=json.dumps(body))
+    job_save(job_id, STATUS, body)
 
 
 def _run_extractor_bg(event: dict) -> None:
@@ -55,11 +56,7 @@ def _run_extractor_bg(event: dict) -> None:
     try:
         from agents.document_extractor.handler import lambda_handler as extractor_handler  # noqa: PLC0415
         result = extractor_handler(event, None)
-        s3.put_object(
-            Bucket=BUCKET,
-            Key=f"jobs/{job_id}/extractor_output.json",
-            Body=json.dumps(result),
-        )
+        # extractor handler already calls job_save internally; this is a no-op duplicate guard
         _save_job_status(job_id, "extraction_complete")
         logger.info("local_dev_extractor | done job_id=%s", job_id)
     except Exception as exc:

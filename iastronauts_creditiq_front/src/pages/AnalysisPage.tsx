@@ -143,6 +143,7 @@ export default function AnalysisPage() {
   )
   const [elapsed, setElapsed] = useState(0)
   const [catFilter, setCatFilter] = useState('all')
+  const [showCancelDialog, setShowCancelDialog] = useState(false)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // ── localStorage sync ──────────────────────────────────────────────────
@@ -226,9 +227,29 @@ export default function AnalysisPage() {
 
   // ── Actions ────────────────────────────────────────────────────────────
 
-  function clearJob() {
-    [STORAGE_KEY, STATUS_KEY, REPORT_KEY, ANALYZER_KEY, PHASE_KEY].forEach(k => localStorage.removeItem(k))
+  function handleClearClick() {
+    const active = jobStatus?.status === 'processing' || jobStatus?.status === 'pending'
+    if (active && jobId) {
+      setShowCancelDialog(true)
+    } else {
+      _doClean()
+    }
+  }
+
+  function _doClean() {
+    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
+    ;[STORAGE_KEY, STATUS_KEY, REPORT_KEY, ANALYZER_KEY, PHASE_KEY].forEach(k => localStorage.removeItem(k))
     setJobId(null); setJobStatus(null); setReport(null); setAnalyzerData(null); setPhase(null)
+    setElapsed(0); setShowCancelDialog(false)
+  }
+
+  async function confirmClear() {
+    if (jobId) {
+      try {
+        await fetch(`${API}/analyses/${jobId}`, { method: 'DELETE', headers: HEADERS })
+      } catch { /* best-effort */ }
+    }
+    _doClean()
   }
 
   function _startPolling(onStatus: (d: JobStatus) => void) {
@@ -364,7 +385,7 @@ export default function AnalysisPage() {
                   />
                 )}
                 <button
-                  onClick={clearJob}
+                  onClick={handleClearClick}
                   title="Clear current analysis and start a new one"
                   className="flex items-center gap-1 px-2.5 py-1 rounded border border-border text-outline hover:text-on-surface hover:border-on-surface-variant transition-colors text-[11px] font-mono"
                 >
@@ -704,6 +725,50 @@ export default function AnalysisPage() {
       <style>{`
         @keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
       `}</style>
+
+      {/* Cancel confirmation dialog */}
+      {showCancelDialog && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,0.65)' }}
+          onClick={() => setShowCancelDialog(false)}
+        >
+          <div
+            className="bg-surface border border-border rounded-lg p-6 max-w-sm w-full mx-4 shadow-2xl"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3 mb-5">
+              <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: '#D29922' }}>
+                warning
+              </span>
+              <div>
+                <p className="text-body-md font-body-md font-semibold text-on-surface mb-1">
+                  Cancel this analysis?
+                </p>
+                <p className="text-label-sm font-label-sm text-outline">
+                  The running pipeline will be stopped. Partial results already saved to S3 will remain,
+                  but this job will be marked as cancelled and cannot be resumed.
+                </p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setShowCancelDialog(false)}
+                className="px-4 py-2 rounded border border-border text-outline hover:text-on-surface text-[12px] font-mono transition-colors"
+              >
+                Keep running
+              </button>
+              <button
+                onClick={confirmClear}
+                className="px-4 py-2 rounded text-[12px] font-mono font-semibold transition-all hover:opacity-90 active:scale-95"
+                style={{ background: '#F85149', color: '#fff' }}
+              >
+                Stop &amp; clear
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

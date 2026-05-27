@@ -1,5 +1,5 @@
 {
-  "Comment": "CreditIQ Financial Analysis Workflow — sequential agent pipeline",
+  "Comment": "CreditIQ Financial Analysis Workflow — sequential pipeline with analyst review gates",
   "StartAt": "DocumentExtractor",
   "States": {
     "DocumentExtractor": {
@@ -8,144 +8,106 @@
       "TimeoutSeconds": 330,
       "Retry": [
         {
-          "ErrorEquals": [
-            "Lambda.ServiceException",
-            "Lambda.AWSLambdaException",
-            "Lambda.SdkClientException",
-            "Lambda.TooManyRequestsException"
-          ],
-          "IntervalSeconds": 2,
-          "MaxAttempts": 3,
-          "BackoffRate": 2.0
+          "ErrorEquals": ["Lambda.ServiceException","Lambda.AWSLambdaException","Lambda.SdkClientException","Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2, "MaxAttempts": 3, "BackoffRate": 2.0
         },
         {
-          "ErrorEquals": [
-            "States.TaskFailed"
-          ],
-          "IntervalSeconds": 3,
-          "MaxAttempts": 2,
-          "BackoffRate": 1.5
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 3, "MaxAttempts": 2, "BackoffRate": 1.5
         }
       ],
-      "Catch": [
-        {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
-          "Next": "WorkflowFailed",
-          "ResultPath": "$.error"
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "WorkflowFailed", "ResultPath": "$.error"}],
+      "Next": "WaitForExtractorReview"
+    },
+
+    "WaitForExtractorReview": {
+      "Comment": "Pause after Agent 1 — analyst reviews extracted accounts before continuing",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "${PauseFunctionArn}",
+        "Payload": {
+          "job_id.$":      "$.job_id",
+          "pause_status":  "extraction_complete",
+          "task_token.$":  "$$.Task.Token"
         }
-      ],
+      },
+      "HeartbeatSeconds": 86400,
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "WorkflowFailed", "ResultPath": "$.error"}],
       "Next": "FinancialAnalyzer"
     },
+
     "FinancialAnalyzer": {
       "Type": "Task",
       "Resource": "${AnalyzerFunctionArn}",
       "TimeoutSeconds": 330,
       "Retry": [
         {
-          "ErrorEquals": [
-            "Lambda.ServiceException",
-            "Lambda.AWSLambdaException",
-            "Lambda.SdkClientException",
-            "Lambda.TooManyRequestsException"
-          ],
-          "IntervalSeconds": 2,
-          "MaxAttempts": 3,
-          "BackoffRate": 2.0
+          "ErrorEquals": ["Lambda.ServiceException","Lambda.AWSLambdaException","Lambda.SdkClientException","Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2, "MaxAttempts": 3, "BackoffRate": 2.0
         },
         {
-          "ErrorEquals": [
-            "States.TaskFailed"
-          ],
-          "IntervalSeconds": 3,
-          "MaxAttempts": 2,
-          "BackoffRate": 1.5
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 3, "MaxAttempts": 2, "BackoffRate": 1.5
         }
       ],
-      "Catch": [
-        {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
-          "Next": "WorkflowFailed",
-          "ResultPath": "$.error"
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "WorkflowFailed", "ResultPath": "$.error"}],
+      "Next": "WaitForAnalyzerReview"
+    },
+
+    "WaitForAnalyzerReview": {
+      "Comment": "Pause after Agent 2 — analyst reviews financial analysis before continuing",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "${PauseFunctionArn}",
+        "Payload": {
+          "job_id.$":      "$.job_id",
+          "pause_status":  "analysis_complete",
+          "task_token.$":  "$$.Task.Token"
         }
-      ],
+      },
+      "HeartbeatSeconds": 86400,
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "WorkflowFailed", "ResultPath": "$.error"}],
       "Next": "RiskScorer"
     },
+
     "RiskScorer": {
       "Type": "Task",
       "Resource": "${RiskScorerFunctionArn}",
       "TimeoutSeconds": 210,
       "Retry": [
         {
-          "ErrorEquals": [
-            "Lambda.ServiceException",
-            "Lambda.AWSLambdaException",
-            "Lambda.SdkClientException",
-            "Lambda.TooManyRequestsException"
-          ],
-          "IntervalSeconds": 2,
-          "MaxAttempts": 3,
-          "BackoffRate": 2.0
+          "ErrorEquals": ["Lambda.ServiceException","Lambda.AWSLambdaException","Lambda.SdkClientException","Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2, "MaxAttempts": 3, "BackoffRate": 2.0
         },
         {
-          "ErrorEquals": [
-            "States.TaskFailed"
-          ],
-          "IntervalSeconds": 3,
-          "MaxAttempts": 2,
-          "BackoffRate": 1.5
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 3, "MaxAttempts": 2, "BackoffRate": 1.5
         }
       ],
-      "Catch": [
-        {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
-          "Next": "WorkflowFailed",
-          "ResultPath": "$.error"
-        }
-      ],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "WorkflowFailed", "ResultPath": "$.error"}],
       "Next": "ReportGenerator"
     },
+
     "ReportGenerator": {
       "Type": "Task",
       "Resource": "${ReportGeneratorFunctionArn}",
       "TimeoutSeconds": 330,
       "Retry": [
         {
-          "ErrorEquals": [
-            "Lambda.ServiceException",
-            "Lambda.AWSLambdaException",
-            "Lambda.SdkClientException",
-            "Lambda.TooManyRequestsException"
-          ],
-          "IntervalSeconds": 2,
-          "MaxAttempts": 3,
-          "BackoffRate": 2.0
+          "ErrorEquals": ["Lambda.ServiceException","Lambda.AWSLambdaException","Lambda.SdkClientException","Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2, "MaxAttempts": 3, "BackoffRate": 2.0
         },
         {
-          "ErrorEquals": [
-            "States.TaskFailed"
-          ],
-          "IntervalSeconds": 3,
-          "MaxAttempts": 2,
-          "BackoffRate": 1.5
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 3, "MaxAttempts": 2, "BackoffRate": 1.5
         }
       ],
-      "Catch": [
-        {
-          "ErrorEquals": [
-            "States.ALL"
-          ],
-          "Next": "WorkflowFailed",
-          "ResultPath": "$.error"
-        }
-      ],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "WorkflowFailed", "ResultPath": "$.error"}],
       "End": true
     },
+
     "WorkflowFailed": {
       "Type": "Fail",
       "Error": "WorkflowExecutionFailed",
