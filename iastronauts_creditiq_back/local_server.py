@@ -278,6 +278,15 @@ async def cancel_analysis(analysis_id: str):
     return JSONResponse(content={"analysis_id": analysis_id, "status": "cancelled"}, status_code=200)
 
 
+@app.post("/analyses/{analysis_id}/reanalyze")
+async def reanalyze(analysis_id: str):
+    """Force-run Agent 2 regardless of current pipeline status."""
+    _cancelled_jobs.discard(analysis_id)
+    thread = threading.Thread(target=_run_agent2, args=(analysis_id,), daemon=True)
+    thread.start()
+    return JSONResponse(content={"analysis_id": analysis_id, "status": "processing"}, status_code=202)
+
+
 @app.post("/analyses/{analysis_id}/continue")
 async def continue_analysis(analysis_id: str):
     """

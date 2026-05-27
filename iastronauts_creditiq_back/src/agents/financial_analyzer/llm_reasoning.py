@@ -158,6 +158,9 @@ def compute_confidence(
 
 # ── Prompt builder ────────────────────────────────────────────────────────────
 
+_HIGH_PRIORITY_MATS = {MaterialityLevel.HIGH, MaterialityLevel.MEDIUM}
+
+
 def _build_user_prompt(
     company_name: str,
     periods: list[str],
@@ -174,14 +177,29 @@ def _build_user_prompt(
     niif_validation_context: str | None = None,
     fund_analysis: dict | None = None,
     macro_context: dict | None = None,
+    executive_synthesis: dict | None = None,
 ) -> str:
     """
-    Improvement #7: Constrained Financial Reasoning prompt.
-    Deterministic facts are presented first. LLM is explicitly instructed to
-    ONLY narrate these facts — never invent causality or unsupported claims.
+    Constrained Financial Reasoning prompt.
+
+    Key design decisions:
+    - Only HIGH + MEDIUM materiality accounts are sent to the LLM for per-account
+      analysis.  LOW materiality accounts (often 30–40 entries) are excluded to
+      prevent token exhaustion that causes the JSON to truncate and all per-account
+      insights to be silently discarded.
+    - executive_synthesis (pre-computed by synthesis_engine) is included as a
+      structured context block so the LLM can narrativize pre-formed conclusions
+      rather than discover them from raw number tables.
     """
+    # Filter to HIGH + MEDIUM materiality only to avoid token exhaustion
+    priority_variations = [
+        v for v in variations
+        if materialities.get(v.account_id, MaterialityLevel.LOW) in _HIGH_PRIORITY_MATS
+    ]
+    low_mat_count = len(variations) - len(priority_variations)
+
     accounts_payload = []
-    for v in variations:
+    for v in priority_variations:
         rel = reliabilities.get(v.account_id)
         entry: dict = {
             "account_id": v.account_id,
@@ -202,6 +220,12 @@ def _build_user_prompt(
             entry["absolute_variation_cop_mm"] = v.absolute_variation if v.has_previous_value else None
             entry["variation_pct_note"] = rel.display_label if rel else "Sin datos previos"
         accounts_payload.append(entry)
+
+    low_mat_note = (
+        f"\n[NOTA: {low_mat_count} cuentas de baja materialidad excluidas de este análisis "
+        f"por priorización. Solo se analizan cuentas de alta y media materialidad.]\n"
+        if low_mat_count > 0 else ""
+    )
 
     niif_section = ""
     if niif_reference_text.strip():
@@ -278,6 +302,36 @@ def _build_user_prompt(
         extra_context += (
             f"\nANÁLISIS DE FONDO DE INVERSIÓN (determinístico — fund_engine):\n"
             f"{json.dumps(fund_summary, indent=2, ensure_ascii=False)}\n"
+        )
+
+    if executive_synthesis:
+        # Pre-computed portfolio synthesis — the most important context block.
+        # The LLM should use this as the foundation for all portfolio-level narratives
+        # rather than re-deriving conclusions from raw account data.
+        synth_summary = {
+            "main_portfolio_theme": executive_synthesis.get("main_portfolio_theme"),
+            "signals": executive_synthesis.get("signals", []),
+            "portfolio_story": executive_synthesis.get("portfolio_story"),
+            "strategic_rotation": executive_synthesis.get("strategic_rotation"),
+            "investor_flow_story": executive_synthesis.get("investor_flow_story"),
+            "earnings_quality_story": executive_synthesis.get("earnings_quality_story"),
+            "concentration_story": executive_synthesis.get("concentration_story"),
+            "executive_conclusions": executive_synthesis.get("executive_conclusions", []),
+            "board_alerts": executive_synthesis.get("board_alerts", []),
+            "top_risks": executive_synthesis.get("top_risks", []),
+            "top_strengths": executive_synthesis.get("top_strengths", []),
+            "aum_change_pct": executive_synthesis.get("aum_change_pct"),
+            "net_investor_flow_cop_mm": executive_synthesis.get("net_investor_flow_cop_mm"),
+            "top_issuer": executive_synthesis.get("top_issuer"),
+            "top_issuer_pct": executive_synthesis.get("top_issuer_pct"),
+            "valuation_dependency_pct": executive_synthesis.get("valuation_dependency_pct"),
+            "recurring_income_pct": executive_synthesis.get("recurring_income_pct"),
+        }
+        extra_context += (
+            f"\nSÍNTESIS EJECUTIVA PRE-CALCULADA (determinística — synthesis_engine):\n"
+            f"Úsala como base para el portfolio_thesis, executive_narrative, y insight_tiers.\n"
+            f"Narrativiza y enriquece estas conclusiones — no las contradiga sin evidencia en los datos.\n"
+            f"{json.dumps(synth_summary, indent=2, ensure_ascii=False)}\n"
         )
 
     constraint_block = """
@@ -357,7 +411,8 @@ REGLAS DE RAZONAMIENTO (OBLIGATORIO)
         f"UMBRAL DE MATERIALIDAD: {threshold:.2f} COP MM\n"
         f"{extra_context}"
         f"{constraint_block}\n"
-        f"CUENTAS PARA ANÁLISIS ({len(accounts_payload)} cuentas):\n"
+        f"{low_mat_note}"
+        f"CUENTAS PARA ANÁLISIS — ALTA Y MEDIA MATERIALIDAD ({len(accounts_payload)} de {len(variations)} cuentas totales):\n"
         f"{json.dumps(accounts_payload, indent=2, ensure_ascii=False)}\n"
     )
 
@@ -372,7 +427,7 @@ def _invoke(system_prompt: str, user_prompt: str, llm: LLMProvider, tenant_id: s
         temperature=0.2,
         tenant_id=tenant_id,
         job_id=job_id,
-        max_tokens=16384,
+        max_tokens=32000,
     )
     return result if isinstance(result, dict) else {}
 
@@ -485,6 +540,7 @@ def run_llm_analysis(
     niif_validation_context: str | None = None,
     fund_analysis: dict | None = None,
     macro_context: dict | None = None,
+    executive_synthesis: dict | None = None,
 ) -> LLMAnalysisResult:
     """
     Full LLM analysis pipeline with constrained reasoning and reliability context.
@@ -507,6 +563,7 @@ def run_llm_analysis(
         niif_validation_context=niif_validation_context,
         fund_analysis=fund_analysis,
         macro_context=macro_context,
+        executive_synthesis=executive_synthesis,
     )
 
     logger.info(

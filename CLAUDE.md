@@ -433,7 +433,7 @@ Supporting types: `ValidationFlag(check_id, category, severity, message, affecte
 
 ### FinancialAnalyzer Architecture (Agent 2)
 
-The analyzer has been refactored into a highly modular **"Math First, LLM Second"** architecture consisting of 11 core engines under `src/agents/financial_analyzer/`:
+The analyzer uses a **"Math First, Synthesis Second, LLM Third"** architecture with 13 engines under `src/agents/financial_analyzer/`:
 
 | Engine | File | Purpose |
 |--------|------|---------|
@@ -446,14 +446,29 @@ The analyzer has been refactored into a highly modular **"Math First, LLM Second
 | `earnings_quality` | `earnings_quality.py` | Fair value vs operating income ratio, earnings quality score |
 | `concentration_engine` | `concentration_engine.py` | Portfolio concentration analysis |
 | `niif18_engine` | `niif18_engine.py` | NIIF 18 compliance flags and subtotals |
-| `llm_reasoning` | `llm_reasoning.py` | Constrained LLM call for qualitative insights |
-| `service` | `service.py` | Orchestrates all 17 steps; merges deterministic + LLM results |
+| `fund_engine` | `fund_engine.py` | Investment fund detection, NAV reconciliation, position tracking |
+| `kpi_engine` | `kpi_engine.py` | Executive KPI cards for dashboard display |
+| `synthesis_engine` | `synthesis_engine.py` | **Phase 1 Roadmap**: Portfolio-level executive synthesis — aggregates all engine outputs into investor flow story, strategic rotation, sector signals, board alerts, and structured `signals[]` list. Runs before the LLM so Claude narrativizes pre-formed conclusions instead of discovering patterns from 60+ raw rows. |
+| `llm_reasoning` | `llm_reasoning.py` | Constrained LLM call; receives pre-computed synthesis + only HIGH/MEDIUM materiality accounts (filters LOW to avoid token exhaustion) |
+| `service` | `service.py` | Orchestrates all steps; merges deterministic + LLM results |
 
-Key execution pipeline flow (17 steps orchestrated in `service.py`):
+**LLM Token Strategy**: Only HIGH and MEDIUM materiality accounts are sent to the LLM per-account analysis (typically 15-25 of 60+ accounts). LOW materiality accounts were causing JSON truncation and silent fallback to template text. `max_tokens=32000`.
+
+**`executive_synthesis`** field on `AnalyzerOutput` contains the structured portfolio story:
+- `main_portfolio_theme` — single-line characterization
+- `signals[]` — machine-readable labels: `investor_net_outflows_material`, `valuation_dependency_critical`, `sector_exposure_reduced_banking`, etc.
+- `investor_flow_story`, `strategic_rotation`, `earnings_quality_story`, `concentration_story` — deterministic narratives
+- `executive_conclusions[]` — 3-5 board-level bullet points
+- `board_alerts[]` — items requiring immediate board attention
+- `top_risks[]`, `top_strengths[]` — structured risk/strength signals
+
+Key execution pipeline flow (steps orchestrated in `service.py`):
 1. **Historical Enrichment**: Fetch historical S3 reports to load baseline account values.
 2. **Deterministic Computations**: Compute ratios, materiality, trend descriptions, reliability flags, concentrations, causal linkages, and earnings quality metrics.
-3. **Qualitative Insights (LLM)**: Query the LLM with strict context boundaries, ensuring the LLM cannot override deterministic risk/anomaly score or calculations by more than one level (ceiling rule).
-4. **Consolidation**: Map all results back into the strict `AnalyzerOutput` schema. If a fund or position didn't exist in the prior period, `previous_value` is set to `null` so `calculate_account_variation` flags it as `NEW_ACCOUNT` (suppressing spurious variation percentages downstream).
+3. **Fund Analysis**: NAV reconciliation, position tracking, new/closed positions detection.
+4. **Executive Synthesis** (`synthesis_engine`): Aggregate all engine outputs into portfolio story, signals, and board-ready conclusions. This is the "portfolio intelligence layer".
+5. **LLM Qualitative Insights**: Pass pre-computed synthesis as context; LLM narrativizes and enriches rather than re-deriving conclusions. Ceiling rule prevents LLM from overriding deterministic risk levels.
+6. **Consolidation**: Merge deterministic + LLM results into `AnalyzerOutput`.
 
 
 ### RevisorInteligente Architecture (Agent 5)

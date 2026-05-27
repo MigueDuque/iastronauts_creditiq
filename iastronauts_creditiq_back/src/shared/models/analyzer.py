@@ -93,3 +93,6 @@ class AnalyzerOutput(BaseModel):
     portfolio_thesis: str = ""         # LLM-inferred strategic portfolio thesis (1 paragraph)
     insight_tiers: dict = {}           # {tier1_critical: [...], tier2_material: [...]}
     narrative_layers: dict = {}        # {executive: str, tactical: str, technical: str}
+
+    # ── Phase 1 Roadmap: Executive Synthesis Engine ──────────────────────────
+    executive_synthesis: dict = {}     # Deterministic portfolio story from synthesis_engine
