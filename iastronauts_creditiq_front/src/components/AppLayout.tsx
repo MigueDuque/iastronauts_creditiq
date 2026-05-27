@@ -11,7 +11,7 @@ export default function AppLayout() {
   const [uploadOpen, setUploadOpen] = useState(false)
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', bgcolor: '#0A0C10' }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', bgcolor: 'var(--color-surface-deep)' }}>
       <Header onMenuToggle={() => setMobileOpen((v) => !v)} />
 
       <Box sx={{ display: 'flex', flex: 1 }}>
