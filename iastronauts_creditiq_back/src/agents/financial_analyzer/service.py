@@ -23,6 +23,7 @@ Flow (Math First — LLM Second):
   17. Build + persist AnalyzerOutput
 """
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -78,6 +79,8 @@ from .niif18_engine import (
     niif18_to_dict,
 )
 from .fund_engine import FundAnalysis, analyze_fund, fund_analysis_to_dict
+from .kpi_engine import calculate_executive_kpis
+from .synthesis_engine import ExecutiveSynthesis, synthesize as synthesize_portfolio, synthesis_to_dict
 from shared.progress_store import emit as _emit_step
 from shared.macro_context import generate_macro_context
 
@@ -298,6 +301,22 @@ class FinancialAnalyzerService:
                 payload.job_id, len(fund_chains), len(causal_chains),
             )
 
+        # ── Step 12c: Executive Synthesis ────────────────────────────────────
+        _emit_step(payload.job_id, "Building executive synthesis")
+        portfolio_synthesis: ExecutiveSynthesis = synthesize_portfolio(
+            fund_analysis=fund_dict,
+            concentration=conc_dict,
+            earnings_quality=eq_dict,
+        )
+        synthesis_dict = synthesis_to_dict(portfolio_synthesis)
+        logger.info(
+            "synthesis | theme=%r signals=%d conclusions=%d alerts=%d",
+            portfolio_synthesis.main_portfolio_theme[:60],
+            len(portfolio_synthesis.signals),
+            len(portfolio_synthesis.executive_conclusions),
+            len(portfolio_synthesis.board_alerts),
+        )
+
         # ── Step 13: NIIF 18 subtotals ───────────────────────────────────────
         niif18_subtotals: NIIF18Subtotals = calculate_niif18_subtotals(
             enriched_accounts,
@@ -350,22 +369,34 @@ class FinancialAnalyzerService:
         )
 
         # ── Step 14b: Macro context enrichment ───────────────────────────────
+        # Hard timeout: yfinance and TradingEconomics have no built-in timeout;
+        # without this they can hang 60+ seconds and block the entire analysis.
+        _MACRO_TIMEOUT = 25
         _emit_step(payload.job_id, "Fetching macro context")
         macro_ctx: dict | None = None
         try:
             reporting_period = getattr(payload.business_context, "reporting_period", None) or ""
             analysis_period = reporting_period or None
-            macro_ctx = generate_macro_context(
-                analysis_period=analysis_period,
-                llm_provider=self._llm,
-            )
-            logger.info(
-                "macro_context_ok | job=%s signals=%d assets=%d news=%d",
-                payload.job_id,
-                len(macro_ctx.get("macro_signals", [])),
-                len(macro_ctx.get("market_assets_context", [])),
-                len(macro_ctx.get("news_context", [])),
-            )
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+                _fut = _pool.submit(
+                    generate_macro_context,
+                    analysis_period=analysis_period,
+                    llm_provider=self._llm,
+                )
+                try:
+                    macro_ctx = _fut.result(timeout=_MACRO_TIMEOUT)
+                    logger.info(
+                        "macro_context_ok | job=%s signals=%d assets=%d news=%d",
+                        payload.job_id,
+                        len(macro_ctx.get("macro_signals", [])),
+                        len(macro_ctx.get("market_assets_context", [])),
+                        len(macro_ctx.get("news_context", [])),
+                    )
+                except concurrent.futures.TimeoutError:
+                    logger.warning(
+                        "macro_context_timeout | job=%s exceeded=%ds — continuing without macro",
+                        payload.job_id, _MACRO_TIMEOUT,
+                    )
         except Exception as exc:
             logger.warning("macro_context_failed | job=%s error=%s", payload.job_id, exc)
             macro_ctx = None
@@ -391,6 +422,23 @@ class FinancialAnalyzerService:
             niif_validation_context=niif_validation_context,
             fund_analysis=fund_dict if fund_analysis.is_investment_fund else None,
             macro_context=macro_ctx,
+            executive_synthesis=synthesis_dict,
+        )
+
+        # ── Step 15b: Executive KPI consolidation ────────────────────────────
+        executive_kpis = calculate_executive_kpis(
+            ratios_dict=ratios_dict,
+            earnings_quality=eq_dict,
+            concentration=conc_dict,
+            fund_analysis=fund_dict if fund_analysis.is_investment_fund else None,
+        )
+        logger.info(
+            "executive_kpis | job=%s roe=%.1f net_margin=%.1f eq_score=%.0f top1=%.1f",
+            payload.job_id,
+            executive_kpis.get("profitability", {}).get("roe_pct", 0),
+            executive_kpis.get("profitability", {}).get("net_margin_pct", 0),
+            executive_kpis.get("earnings_quality", {}).get("quality_score", 0),
+            executive_kpis.get("concentration", {}).get("top1_concentration_pct", 0),
         )
 
         # ── Step 16: Merge math + LLM → AccountAnalysis ──────────────────────
@@ -452,6 +500,11 @@ class FinancialAnalyzerService:
             if payload.niif_validation else {},
             fund_analysis=fund_dict,
             macro_context=macro_ctx or {},
+            executive_kpis=executive_kpis,
+            portfolio_thesis=llm_result.portfolio_thesis,
+            insight_tiers=llm_result.insight_tiers,
+            narrative_layers=llm_result.narrative_layers,
+            executive_synthesis=synthesis_dict,
         )
 
         self._save_to_s3(result)

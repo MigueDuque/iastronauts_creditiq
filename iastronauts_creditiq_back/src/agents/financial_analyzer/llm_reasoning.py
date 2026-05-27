@@ -98,6 +98,10 @@ class LLMAnalysisResult:
     executive_narrative: str = ""
     niif_notes_required: list[str] = field(default_factory=list)
     account_insights: dict[str, AccountLLMInsight] = field(default_factory=dict)
+    # Executive intelligence layer
+    portfolio_thesis: str = ""
+    insight_tiers: dict = field(default_factory=dict)    # tier1_critical / tier2_material
+    narrative_layers: dict = field(default_factory=dict) # executive / tactical / technical
 
 
 # ── Deterministic confidence calculator ──────────────────────────────────────
@@ -154,6 +158,9 @@ def compute_confidence(
 
 # ── Prompt builder ────────────────────────────────────────────────────────────
 
+_HIGH_PRIORITY_MATS = {MaterialityLevel.HIGH, MaterialityLevel.MEDIUM}
+
+
 def _build_user_prompt(
     company_name: str,
     periods: list[str],
@@ -170,14 +177,29 @@ def _build_user_prompt(
     niif_validation_context: str | None = None,
     fund_analysis: dict | None = None,
     macro_context: dict | None = None,
+    executive_synthesis: dict | None = None,
 ) -> str:
     """
-    Improvement #7: Constrained Financial Reasoning prompt.
-    Deterministic facts are presented first. LLM is explicitly instructed to
-    ONLY narrate these facts — never invent causality or unsupported claims.
+    Constrained Financial Reasoning prompt.
+
+    Key design decisions:
+    - Only HIGH + MEDIUM materiality accounts are sent to the LLM for per-account
+      analysis.  LOW materiality accounts (often 30–40 entries) are excluded to
+      prevent token exhaustion that causes the JSON to truncate and all per-account
+      insights to be silently discarded.
+    - executive_synthesis (pre-computed by synthesis_engine) is included as a
+      structured context block so the LLM can narrativize pre-formed conclusions
+      rather than discover them from raw number tables.
     """
+    # Filter to HIGH + MEDIUM materiality only to avoid token exhaustion
+    priority_variations = [
+        v for v in variations
+        if materialities.get(v.account_id, MaterialityLevel.LOW) in _HIGH_PRIORITY_MATS
+    ]
+    low_mat_count = len(variations) - len(priority_variations)
+
     accounts_payload = []
-    for v in variations:
+    for v in priority_variations:
         rel = reliabilities.get(v.account_id)
         entry: dict = {
             "account_id": v.account_id,
@@ -198,6 +220,12 @@ def _build_user_prompt(
             entry["absolute_variation_cop_mm"] = v.absolute_variation if v.has_previous_value else None
             entry["variation_pct_note"] = rel.display_label if rel else "Sin datos previos"
         accounts_payload.append(entry)
+
+    low_mat_note = (
+        f"\n[NOTA: {low_mat_count} cuentas de baja materialidad excluidas de este análisis "
+        f"por priorización. Solo se analizan cuentas de alta y media materialidad.]\n"
+        if low_mat_count > 0 else ""
+    )
 
     niif_section = ""
     if niif_reference_text.strip():
@@ -276,9 +304,39 @@ def _build_user_prompt(
             f"{json.dumps(fund_summary, indent=2, ensure_ascii=False)}\n"
         )
 
+    if executive_synthesis:
+        # Pre-computed portfolio synthesis — the most important context block.
+        # The LLM should use this as the foundation for all portfolio-level narratives
+        # rather than re-deriving conclusions from raw account data.
+        synth_summary = {
+            "main_portfolio_theme": executive_synthesis.get("main_portfolio_theme"),
+            "signals": executive_synthesis.get("signals", []),
+            "portfolio_story": executive_synthesis.get("portfolio_story"),
+            "strategic_rotation": executive_synthesis.get("strategic_rotation"),
+            "investor_flow_story": executive_synthesis.get("investor_flow_story"),
+            "earnings_quality_story": executive_synthesis.get("earnings_quality_story"),
+            "concentration_story": executive_synthesis.get("concentration_story"),
+            "executive_conclusions": executive_synthesis.get("executive_conclusions", []),
+            "board_alerts": executive_synthesis.get("board_alerts", []),
+            "top_risks": executive_synthesis.get("top_risks", []),
+            "top_strengths": executive_synthesis.get("top_strengths", []),
+            "aum_change_pct": executive_synthesis.get("aum_change_pct"),
+            "net_investor_flow_cop_mm": executive_synthesis.get("net_investor_flow_cop_mm"),
+            "top_issuer": executive_synthesis.get("top_issuer"),
+            "top_issuer_pct": executive_synthesis.get("top_issuer_pct"),
+            "valuation_dependency_pct": executive_synthesis.get("valuation_dependency_pct"),
+            "recurring_income_pct": executive_synthesis.get("recurring_income_pct"),
+        }
+        extra_context += (
+            f"\nSÍNTESIS EJECUTIVA PRE-CALCULADA (determinística — synthesis_engine):\n"
+            f"Úsala como base para el portfolio_thesis, executive_narrative, y insight_tiers.\n"
+            f"Narrativiza y enriquece estas conclusiones — no las contradiga sin evidencia en los datos.\n"
+            f"{json.dumps(synth_summary, indent=2, ensure_ascii=False)}\n"
+        )
+
     constraint_block = """
 ══════════════════════════════════════════════════════
-REGLAS DE RAZONAMIENTO RESTRINGIDO (OBLIGATORIO)
+REGLAS DE RAZONAMIENTO (OBLIGATORIO)
 ══════════════════════════════════════════════════════
 1. HECHOS PRIMERO, NARRATIVA DESPUÉS.
    Solo puedes narrar datos ya calculados y provistos en este prompt.
@@ -287,41 +345,59 @@ REGLAS DE RAZONAMIENTO RESTRINGIDO (OBLIGATORIO)
    Si variation_reliability ≠ "RELIABLE", NO uses variation_pct como evidencia.
    En cambio, menciona el display_label (ej: "Nueva cuenta / sin período anterior").
 
-3. SIN CAUSALIDADES INVENTADAS.
-   Solo puedes establecer relaciones causales que estén en las "cadenas de causalidad
-   detectadas" o que sean aritméticamente demostrables con los datos del prompt.
+3. CAUSALIDAD INTELIGENTE.
+   Puedes establecer relaciones causales cuando estén en las cadenas detectadas
+   O cuando sean económica y financieramente coherentes con los datos del prompt.
+   Usa razonamiento financiero experto para conectar movimientos entre cuentas.
 
-4. SIN CLASIFICACIÓN DE RIESGO FINAL.
-   El campo risk_level es solo una señal financiera del analista.
-   El scoring de riesgo definitivo es responsabilidad del RiskScorer Agent.
+4. CLASIFICACIÓN DE SALUD FINANCIERA.
+   overall_financial_health — elige el valor más representativo:
+   STABLE | DECLINING | GROWING | CRITICAL |
+   LIQUID | LEVERAGED | SPECULATIVE | CASH_STRESSED |
+   VALUATION_DRIVEN | CONCENTRATED
+   Prefiere los valores descriptivos (VALUATION_DRIVEN, CONCENTRATED, etc.)
+   cuando el análisis del fondo o empresa los justifique claramente.
 
-   overall_financial_health: elige el valor que MEJOR describe el estado financiero predominante.
-   Valores disponibles: STABLE | DECLINING | GROWING | CRITICAL |
-     LIQUID (caja sólida, baja deuda) |
-     LEVERAGED (alto endeudamiento relativo) |
-     SPECULATIVE (alta volatilidad, baja cobertura) |
-     CASH_STRESSED (flujo operativo negativo o deteriorado) |
-     VALUATION_DRIVEN (resultados dependen de ganancias por valorización no realizadas) |
-     CONCENTRATED (alta concentración en pocas cuentas o emisores)
-   Usa los nuevos valores cuando el análisis los justifique; de lo contrario usa los clásicos.
-
-5. POSSIBLE_CAUSES: CAUSAS ESPECÍFICAS, NO REPETICIONES.
-   Para cada cuenta, genera 2-3 causas CONCRETAS usando el contexto del fondo/empresa.
-   PROHIBIDO: repetir la variación porcentual como causa (ej. "Variación de -40.7%...").
-   PROHIBIDO: frases genéricas como "cambios en el mercado" sin datos específicos.
-   OBLIGATORIO: referenciar datos del prompt (flujos de inversionistas, posiciones
-   nuevas/cerradas, cadenas causales, ratios, eventos corporativos).
+5. POSSIBLE_CAUSES: CAUSAS ESPECÍFICAS, NO GENÉRICAS.
+   Para cada cuenta, genera 2-3 causas CONCRETAS usando el contexto del fondo.
+   PROHIBIDO: repetir la variación porcentual como causa.
+   PROHIBIDO: frases genéricas sin anclaje en datos del prompt.
+   OBLIGATORIO: referenciar datos concretos (flujos, posiciones, ratios, eventos).
 
 6. CONFIDENCE HONESTA.
-   En llm_confidence_hint: usa 0.9–0.99 solo si tienes ≥3 evidencias concretas.
+   llm_confidence_hint: usa 0.9–0.99 solo si tienes ≥3 evidencias concretas.
    Usa 0.5–0.7 para cuentas nuevas o con variaciones no confiables.
 
-7. CONTEXTO MACRO — SOLO COMO TELÓN DE FONDO.
-   Si se provee CONTEXTO MACROECONÓMICO Y DE MERCADO, úsalo únicamente para
-   enriquecer el executive_insight con una perspectiva de mercado (e.g.,
-   "en un entorno de tasas a la baja, la apreciación de TES es consistente…").
-   PROHIBIDO: inventar datos macro no provistos. Si el contexto macro no está
-   disponible, ignora esta regla y analiza solo con datos financieros.
+7. CONTEXTO MACRO — RAZONAMIENTO DE MERCADO PERMITIDO.
+   Cuando se provea CONTEXTO MACROECONÓMICO, úsalo activamente para:
+   - Conectar movimientos de portafolio con el entorno de tasas/inflación/FX.
+   - Interpretar variaciones de valorización en el contexto de ciclo de mercado.
+   - Explicar flows de inversionistas en relación con apetito de riesgo de mercado.
+   - Enriquecer el portfolio_thesis con tesis de posicionamiento de mercado.
+   PUEDES inferir: "entorno de tasas a la baja", "mercado de renta fija favorable",
+   "ciclo de reducción de exposición bancaria", "recomposición hacia activos reales".
+   PROHIBIDO SIEMPRE: inventar tasas exactas, retornos de índices, datos de Bloomberg.
+
+8. "SO WHAT?" — IMPACTO EJECUTIVO OBLIGATORIO.
+   Cada insight y señal debe responder: ¿Por qué le importa esto a la junta directiva?
+   NO: "La posición en Bancolombia fue liquidada."
+   SÍ: "La liquidación de Bancolombia redujo materialmente la exposición bancaria del portafolio."
+   NO: "El efectivo disminuyó."
+   SÍ: "El despliegue de liquidez hacia TES soberanos redujo la disponibilidad inmediata."
+
+9. PORTFOLIO THESIS.
+   Infiere la tesis estratégica del portafolio basada en los movimientos observados:
+   - ¿Hacia qué sectores/activos está rotando?
+   - ¿Está aumentando o reduciendo concentración?
+   - ¿Qué estilo de inversión predomina (defensivo, growth, income, especulativo)?
+   - ¿Hay señales de rebalanceo estratégico vs. movimiento táctico?
+   La tesis DEBE ser coherente con los datos de composición provistos.
+
+10. INSIGHT TIERS — PRIORIZACIÓN EJECUTIVA.
+    tier1_critical: 3–5 señales de mayor impacto ejecutivo.
+    Criterios: AUM material, concentración crítica, dependencia de valorizaciones,
+    estrés de liquidez, flujos significativos de inversionistas, rotación estratégica.
+    tier2_material: ≤10 hallazgos por cuenta de alta/media materialidad.
 ══════════════════════════════════════════════════════
 """
 
@@ -335,7 +411,8 @@ REGLAS DE RAZONAMIENTO RESTRINGIDO (OBLIGATORIO)
         f"UMBRAL DE MATERIALIDAD: {threshold:.2f} COP MM\n"
         f"{extra_context}"
         f"{constraint_block}\n"
-        f"CUENTAS PARA ANÁLISIS ({len(accounts_payload)} cuentas):\n"
+        f"{low_mat_note}"
+        f"CUENTAS PARA ANÁLISIS — ALTA Y MEDIA MATERIALIDAD ({len(accounts_payload)} de {len(variations)} cuentas totales):\n"
         f"{json.dumps(accounts_payload, indent=2, ensure_ascii=False)}\n"
     )
 
@@ -350,7 +427,7 @@ def _invoke(system_prompt: str, user_prompt: str, llm: LLMProvider, tenant_id: s
         temperature=0.2,
         tenant_id=tenant_id,
         job_id=job_id,
-        max_tokens=16384,
+        max_tokens=32000,
     )
     return result if isinstance(result, dict) else {}
 
@@ -372,6 +449,9 @@ def _parse_response(raw: dict) -> LLMAnalysisResult:
         overall_financial_health=str(raw.get("overall_financial_health", "STABLE")).upper(),
         executive_narrative=str(raw.get("executive_narrative", "")),
         niif_notes_required=_validate_niif_refs(list(raw.get("niif_notes_required", []))),
+        portfolio_thesis=str(raw.get("portfolio_thesis", "")),
+        insight_tiers=_parse_insight_tiers(raw.get("insight_tiers", {})),
+        narrative_layers=_parse_narrative_layers(raw.get("narrative_layers", {})),
     )
 
     for item in raw.get("accounts_analysis", []):
@@ -404,6 +484,41 @@ def _parse_response(raw: dict) -> LLMAnalysisResult:
     return result
 
 
+def _parse_insight_tiers(raw: object) -> dict:
+    if not isinstance(raw, dict):
+        return {}
+    tier1 = raw.get("tier1_critical") or []
+    tier2 = raw.get("tier2_material") or []
+    return {
+        "tier1_critical": [
+            {
+                "signal":   str(t.get("signal",   "")),
+                "so_what":  str(t.get("so_what",  "")),
+                "category": str(t.get("category", "")),
+            }
+            for t in tier1 if isinstance(t, dict)
+        ],
+        "tier2_material": [
+            {
+                "account_id": str(t.get("account_id", "")),
+                "signal":     str(t.get("signal",     "")),
+                "so_what":    str(t.get("so_what",    "")),
+            }
+            for t in tier2 if isinstance(t, dict)
+        ],
+    }
+
+
+def _parse_narrative_layers(raw: object) -> dict:
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        "executive": str(raw.get("executive", "")),
+        "tactical":  str(raw.get("tactical",  "")),
+        "technical": str(raw.get("technical", "")),
+    }
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def run_llm_analysis(
@@ -425,20 +540,12 @@ def run_llm_analysis(
     niif_validation_context: str | None = None,
     fund_analysis: dict | None = None,
     macro_context: dict | None = None,
+    executive_synthesis: dict | None = None,
 ) -> LLMAnalysisResult:
     """
     Full LLM analysis pipeline with constrained reasoning and reliability context.
     On total failure (all retries exhausted), returns a safe empty result.
     """
-    # Only HIGH and MEDIUM materiality accounts need qualitative narrative.
-    # LOW accounts fall back to deterministic defaults in service.py, saving
-    # ~60-70% of output tokens on large funds and preventing max_tokens truncation.
-    llm_variations = [
-        v for v in variations
-        if materialities.get(v.account_id, MaterialityLevel.LOW) != MaterialityLevel.LOW
-    ]
-    low_count = len(variations) - len(llm_variations)
-
     system_prompt = _get_system_prompt()
     user_prompt = _build_user_prompt(
         company_name=company_name,
@@ -446,7 +553,7 @@ def run_llm_analysis(
         business_context_snippet=business_context_snippet,
         ratios_dict=ratios_dict,
         threshold=threshold,
-        variations=llm_variations,
+        variations=variations,
         materialities=materialities,
         reliabilities=reliabilities,
         niif_reference_text=niif_reference_text,
@@ -456,11 +563,12 @@ def run_llm_analysis(
         niif_validation_context=niif_validation_context,
         fund_analysis=fund_analysis,
         macro_context=macro_context,
+        executive_synthesis=executive_synthesis,
     )
 
     logger.info(
-        "llm_start | job=%s accounts_total=%d accounts_llm=%d skipped_low=%d prompt_chars=%d",
-        job_id, len(variations), len(llm_variations), low_count, len(user_prompt),
+        "llm_start | job=%s accounts=%d prompt_chars=%d",
+        job_id, len(variations), len(user_prompt),
     )
 
     try:
