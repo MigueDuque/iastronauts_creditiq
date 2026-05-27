@@ -339,8 +339,14 @@ export default function AnalysisPage() {
     setJobStatus(null); setReport(null); setAnalyzerData(null); setPhase(null); setElapsed(0)
     localStorage.setItem(STORAGE_KEY, job.job_id)
 
+    // Write the status to localStorage BEFORE setting jobId.
+    // The main polling useEffect checks cached.analysis_id === jobId; if it finds
+    // a mismatch (null key) it wipes all state — including the data we're about to load.
+    const syntheticStatus: JobStatus = { analysis_id: job.job_id, status: job.status as JobStatus['status'] }
+    localStorage.setItem(STATUS_KEY, JSON.stringify(syntheticStatus))
+    setJobStatus(syntheticStatus)
+
     // Eagerly restore existing S3 data so the UI renders immediately without a blank flash.
-    // /report returns load_first([financial_analyzer, extractor]) — the most complete available.
     const s = job.status
     if (s === 'extraction_complete' || s === 'analysis_complete' || s === 'completed') {
       try {
@@ -357,6 +363,9 @@ export default function AnalysisPage() {
   }
 
   function _startPolling(onStatus: (d: JobStatus) => void) {
+    // Cancel the main polling loop before starting the fast agent-run loop.
+    // Without this, both intervals run concurrently and the old one is orphaned.
+    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
     let alive = true
     const poll = async () => {
       try {
@@ -373,7 +382,7 @@ export default function AnalysisPage() {
     }
     poll()
     intervalRef.current = setInterval(poll, 4000)
-    return () => { alive = false }
+    return () => { alive = false; if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null } }
   }
 
   function handleRunAgent2Click() {
@@ -386,7 +395,9 @@ export default function AnalysisPage() {
   async function _doRunAgent2() {
     if (!jobId) return
     setPhase('agent2'); setReport(null); setAnalyzerData(null); setElapsed(0)
-    await fetch(`${API}/analyses/${jobId}/continue`, { method: 'POST', headers: HEADERS })
+    // Use /reanalyze — always routes to Agent 2 regardless of current S3 status.
+    // /continue is status-aware and would run Agents 3+4 if status is analysis_complete.
+    await fetch(`${API}/analyses/${jobId}/reanalyze`, { method: 'POST', headers: HEADERS })
     _startPolling(async (data) => {
       if (data.status === 'analysis_complete') {
         const rep = await fetch(`${API}/analyses/${jobId}/report`, { headers: HEADERS })
@@ -596,7 +607,7 @@ export default function AnalysisPage() {
 
                 <p className="text-[10px] font-mono text-outline">
                   {phase === 'agent2'
-                    ? 'LLM analysis takes 10–30s · polling every 4s'
+                    ? 'LLM analysis takes 30–90s depending on portfolio size · polling every 4s'
                     : phase === 'final'
                     ? 'Report generation takes 15–60s · polling every 4s'
                     : 'PDF Textract jobs take 30–120s · polling every 8s'}
