@@ -169,6 +169,7 @@ def _build_user_prompt(
     concentration: dict | None = None,
     niif_validation_context: str | None = None,
     fund_analysis: dict | None = None,
+    macro_context: dict | None = None,
 ) -> str:
     """
     Improvement #7: Constrained Financial Reasoning prompt.
@@ -226,6 +227,23 @@ def _build_user_prompt(
             f"\nCADENAS DE CAUSALIDAD DETECTADAS (determinístico):\n"
             f"{json.dumps(causality_chains, indent=2, ensure_ascii=False)}\n"
         )
+    if macro_context:
+        # Compact macro context: signals + top-level qualitative states only
+        macro_summary = {
+            "macro_context": macro_context.get("macro_context", {}),
+            "market_context": macro_context.get("market_context", {}),
+            "sector_context": macro_context.get("sector_context", []),
+            "macro_signals": macro_context.get("macro_signals", []),
+            "top_news": [
+                {"headline": n.get("headline", ""), "relevance": n.get("relevance", 0)}
+                for n in (macro_context.get("news_context") or [])[:3]
+            ],
+        }
+        extra_context += (
+            f"\nCONTEXTO MACROECONÓMICO Y DE MERCADO (Colombia, período de análisis):\n"
+            f"{json.dumps(macro_summary, indent=2, ensure_ascii=False)}\n"
+        )
+
     if fund_analysis:
         # Include only the narrative-relevant fields; raw position list is too large
         fund_summary = {
@@ -297,6 +315,13 @@ REGLAS DE RAZONAMIENTO RESTRINGIDO (OBLIGATORIO)
 6. CONFIDENCE HONESTA.
    En llm_confidence_hint: usa 0.9–0.99 solo si tienes ≥3 evidencias concretas.
    Usa 0.5–0.7 para cuentas nuevas o con variaciones no confiables.
+
+7. CONTEXTO MACRO — SOLO COMO TELÓN DE FONDO.
+   Si se provee CONTEXTO MACROECONÓMICO Y DE MERCADO, úsalo únicamente para
+   enriquecer el executive_insight con una perspectiva de mercado (e.g.,
+   "en un entorno de tasas a la baja, la apreciación de TES es consistente…").
+   PROHIBIDO: inventar datos macro no provistos. Si el contexto macro no está
+   disponible, ignora esta regla y analiza solo con datos financieros.
 ══════════════════════════════════════════════════════
 """
 
@@ -325,6 +350,7 @@ def _invoke(system_prompt: str, user_prompt: str, llm: LLMProvider, tenant_id: s
         temperature=0.2,
         tenant_id=tenant_id,
         job_id=job_id,
+        max_tokens=16384,
     )
     return result if isinstance(result, dict) else {}
 
@@ -398,11 +424,21 @@ def run_llm_analysis(
     concentration: dict | None = None,
     niif_validation_context: str | None = None,
     fund_analysis: dict | None = None,
+    macro_context: dict | None = None,
 ) -> LLMAnalysisResult:
     """
     Full LLM analysis pipeline with constrained reasoning and reliability context.
     On total failure (all retries exhausted), returns a safe empty result.
     """
+    # Only HIGH and MEDIUM materiality accounts need qualitative narrative.
+    # LOW accounts fall back to deterministic defaults in service.py, saving
+    # ~60-70% of output tokens on large funds and preventing max_tokens truncation.
+    llm_variations = [
+        v for v in variations
+        if materialities.get(v.account_id, MaterialityLevel.LOW) != MaterialityLevel.LOW
+    ]
+    low_count = len(variations) - len(llm_variations)
+
     system_prompt = _get_system_prompt()
     user_prompt = _build_user_prompt(
         company_name=company_name,
@@ -410,7 +446,7 @@ def run_llm_analysis(
         business_context_snippet=business_context_snippet,
         ratios_dict=ratios_dict,
         threshold=threshold,
-        variations=variations,
+        variations=llm_variations,
         materialities=materialities,
         reliabilities=reliabilities,
         niif_reference_text=niif_reference_text,
@@ -419,11 +455,12 @@ def run_llm_analysis(
         concentration=concentration,
         niif_validation_context=niif_validation_context,
         fund_analysis=fund_analysis,
+        macro_context=macro_context,
     )
 
     logger.info(
-        "llm_start | job=%s accounts=%d prompt_chars=%d",
-        job_id, len(variations), len(user_prompt),
+        "llm_start | job=%s accounts_total=%d accounts_llm=%d skipped_low=%d prompt_chars=%d",
+        job_id, len(variations), len(llm_variations), low_count, len(user_prompt),
     )
 
     try:

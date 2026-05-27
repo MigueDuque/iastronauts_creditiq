@@ -79,6 +79,7 @@ from .niif18_engine import (
 )
 from .fund_engine import FundAnalysis, analyze_fund, fund_analysis_to_dict
 from shared.progress_store import emit as _emit_step
+from shared.macro_context import generate_macro_context
 
 logger = logging.getLogger("financial_analyzer.service")
 
@@ -348,6 +349,27 @@ class FinancialAnalyzerService:
             anomaly_count, len(structural_issues), unreliable_count, len(causal_chains),
         )
 
+        # ── Step 14b: Macro context enrichment ───────────────────────────────
+        _emit_step(payload.job_id, "Fetching macro context")
+        macro_ctx: dict | None = None
+        try:
+            reporting_period = getattr(payload.business_context, "reporting_period", None) or ""
+            analysis_period = reporting_period or None
+            macro_ctx = generate_macro_context(
+                analysis_period=analysis_period,
+                llm_provider=self._llm,
+            )
+            logger.info(
+                "macro_context_ok | job=%s signals=%d assets=%d news=%d",
+                payload.job_id,
+                len(macro_ctx.get("macro_signals", [])),
+                len(macro_ctx.get("market_assets_context", [])),
+                len(macro_ctx.get("news_context", [])),
+            )
+        except Exception as exc:
+            logger.warning("macro_context_failed | job=%s error=%s", payload.job_id, exc)
+            macro_ctx = None
+
         # ── Step 15: LLM constrained qualitative reasoning [#7 + #8] ─────────
         _emit_step(payload.job_id, "LLM qualitative analysis")
         llm_result: LLMAnalysisResult = run_llm_analysis(
@@ -368,6 +390,7 @@ class FinancialAnalyzerService:
             concentration=conc_dict,
             niif_validation_context=niif_validation_context,
             fund_analysis=fund_dict if fund_analysis.is_investment_fund else None,
+            macro_context=macro_ctx,
         )
 
         # ── Step 16: Merge math + LLM → AccountAnalysis ──────────────────────
@@ -428,6 +451,7 @@ class FinancialAnalyzerService:
             niif_validation=payload.niif_validation.model_dump(mode="json")
             if payload.niif_validation else {},
             fund_analysis=fund_dict,
+            macro_context=macro_ctx or {},
         )
 
         self._save_to_s3(result)

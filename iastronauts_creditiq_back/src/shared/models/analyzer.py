@@ -84,3 +84,6 @@ class AnalyzerOutput(BaseModel):
 
     # ── Fund analysis (populated when EEFF is an investment fund / CIV) ─────────
     fund_analysis: dict = {}   # FundAnalysis serialized; empty dict for non-fund entities
+
+    # ── Macro Context Engine output ──────────────────────────────────────────
+    macro_context: dict = {}   # MacroContextOutput from shared.macro_context.engine
