@@ -98,10 +98,29 @@ export default function UploadDialog({ open, onClose }: UploadDialogProps) {
   const [companyName, setCompanyName] = useState('')
   const [launching, setLaunching] = useState(false)
   const [launchError, setLaunchError] = useState<string | null>(null)
+  const [selectedYear, setSelectedYear] = useState<string>('')
+  const [selectedQuarter, setSelectedQuarter] = useState<string>('')
+  const [duplicateWarning, setDuplicateWarning] = useState<string | null>(null)
+
+  function initPeriodAndYear() {
+    const parsed = deriveFolder(files)
+    if (parsed && parsed.date) {
+      const parts = parsed.date.split('-')
+      if (parts.length >= 2) {
+        setSelectedYear(parts[0]) // e.g. "2025"
+        setSelectedQuarter(parts[1]) // e.g. "06"
+        return
+      }
+    }
+    const currentYear = new Date().getFullYear().toString()
+    setSelectedYear(currentYear)
+    setSelectedQuarter('12')
+  }
 
   function reset() {
     setFiles([]); setDragging(false); setUploading(false); setUploadDone(false)
     setStep(1); setCompanyName(''); setLaunching(false); setLaunchError(null)
+    setSelectedYear(''); setSelectedQuarter(''); setDuplicateWarning(null)
   }
 
   function handleClose() {
@@ -128,15 +147,15 @@ export default function UploadDialog({ open, onClose }: UploadDialogProps) {
     try {
       const res = await fetch(`${UPLOAD_API}/upload-url`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-tenant-id': 'demo' },
         body: JSON.stringify({
-          folder_name:  folder,
-          file_name:    state.file.name,
-          content_type: state.file.type || 'application/octet-stream',
+          file_name: state.file.name,
+          file_type: fileType(state.file.name),
+          folder,
         }),
       })
       if (!res.ok) throw new Error(`API error ${res.status}`)
-      const { url, s3_key } = await res.json()
+      const { upload_url: url, s3_key } = await res.json()
 
       await new Promise<void>((resolve, reject) => {
         const xhr = new XMLHttpRequest()
@@ -180,19 +199,20 @@ export default function UploadDialog({ open, onClose }: UploadDialogProps) {
     setUploadDone(true)
   }
 
-  async function handleStartAnalysis() {
+  async function handleStartAnalysis(forceRerun = false) {
     const doneFiles = files.filter((f) => f.status === 'done' && f.s3Key)
     const parsed    = deriveFolder(files)
     if (doneFiles.length === 0) return
 
     setLaunching(true)
     setLaunchError(null)
+    setDuplicateWarning(null)
 
     try {
       const company = companyName.trim() || (parsed ? `${parsed.org} ${parsed.fund}` : 'Unknown')
-      const period  = parsed?.date ?? ''
+      const period  = `${selectedYear}-${selectedQuarter}`
 
-      const body = {
+      const body: Record<string, unknown> = {
         tenant_id: 'demo',
         business_context: {
           company_name:      company,
@@ -205,16 +225,26 @@ export default function UploadDialog({ open, onClose }: UploadDialogProps) {
           file_type:    fileType(f.file.name),
         })),
       }
+      if (forceRerun) body.force_rerun = true
 
       const res = await fetch(`${API_URL}/analyses`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-tenant-id': 'demo' },
         body: JSON.stringify(body),
       })
+
+      if (res.status === 409) {
+        const data = await res.json()
+        setDuplicateWarning(data.message ?? 'Ya existe un análisis para este período.')
+        setLaunching(false)
+        return
+      }
+
       if (!res.ok) throw new Error(`API error ${res.status}`)
       const data = await res.json()
       const id = data.job_id ?? data.analysis_id
-      setTimeout(() => { onClose(); reset(); navigate(`/jobs/${id}`) }, 600)
+      localStorage.setItem('creditiq_analysis_id', id)
+      setTimeout(() => { onClose(); reset(); navigate('/analysis') }, 600)
     } catch (err) {
       setLaunchError((err as Error).message)
       setLaunching(false)
@@ -422,11 +452,113 @@ export default function UploadDialog({ open, onClose }: UploadDialogProps) {
               onChange={(e) => setCompanyName(e.target.value)}
               disabled={launching}
               size="small"
-              sx={{ ...inputSx, mb: 1 }}
+              sx={{ ...inputSx, mb: 2 }}
             />
+
+            {/* Period and Year Selector */}
+            <Box sx={{ display: 'flex', gap: 2, mb: 2 }}>
+              {/* Year Dropdown */}
+              <Box sx={{ flex: 1 }}>
+                <label style={{ fontFamily: 'Inter', fontSize: 12, color: '#8d90a2', display: 'block', marginBottom: 6 }}>
+                  Year of Report (Año)
+                </label>
+                <select
+                  value={selectedYear}
+                  onChange={(e) => setSelectedYear(e.target.value)}
+                  disabled={launching}
+                  style={{
+                    width: '100%',
+                    backgroundColor: '#1d1f28',
+                    border: '1px solid #30363D',
+                    borderRadius: '8px',
+                    color: '#e2e1ee',
+                    fontFamily: 'Inter',
+                    fontSize: 14,
+                    padding: '8.5px 12px',
+                    outline: 'none',
+                    cursor: 'pointer',
+                    transition: 'border-color 0.2s',
+                  }}
+                  onFocus={(e) => (e.target.style.borderColor = '#b7c4ff')}
+                  onBlur={(e) => (e.target.style.borderColor = '#30363D')}
+                >
+                  {Array.from({ length: 11 }, (_, i) => 2020 + i).map((y) => (
+                    <option key={y} value={y.toString()} style={{ backgroundColor: '#161B22' }}>
+                      {y}
+                    </option>
+                  ))}
+                </select>
+              </Box>
+
+              {/* Period / Quarter Dropdown */}
+              <Box sx={{ flex: 1 }}>
+                <label style={{ fontFamily: 'Inter', fontSize: 12, color: '#8d90a2', display: 'block', marginBottom: 6 }}>
+                  Reporting Quarter (Trimestre)
+                </label>
+                <select
+                  value={selectedQuarter}
+                  onChange={(e) => setSelectedQuarter(e.target.value)}
+                  disabled={launching}
+                  style={{
+                    width: '100%',
+                    backgroundColor: '#1d1f28',
+                    border: '1px solid #30363D',
+                    borderRadius: '8px',
+                    color: '#e2e1ee',
+                    fontFamily: 'Inter',
+                    fontSize: 14,
+                    padding: '8.5px 12px',
+                    outline: 'none',
+                    cursor: 'pointer',
+                    transition: 'border-color 0.2s',
+                  }}
+                  onFocus={(e) => (e.target.style.borderColor = '#b7c4ff')}
+                  onBlur={(e) => (e.target.style.borderColor = '#30363D')}
+                >
+                  <option value="03" style={{ backgroundColor: '#161B22' }}>Trimestre 1 (Marzo - 03)</option>
+                  <option value="06" style={{ backgroundColor: '#161B22' }}>Trimestre 2 (Junio - 06)</option>
+                  <option value="09" style={{ backgroundColor: '#161B22' }}>Trimestre 3 (Septiembre - 09)</option>
+                  <option value="12" style={{ backgroundColor: '#161B22' }}>Trimestre 4 (Diciembre - 12)</option>
+                </select>
+              </Box>
+            </Box>
+
             <div style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: '#8d90a2', letterSpacing: '0.05em', marginBottom: 16, paddingLeft: 2 }}>
               Pipeline: DocumentExtractor → FinancialAnalyzer → RiskScorer → ReportGenerator
             </div>
+
+            {duplicateWarning && (
+              <Box sx={{ mt: 1, p: 2, bgcolor: 'rgba(210,153,34,0.08)', border: '1px solid rgba(210,153,34,0.35)', borderRadius: '8px' }}>
+                <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.5, mb: 1.5 }}>
+                  <span className="material-symbols-outlined" style={{ color: '#d29922', fontSize: 20, flexShrink: 0, marginTop: 1 }}>history</span>
+                  <span style={{ fontFamily: 'Inter', fontSize: 13, color: '#d29922', lineHeight: 1.5 }}>{duplicateWarning}</span>
+                </Box>
+                <Box sx={{ display: 'flex', gap: 1, justifyContent: 'flex-end' }}>
+                  <Button
+                    size="small"
+                    onClick={() => setDuplicateWarning(null)}
+                    sx={{ color: '#8d90a2', fontFamily: 'JetBrains Mono', fontSize: 11, textTransform: 'none', '&:hover': { color: '#e2e1ee' } }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    size="small"
+                    onClick={() => handleStartAnalysis(true)}
+                    disabled={launching}
+                    sx={{
+                      bgcolor: 'rgba(210,153,34,0.15)', color: '#d29922',
+                      border: '1px solid rgba(210,153,34,0.4)',
+                      fontFamily: 'JetBrains Mono', fontSize: 11,
+                      textTransform: 'none', borderRadius: '6px', px: 2,
+                      '&:hover': { bgcolor: 'rgba(210,153,34,0.25)' },
+                    }}
+                    startIcon={<span className="material-symbols-outlined" style={{ fontSize: 14 }}>replay</span>}
+                  >
+                    Re-run Analysis
+                  </Button>
+                </Box>
+              </Box>
+            )}
 
             {launchError && (
               <Box sx={{ mt: 1, p: 1.5, bgcolor: 'rgba(248,81,73,0.08)', border: '1px solid rgba(248,81,73,0.2)', borderRadius: '8px', display: 'flex', alignItems: 'center', gap: 1.5 }}>
@@ -468,7 +600,10 @@ export default function UploadDialog({ open, onClose }: UploadDialogProps) {
 
         {step === 1 && uploadDone && allDone && (
           <Button
-            onClick={() => setStep(2)}
+            onClick={() => {
+              initPeriodAndYear()
+              setStep(2)
+            }}
             sx={{
               bgcolor: '#2e62ff', color: '#f7f6ff',
               fontFamily: 'JetBrains Mono', fontSize: 12,
@@ -483,7 +618,7 @@ export default function UploadDialog({ open, onClose }: UploadDialogProps) {
 
         {step === 2 && (
           <Button
-            onClick={handleStartAnalysis}
+            onClick={() => handleStartAnalysis()}
             disabled={launching}
             sx={{
               bgcolor: '#2e62ff', color: '#f7f6ff',

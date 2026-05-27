@@ -15,28 +15,35 @@ Parameters:
     AllowedValues: [anthropic_api, bedrock]
   AnthropicApiKey:
     Type: String
-    Default: ""
     NoEcho: true
+    Default: ""
 
 Globals:
   Function:
     Runtime: python3.12
     Timeout: 30
     MemorySize: 256
-    Architectures: [arm64]
+    Architectures: [x86_64]
     Environment:
       Variables:
         STAGE: !Ref Stage
         MAIN_BUCKET: !Ref MainBucket
-        WORKFLOW_ARN: !Ref AnalysisWorkflow
+        WORKFLOW_ARN: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:creditiq-analysis-workflow-${Stage}"
         LLM_PROVIDER: !Ref LlmProvider
         ANTHROPIC_API_KEY: !Ref AnthropicApiKey
         AWS_ACCOUNT_ID: !Ref AWS::AccountId
-  Api:
-    Cors:
-      AllowMethods: "'GET,POST,OPTIONS'"
-      AllowHeaders: "'Content-Type,Authorization,X-Tenant-Id'"
-      AllowOrigin: "'*'"
+  HttpApi:
+    CorsConfiguration:
+      AllowMethods:
+        - GET
+        - POST
+        - OPTIONS
+      AllowHeaders:
+        - Content-Type
+        - Authorization
+        - X-Tenant-Id
+      AllowOrigins:
+        - '*'
 
 # ─────────────────────────────────────────────
 # STORAGE
@@ -73,6 +80,15 @@ Resources:
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
 
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "creditiq-oac-${Stage}"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
   FrontendBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
@@ -89,19 +105,6 @@ Resources:
               StringEquals:
                 AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}"
 
-# ─────────────────────────────────────────────
-# CLOUDFRONT
-# ─────────────────────────────────────────────
-
-  CloudFrontOAC:
-    Type: AWS::CloudFront::OriginAccessControl
-    Properties:
-      OriginAccessControlConfig:
-        Name: !Sub "creditiq-oac-${Stage}"
-        OriginAccessControlOriginType: s3
-        SigningBehavior: always
-        SigningProtocol: sigv4
-
   FrontendDistribution:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -117,9 +120,8 @@ Resources:
         DefaultCacheBehavior:
           TargetOriginId: FrontendS3Origin
           ViewerProtocolPolicy: redirect-to-https
-          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # CachingOptimized managed policy
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
           AllowedMethods: [GET, HEAD, OPTIONS]
-        # SPA routing: redirigir 403/404 a index.html
         CustomErrorResponses:
           - ErrorCode: 403
             ResponseCode: 200
@@ -127,7 +129,7 @@ Resources:
           - ErrorCode: 404
             ResponseCode: 200
             ResponsePagePath: /index.html
-        PriceClass: PriceClass_100  # Solo US/Europa/Asia (más económico)
+        PriceClass: PriceClass_100
 
 # ─────────────────────────────────────────────
 # IAM ROLES
@@ -157,6 +159,9 @@ Resources:
                   - s3:PutObject
                   - s3:GetObject
                 Resource: !Sub "${MainBucket.Arn}/*"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt MainBucket.Arn
               - Effect: Allow
                 Action: states:StartExecution
                 Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:creditiq-analysis-workflow-${Stage}"
@@ -188,6 +193,9 @@ Resources:
                   - s3:GetObject
                   - s3:PutObject
                 Resource: !Sub "${MainBucket.Arn}/*"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt MainBucket.Arn
               - Effect: Allow
                 Action:
                   - textract:StartDocumentAnalysis
@@ -390,21 +398,21 @@ Outputs:
     Description: Base URL de la API
     Value: !Sub "https://${CreditIQApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
 
-  CloudFrontUrl:
-    Description: URL pública del frontend (dominio CloudFront)
-    Value: !Sub "https://${FrontendDistribution.DomainName}"
-
-  CloudFrontDistributionId:
-    Description: ID de la distribución CloudFront (necesario para invalidaciones en CI/CD)
-    Value: !Ref FrontendDistribution
-
-  FrontendBucketName:
-    Description: Bucket S3 donde se alojan los archivos del frontend
-    Value: !Ref FrontendBucket
-
   MainBucketName:
     Description: Bucket principal (uploads/, reports/, rag/)
     Value: !Ref MainBucket
+
+  CloudFrontUrl:
+    Description: URL pública del frontend
+    Value: !Sub "https://${FrontendDistribution.DomainName}"
+
+  CloudFrontDistributionId:
+    Description: ID de la distribución CloudFront
+    Value: !Ref FrontendDistribution
+
+  FrontendBucketName:
+    Description: Bucket S3 del frontend
+    Value: !Ref FrontendBucket
 
   WorkflowArn:
     Description: ARN del Step Functions workflow

@@ -53,20 +53,28 @@ export default function JobResultPage() {
   // poll status
   useEffect(() => {
     if (!jobId) return
+    const headers = { 'x-tenant-id': 'demo' }
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`${API}/analyses/${jobId}`)
+        const res = await fetch(`${API}/analyses/${jobId}`, { headers })
+        if (!res.ok) {
+          console.error(`[poll] status ${res.status}:`, await res.text())
+          return
+        }
         const data: JobStatus = await res.json()
         setStatus(data)
         if (data.status === 'completed' || data.status === 'failed') {
           clearInterval(interval)
           if (data.status === 'completed') {
-            const rep = await fetch(`${API}/analyses/${jobId}/report`)
-            setReport(await rep.json())
+            const rep = await fetch(`${API}/analyses/${jobId}/report`, { headers })
+            if (rep.ok) setReport(await rep.json())
+            else console.error(`[report] status ${rep.status}:`, await rep.text())
           }
         }
-      } catch { /* network not ready yet */ }
-    }, 2000)
+      } catch (e) {
+        console.error('[poll] network error:', e)
+      }
+    }, 8000)  // SAM local cold-start ~6s — poll every 8s to avoid container cascade
     setElapsed(0)
     return () => clearInterval(interval)
   }, [jobId])
