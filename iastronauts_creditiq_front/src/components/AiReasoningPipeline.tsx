@@ -1,4 +1,4 @@
-type Status = 'pending' | 'processing' | 'extraction_complete' | 'completed' | 'failed' | null
+type Status = 'pending' | 'processing' | 'extraction_complete' | 'analysis_complete' | 'completed' | 'failed' | null
 
 interface Props {
   status: Status
@@ -15,7 +15,8 @@ const STEPS = [
 function stepStatus(index: number, status: Status): 'done' | 'active' | 'pending' | 'failed' {
   if (status === 'failed')              return index === 0 ? 'failed' : 'pending'
   if (status === 'completed')           return 'done'
-  if (status === 'extraction_complete') return index === 0 ? 'done' : 'pending'
+  if (status === 'analysis_complete')   return index <= 1 ? 'done' : index === 2 ? 'active' : 'pending'
+  if (status === 'extraction_complete') return index === 0 ? 'done' : index === 1 ? 'active' : 'pending'
   if (status === 'processing')          return index === 0 ? 'active' : 'pending'
   return 'pending'
 }
@@ -24,6 +25,7 @@ export default function AiReasoningPipeline({ status, jobId }: Props) {
   const statusLabel =
     status === 'completed'           ? { text: 'COMPLETED', color: '#3FB950' } :
     status === 'failed'              ? { text: 'FAILED',    color: '#F85149' } :
+    status === 'analysis_complete'   ? { text: 'ANALYZED',  color: '#D29922' } :
     status === 'extraction_complete' ? { text: 'REVIEW',    color: '#D29922' } :
     status === 'processing'          ? { text: 'RUNNING',   color: '#b7c4ff' } :
     status === 'pending'             ? { text: 'QUEUED',    color: '#D29922' } :

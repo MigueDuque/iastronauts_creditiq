@@ -37,6 +37,7 @@ Globals:
       AllowMethods:
         - GET
         - POST
+        - DELETE
         - OPTIONS
       AllowHeaders:
         - Content-Type
@@ -168,6 +169,12 @@ Resources:
               - Effect: Allow
                 Action: states:DescribeExecution
                 Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:creditiq-analysis-workflow-${Stage}:*"
+              - Effect: Allow
+                Action: states:StopExecution
+                Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:creditiq-analysis-workflow-${Stage}:*"
+              - Effect: Allow
+                Action: states:SendTaskSuccess
+                Resource: "*"
 
   # Rol para Lambdas de agentes (Step Functions)
   AgentLambdaRole:
@@ -238,6 +245,7 @@ Resources:
                   - !GetAtt AnalyzerFunction.Arn
                   - !GetAtt RiskScorerFunction.Arn
                   - !GetAtt ReportGeneratorFunction.Arn
+                  - !GetAtt PauseFunction.Arn
               - Effect: Allow
                 Action:
                   - logs:CreateLogDelivery
@@ -310,6 +318,23 @@ Resources:
             Path: /analyses/{analysis_id}
             Method: GET
 
+  # POST /analyses/{id}/continue  → reanuda el pipeline desde el punto de pausa
+  ContinueAnalysisFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "creditiq-continue-analysis-${Stage}"
+      CodeUri: src/
+      Handler: api.continue_analysis.handler.lambda_handler
+      Role: !GetAtt ApiLambdaRole.Arn
+      Timeout: 30
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /analyses/{analysis_id}/continue
+            Method: POST
+
   # GET /analyses/{id}/report  → URL del reporte generado
   ReportUrlFunction:
     Type: AWS::Serverless::Function
@@ -326,6 +351,23 @@ Resources:
             Path: /analyses/{analysis_id}/report
             Method: GET
 
+  # DELETE /analyses/{id}  → cancela la ejecución de Step Functions y marca el job como cancelado
+  CancelAnalysisFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "creditiq-cancel-analysis-${Stage}"
+      CodeUri: src/
+      Handler: api.cancel_analysis.handler.lambda_handler
+      Role: !GetAtt ApiLambdaRole.Arn
+      Timeout: 30
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /analyses/{analysis_id}
+            Method: DELETE
+
 # ─────────────────────────────────────────────
 # STEP FUNCTIONS — AGENTES
 # ─────────────────────────────────────────────
@@ -340,6 +382,7 @@ Resources:
         AnalyzerFunctionArn: !GetAtt AnalyzerFunction.Arn
         RiskScorerFunctionArn: !GetAtt RiskScorerFunction.Arn
         ReportGeneratorFunctionArn: !GetAtt ReportGeneratorFunction.Arn
+        PauseFunctionArn: !GetAtt PauseFunction.Arn
       Role: !GetAtt WorkflowRole.Arn
       Type: STANDARD
       Logging:
@@ -348,6 +391,16 @@ Resources:
         Destinations:
           - CloudWatchLogsLogGroup:
               LogGroupArn: !GetAtt WorkflowLogGroup.Arn
+
+  PauseFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "creditiq-pause-${Stage}"
+      CodeUri: src/
+      Handler: agents.pause.handler.lambda_handler
+      Role: !GetAtt AgentLambdaRole.Arn
+      Timeout: 10
+      MemorySize: 128
 
   ExtractorFunction:
     Type: AWS::Serverless::Function

@@ -5,6 +5,8 @@ import os
 import boto3
 from botocore.exceptions import ClientError
 
+from shared.job_store import load_first as job_load_first, load as job_load, FINANCIAL_ANALYZER, EXTRACTOR
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -29,18 +31,12 @@ def _execution_arn(analysis_id: str) -> str:
 def _s3_report_fallback(analysis_id: str) -> dict:
     """
     Return the most recent available agent output from S3.
-    Tries files in precedence order: analyzer_output → extractor_output.
+    Tries in precedence order: financial_analyzer → extractor.
     Used in local dev when SFN execution doesn't exist.
     """
-    for s3_key in [
-        f"jobs/{analysis_id}/analyzer_output.json",
-        f"jobs/{analysis_id}/extractor_output.json",
-    ]:
-        try:
-            obj = s3.get_object(Bucket=BUCKET, Key=s3_key)
-            return _response(200, json.loads(obj["Body"].read()))
-        except ClientError:
-            continue
+    data = job_load_first(analysis_id, [FINANCIAL_ANALYZER, EXTRACTOR])
+    if data:
+        return _response(200, data)
     return _response(409, {"error": "El análisis aún no está completo", "status": "processing"})
 
 
@@ -58,6 +54,10 @@ def lambda_handler(event: dict, context) -> dict:
         execution = _sfn_client().describe_execution(executionArn=_execution_arn(analysis_id))
 
         if execution["status"] == "RUNNING":
+            # Pipeline may be paused at a review gate — serve best available agent output from S3
+            data = job_load_first(analysis_id, [FINANCIAL_ANALYZER, EXTRACTOR])
+            if data:
+                return _response(200, data)
             return _response(409, {"error": "El análisis aún no está completo", "status": "processing"})
 
         if execution["status"] != "SUCCEEDED":
@@ -68,13 +68,11 @@ def lambda_handler(event: dict, context) -> dict:
         markdown_url = output.get("markdown_report_url", "")
 
         if not markdown_url.startswith("s3://"):
-            # Agents are stubs — serve extractor output so the accounts table renders
-            try:
-                obj = s3.get_object(Bucket=BUCKET, Key=f"jobs/{analysis_id}/extractor_output.json")
-                extractor_data = json.loads(obj["Body"].read())
-                return _response(200, extractor_data)
-            except ClientError:
-                return _response(404, {"error": "No se encontró el reporte generado"})
+            # Agents are stubs — serve best available output so the accounts table renders
+            data = job_load_first(analysis_id, [FINANCIAL_ANALYZER, EXTRACTOR])
+            if data:
+                return _response(200, data)
+            return _response(404, {"error": "No se encontró el reporte generado"})
 
         # Strip "s3://{bucket}/" prefix to get the S3 key
         s3_key = markdown_url.removeprefix(f"s3://{BUCKET}/")

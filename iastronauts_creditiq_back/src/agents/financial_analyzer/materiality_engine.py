@@ -4,6 +4,7 @@ materiality_engine.py
 Classifies account variations as LOW / MEDIUM / HIGH materiality
 following Colombian NIIF audit standards.
 Also infers applicable NIIF references from account name and category.
+Computes economic impact_score (0–100) for relevance ranking.
 No LLM.
 """
 
@@ -12,6 +13,7 @@ import logging
 from shared.models.base import MaterialityLevel
 
 from .ratio_engine import AccountVariation, FinancialTotals
+from .variation_reliability import VariationReliability
 
 logger = logging.getLogger("financial_analyzer.materiality_engine")
 
@@ -106,6 +108,44 @@ def classify(variation: AccountVariation, threshold: float) -> MaterialityLevel:
     if magnitude >= threshold * _MEDIUM_MULTIPLIER:
         return MaterialityLevel.MEDIUM
     return MaterialityLevel.LOW
+
+
+def calculate_impact_score(
+    variation: AccountVariation,
+    threshold: float,
+    totals: FinancialTotals,
+    reliability: VariationReliability,
+    anomaly_detected: bool,
+) -> float:
+    """
+    Improvement #5: Economic Relevance Ranking.
+    Returns an impact_score in [0, 100] — higher means more economically relevant.
+
+    Components:
+    - 40 pts  materiality level (HIGH=40, MEDIUM=20, LOW=5)
+    - 25 pts  absolute value as % of financial base (assets or revenue)
+    - 20 pts  variation magnitude (only when RELIABLE baseline)
+    - 15 pts  anomaly bonus
+    """
+    base = max(totals.total_assets, totals.total_revenue, 0.001)
+    mat = classify(variation, threshold)
+
+    mat_pts = {MaterialityLevel.HIGH: 40.0, MaterialityLevel.MEDIUM: 20.0, MaterialityLevel.LOW: 5.0}[mat]
+
+    # Absolute value as fraction of total base, capped at 25 pts
+    size_ratio = abs(variation.current_value) / base
+    size_pts = min(size_ratio * 250.0, 25.0)
+
+    # Variation magnitude (only when reliable)
+    if reliability == VariationReliability.RELIABLE and variation.has_previous_value:
+        var_ratio = abs(variation.absolute_variation) / base
+        var_pts = min(var_ratio * 200.0, 20.0)
+    else:
+        var_pts = 0.0
+
+    anomaly_pts = 15.0 if anomaly_detected else 0.0
+
+    return round(min(mat_pts + size_pts + var_pts + anomaly_pts, 100.0), 2)
 
 
 def infer_niif_references(account_name: str, category: str) -> list[str]:

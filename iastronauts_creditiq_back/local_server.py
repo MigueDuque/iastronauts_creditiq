@@ -25,6 +25,10 @@ from fastapi.responses import JSONResponse
 
 app = FastAPI(title="CreditIQ Local Dev")
 
+# Job IDs that the user has requested to cancel.
+# Background threads check this before doing significant work.
+_cancelled_jobs: set[str] = set()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -90,27 +94,29 @@ async def get_report(analysis_id: str, request: Request):
 
 
 def _save_status(job_id: str, status: str, error: str | None = None) -> None:
-    import boto3
-    s3 = boto3.client("s3")
-    bucket = os.environ["MAIN_BUCKET"]
+    from shared.job_store import save as job_save, STATUS
     body: dict = {"status": status}
     if error:
         body["error"] = error
-    s3.put_object(Bucket=bucket, Key=f"jobs/{job_id}/status.json", Body=json.dumps(body))
+    job_save(job_id, STATUS, body)
 
 
 def _run_agent2(job_id: str) -> None:
     """Run FinancialAnalyzer (Agent 2) and pause at analysis_complete."""
-    import boto3
-    s3 = boto3.client("s3")
-    bucket = os.environ["MAIN_BUCKET"]
+    from shared.job_store import load as job_load, EXTRACTOR
+    if job_id in _cancelled_jobs:
+        return
     try:
         _save_status(job_id, "processing")
-        obj = s3.get_object(Bucket=bucket, Key=f"jobs/{job_id}/extractor_output.json")
-        payload = json.loads(obj["Body"].read())
+        if job_id in _cancelled_jobs:
+            return
+        payload = job_load(job_id, EXTRACTOR)
         from agents.financial_analyzer.handler import lambda_handler as analyzer
-        analyzer(payload, None)  # saves analyzer_output.json to S3 internally
-        _save_status(job_id, "analysis_complete")
+        if job_id in _cancelled_jobs:
+            return
+        analyzer(payload, None)  # saves financial_analyzer_response.json to S3 internally
+        if job_id not in _cancelled_jobs:
+            _save_status(job_id, "analysis_complete")
     except Exception as exc:
         import traceback
         traceback.print_exc()
@@ -119,27 +125,37 @@ def _run_agent2(job_id: str) -> None:
 
 def _run_agents3_4(job_id: str) -> None:
     """Run RiskScorer + ReportGenerator (Agents 3-4) through to completed."""
-    import boto3
-    s3 = boto3.client("s3")
-    bucket = os.environ["MAIN_BUCKET"]
+    from shared.job_store import load as job_load, save as job_save, FINANCIAL_ANALYZER, REPORT_GENERATOR
+    if job_id in _cancelled_jobs:
+        return
     try:
         _save_status(job_id, "processing")
-        obj = s3.get_object(Bucket=bucket, Key=f"jobs/{job_id}/analyzer_output.json")
-        payload = json.loads(obj["Body"].read())
+        if job_id in _cancelled_jobs:
+            return
+        payload = job_load(job_id, FINANCIAL_ANALYZER)
         from agents.risk_scorer.handler import lambda_handler as scorer
+        if job_id in _cancelled_jobs:
+            return
         payload = scorer(payload, None)
         from agents.report_generator.handler import lambda_handler as report_gen
+        if job_id in _cancelled_jobs:
+            return
         result = report_gen(payload, None)
-        s3.put_object(
-            Bucket=bucket,
-            Key=f"jobs/{job_id}/final_report.json",
-            Body=json.dumps(result),
-        )
-        _save_status(job_id, "completed")
+        job_save(job_id, REPORT_GENERATOR, result)
+        if job_id not in _cancelled_jobs:
+            _save_status(job_id, "completed")
     except Exception as exc:
         import traceback
         traceback.print_exc()
         _save_status(job_id, "failed", str(exc))
+
+
+@app.delete("/analyses/{analysis_id}")
+async def cancel_analysis(analysis_id: str):
+    """Stop any running background thread and mark the job as cancelled in S3."""
+    _cancelled_jobs.add(analysis_id)
+    _save_status(analysis_id, "cancelled")
+    return JSONResponse(content={"analysis_id": analysis_id, "status": "cancelled"}, status_code=200)
 
 
 @app.post("/analyses/{analysis_id}/continue")
@@ -149,12 +165,9 @@ async def continue_analysis(analysis_id: str):
       extraction_complete  → run Agent 2 → analysis_complete
       analysis_complete    → run Agents 3-4 → completed
     """
-    import boto3
-    s3 = boto3.client("s3")
-    bucket = os.environ["MAIN_BUCKET"]
+    from shared.job_store import load as job_load, STATUS
     try:
-        obj = s3.get_object(Bucket=bucket, Key=f"jobs/{analysis_id}/status.json")
-        current_status = json.loads(obj["Body"].read()).get("status", "")
+        current_status = job_load(analysis_id, STATUS).get("status", "")
     except Exception:
         current_status = ""
 

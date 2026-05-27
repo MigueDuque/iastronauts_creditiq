@@ -32,11 +32,12 @@ pip install fastapi uvicorn python-dotenv
 uvicorn local_server:app --reload --port 8000
 ```
 
-**`local_server.py`** — FastAPI wrapper at the repo root of `iastronauts_creditiq_back/`. Translates HTTP → Lambda event format (HTTP API Gateway v2) and calls the same handlers as production. Extra route:
+**`local_server.py`** — FastAPI wrapper at the repo root of `iastronauts_creditiq_back/`. Translates HTTP → Lambda event format (HTTP API Gateway v2) and calls the same handlers as production. Extra routes:
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/analyses/{id}/continue` | Runs Agents 2–5 sequentially in a background thread after Agent 1 completes |
+| `POST` | `/analyses/{id}/continue` | Smart continue: reads current status from S3 and routes to the correct next stage (Agent 2 if `extraction_complete`, Agents 3+4 if `analysis_complete`) |
+| `DELETE` | `/analyses/{id}` | Cancels background thread execution via in-memory cancel list `_cancelled_jobs` |
 
 Set `LOCAL_DEV_BYPASS_SFN=true` in `.env` to skip Step Functions and run Agent 1 directly in a background thread. Status is written to `jobs/{job_id}/status.json` in S3; the status handler reads it as fallback when SFN execution doesn't exist.
 
@@ -237,7 +238,7 @@ All AWS resources are declared in `template.yaml` (AWS SAM / CloudFormation). Re
 **Enums** (in `shared/models/base.py`):
 - `MaterialityLevel`: `LOW | MEDIUM | HIGH`
 - `RiskLevel`: `LOW | MEDIUM | HIGH`
-- `FinancialHealth`: `STABLE | DECLINING | GROWING | CRITICAL`
+- `FinancialHealth`: `STABLE | DECLINING | GROWING | CRITICAL` (legacy) and `LIQUID | LEVERAGED | SPECULATIVE | CASH_STRESSED | VALUATION_DRIVEN | CONCENTRATED` (finance-oriented taxonomy)
 - `OutputFormat`: `markdown | pdf`
 
 **`BusinessContext`** (in `shared/models/orchestrator.py`) — business metadata attached to every analysis:
@@ -261,15 +262,34 @@ class ExtractedAccount(BaseModel):
     account_id: str                  # re-indexed globally as "act-001", "act-002", …
     raw_account_name: str            # exact text from the document
     normalized_account_name: str     # NIIF-standard name in Spanish
-    category: str                    # "assets" | "liabilities" | "equity" | "revenue" | "expense" | "other"
+    category: str                    # "assets" | "liabilities" | "equity" | "revenue" | "expense"
     current_value: float             # COP MM
-    previous_value: float | None     # COP MM, null if not in document
+    previous_value: float | None = None  # COP MM, null if not in document
     currency: str                    # always "COP"
     confidence_score: float          # 0.0–1.0
     source_file: str                 # original file name
 ```
 
 Note: `subcategory` was intentionally removed — it added noise without downstream value.
+
+**`NiifValidationFlag` and `NiifValidationResult`** (in `shared/models/extractor.py`):
+
+```python
+class NiifValidationFlag(BaseModel):
+    rule_id: str                    # e.g. "NIC1-005"
+    standard: str                   # e.g. "NIC 1"
+    severity: str                   # "ERROR" | "WARNING" | "INFO"
+    message: str                    # human-readable explanation in Spanish
+    affected_accounts: list[str]    # account_ids involved
+
+class NiifValidationResult(BaseModel):
+    is_niif_compliant: bool          # False if any ERROR flag exists or score < 60
+    compliance_score: int            # 0–100; starts at 100, deducted per flag severity
+    flags: list[NiifValidationFlag]
+    missing_categories: list[str]
+    accounting_equation_balanced: bool
+    equation_gap_pct: float
+```
 
 **`ExtractorOutput`** (in `shared/models/extractor.py`) — full Agent 1 output:
 
@@ -291,6 +311,7 @@ class ExtractorOutput(BaseModel):
     extraction_confidence: float     # average confidence across all accounts
     extraction_warnings: list[str]
     rendicion_text_s3_key: str | None  # S3 key of extracted PDF accountability text
+    niif_validation: NiifValidationResult | None = None
 ```
 
 **`AccountAnalysis`** (in `shared/models/analyzer.py`) — per-account analysis produced by the FinancialAnalyzer:
@@ -310,6 +331,14 @@ class AccountAnalysis(BaseModel):
     possible_causes: list[str]       # from LLM or default fallback
     executive_insight: str           # LLM-generated one-liner for board
     anomaly_detected: bool           # true if large variation has no documented cause
+    variation_reliability: str = "RELIABLE"  # RELIABLE | NEW_ACCOUNT | INSUFFICIENT_BASELINE | EXTREME_VARIATION
+    reliability_label: str = ""       # human-readable display label
+    impact_score: float = 0.0         # 0–100; used for ordering accounts by relevance
+    trend_label: str = ""             # human-readable trend description
+    confidence: float = 1.0           # 0.0–1.0; confidence in this account's insight
+    evidence_count: int = 0           # number of deterministic signals supporting the insight
+    evidence_sources: list[str] = []  # list of evidence descriptions
+    causality_chain: list[str] = []   # causal effects this account participates in
 ```
 
 **`AnalyzerOutput`** (in `shared/models/analyzer.py`) — full Agent 2 output:
@@ -327,11 +356,17 @@ class AnalyzerOutput(BaseModel):
     company_name: str
     currency: str
     periods: list[str]
+    financial_ratios: dict
     analysis_results: list[AccountAnalysis]
     high_materiality_accounts: list[str]
     niif_notes_required: list[str]           # sorted unique NIIF standards
     overall_financial_health: FinancialHealth
     executive_narrative: str                 # LLM-generated 3-paragraph summary
+    niif18_compliance: dict = {}
+    earnings_quality: dict = {}               # EarningsQualityResult as dict
+    portfolio_concentration: dict = {}        # ConcentrationResult as dict
+    causality_chains: list[dict] = []         # CausalChain list serialized
+    niif_validation: dict = {}                # NIIF validation result dictionary
 ```
 
 **`ScorerOutput`** (in `shared/models/scorer.py`) — Agent 3 output (stub):
@@ -398,12 +433,28 @@ Supporting types: `ValidationFlag(check_id, category, severity, message, affecte
 
 ### FinancialAnalyzer Architecture (Agent 2)
 
-The analyzer follows a **"Math First, LLM Second"** pattern:
+The analyzer has been refactored into a highly modular **"Math First, LLM Second"** architecture consisting of 11 core engines under `src/agents/financial_analyzer/`:
 
-1. **Historical enrichment** — loads previous reports from S3 via `fetch_historical_reports()`, maps `previous_value` by account name for accounts where it's null
-2. **Deterministic math** — `calculate_financial_ratios()` produces ratios (razón corriente, prueba ácida, capital de trabajo, deuda/patrimonio, endeudamiento global, márgenes bruto/neto/EBITDA). `calculate_variations()` and `get_materiality_level()` compute per-account variations and materiality classification
-3. **LLM qualitative** — sends the ratios summary, materiality threshold, per-account variations, and rendición de cuentas text to the LLM for `overall_financial_health`, `executive_narrative`, and per-account `possible_causes`, `executive_insight`, `risk_level`, `anomaly_detected`, and NIIF note requirements
-4. **Consolidation** — merges math results with LLM qualitative output, applies fallback defaults for missing LLM data, builds `AnalyzerOutput`
+| Engine | File | Purpose |
+|--------|------|---------|
+| `ratio_engine` | `ratio_engine.py` | Variations, totals, financial ratios, NIIF 18 subtotals |
+| `materiality_engine` | `materiality_engine.py` | Threshold, materiality level, impact score |
+| `trend_engine` | `trend_engine.py` | Per-account trend detection with labels |
+| `anomaly_detector` | `anomaly_detector.py` | Account-level and structural anomaly flags |
+| `variation_reliability` | `variation_reliability.py` | Flags unreliable variations (new accounts, extreme %, near-zero baselines) |
+| `causality_engine` | `causality_engine.py` | Detects causal chains between accounts |
+| `earnings_quality` | `earnings_quality.py` | Fair value vs operating income ratio, earnings quality score |
+| `concentration_engine` | `concentration_engine.py` | Portfolio concentration analysis |
+| `niif18_engine` | `niif18_engine.py` | NIIF 18 compliance flags and subtotals |
+| `llm_reasoning` | `llm_reasoning.py` | Constrained LLM call for qualitative insights |
+| `service` | `service.py` | Orchestrates all 17 steps; merges deterministic + LLM results |
+
+Key execution pipeline flow (17 steps orchestrated in `service.py`):
+1. **Historical Enrichment**: Fetch historical S3 reports to load baseline account values.
+2. **Deterministic Computations**: Compute ratios, materiality, trend descriptions, reliability flags, concentrations, causal linkages, and earnings quality metrics.
+3. **Qualitative Insights (LLM)**: Query the LLM with strict context boundaries, ensuring the LLM cannot override deterministic risk/anomaly score or calculations by more than one level (ceiling rule).
+4. **Consolidation**: Map all results back into the strict `AnalyzerOutput` schema. If a fund or position didn't exist in the prior period, `previous_value` is set to `null` so `calculate_account_variation` flags it as `NEW_ACCOUNT` (suppressing spurious variation percentages downstream).
+
 
 ### RevisorInteligente Architecture (Agent 5)
 
@@ -456,13 +507,13 @@ The frontend is fully scaffolded with MUI components. Key pages and components:
 - Period is composed as `YYYY-MM` and sent as `business_context.reporting_period` to the orchestrator
 - Auto-inferred from filenames following `{ORG}_{FUND}_{TYPE}_{YYYY-MM-DD}.ext` convention, but user can override
 
-**Two-phase pipeline UX** — Agent 1 runs and shows results, then the user reviews the extracted accounts and clicks "Run Agents 2–4" to continue:
-1. Upload → `POST /analyses` → status = `processing`
-2. Poll until `extraction_complete` → fetch extractor output from `/analyses/{id}/report` → show accounts table
-3. User reviews → clicks "Run Agents 2–4" → `POST /analyses/{id}/continue` → status = `processing` again
-4. Poll until `completed` → show final report
+**3-phase local pipeline flow** — The backend and UI support a 3-phase review process:
+1. **Upload & Extractor**: `POST /analyses` → runs Agent 1 in a background thread → poll status until `extraction_complete` → show accounts table.
+2. **Financial Analysis**: User reviews accounts and clicks "Continue" → `POST /analyses/{id}/continue` runs Agent 2 (FinancialAnalyzer) → status transitions to `processing` then `analysis_complete`.
+3. **Scoring & Report**: User clicks "Continue" again → `POST /analyses/{id}/continue` runs Agent 3 (RiskScorer) + Agent 4 (ReportGenerator) → status transitions to `processing` then `completed` → show final report.
 
-**Status values**: `pending | processing | extraction_complete | completed | failed`
+**Status values**: `pending | processing | extraction_complete | analysis_complete | completed | failed | cancelled`
+
 
 **State persistence**: `jobId`, `jobStatus`, and `report` are cached in `localStorage` under keys `creditiq_analysis_id`, `creditiq_status`, `creditiq_report`. Navigation away and back restores data immediately without waiting for a poll. State is cleared only when the user explicitly clicks "Clear".
 

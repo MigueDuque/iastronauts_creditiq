@@ -19,6 +19,24 @@ class AccountAnalysis(BaseModel):
     executive_insight: str
     anomaly_detected: bool
 
+    # ── Improvement #1: Variation Reliability ────────────────────────────────
+    variation_reliability: str = "RELIABLE"   # RELIABLE | NEW_ACCOUNT | INSUFFICIENT_BASELINE | EXTREME_VARIATION
+    reliability_label: str = ""               # human-readable display label
+
+    # ── Improvement #5: Economic Relevance Ranking ───────────────────────────
+    impact_score: float = 0.0                 # 0–100; used for ordering accounts by relevance
+
+    # ── Improvement #6: Trend Label ──────────────────────────────────────────
+    trend_label: str = ""                     # human-readable trend description
+
+    # ── Improvement #8: Confidence Engine ───────────────────────────────────
+    confidence: float = 1.0                   # 0.0–1.0; confidence in this account's insight
+    evidence_count: int = 0                   # number of deterministic signals supporting the insight
+    evidence_sources: list[str] = []          # list of evidence descriptions
+
+    # ── Improvement #2: Causality Chain ─────────────────────────────────────
+    causality_chain: list[str] = []           # causal effects this account participates in
+
 
 class AnalyzerOutput(BaseModel):
     """
@@ -44,3 +62,18 @@ class AnalyzerOutput(BaseModel):
     overall_financial_health: FinancialHealth
     executive_narrative: str
     niif18_compliance: dict = {}
+
+    # ── Improvement #3: Earnings Quality ─────────────────────────────────────
+    earnings_quality: dict = {}               # EarningsQualityResult as dict
+
+    # ── Improvement #4: Portfolio Concentration ──────────────────────────────
+    portfolio_concentration: dict = {}        # ConcentrationResult as dict
+
+    # ── Improvement #2: Causality Chains ────────────────────────────────────
+    causality_chains: list[dict] = []         # CausalChain list serialized
+
+    # NIIF structural compliance result from DocumentExtractor (passed through)
+    niif_validation: dict = {}
+
+    # ── Fund analysis (populated when EEFF is an investment fund / CIV) ─────────
+    fund_analysis: dict = {}   # FundAnalysis serialized; empty dict for non-fund entities

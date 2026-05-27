@@ -5,6 +5,8 @@ import os
 import boto3
 from botocore.exceptions import ClientError
 
+from shared.job_store import load as job_load, STATUS
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -36,8 +38,7 @@ def _execution_arn(analysis_id: str) -> str:
 def _s3_status_fallback(analysis_id: str) -> dict:
     """Read status from S3 — written by the orchestrator background thread in local dev."""
     try:
-        obj = s3.get_object(Bucket=BUCKET, Key=f"jobs/{analysis_id}/status.json")
-        data = json.loads(obj["Body"].read())
+        data = job_load(analysis_id, STATUS)
         return _response(200, {
             "analysis_id": analysis_id,
             "status": data.get("status", "pending"),
@@ -59,7 +60,20 @@ def lambda_handler(event: dict, context) -> dict:
 
         execution = _sfn_client().describe_execution(executionArn=_execution_arn(analysis_id))
 
-        status = _SFN_TO_STATUS.get(execution["status"], "unknown")
+        sfn_status = execution["status"]
+
+        # When RUNNING, check S3 for a pause status written by PauseFunction.
+        # This distinguishes "agent actively running" from "paused waiting for analyst".
+        if sfn_status == "RUNNING":
+            try:
+                s3_data = job_load(analysis_id, STATUS)
+                s3_status = s3_data.get("status", "processing")
+                # Only trust pause statuses from S3 — not "processing" written by /continue
+                status = s3_status if s3_status in ("extraction_complete", "analysis_complete") else "processing"
+            except ClientError:
+                status = "processing"
+        else:
+            status = _SFN_TO_STATUS.get(sfn_status, "unknown")
 
         payload = {
             "analysis_id": analysis_id,
