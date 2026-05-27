@@ -78,6 +78,7 @@ from .niif18_engine import (
     niif18_to_dict,
 )
 from .fund_engine import FundAnalysis, analyze_fund, fund_analysis_to_dict
+from .kpi_engine import calculate_executive_kpis
 from shared.progress_store import emit as _emit_step
 from shared.macro_context import generate_macro_context
 
@@ -393,6 +394,22 @@ class FinancialAnalyzerService:
             macro_context=macro_ctx,
         )
 
+        # ── Step 15b: Executive KPI consolidation ────────────────────────────
+        executive_kpis = calculate_executive_kpis(
+            ratios_dict=ratios_dict,
+            earnings_quality=eq_dict,
+            concentration=conc_dict,
+            fund_analysis=fund_dict if fund_analysis.is_investment_fund else None,
+        )
+        logger.info(
+            "executive_kpis | job=%s roe=%.1f net_margin=%.1f eq_score=%.0f top1=%.1f",
+            payload.job_id,
+            executive_kpis.get("profitability", {}).get("roe_pct", 0),
+            executive_kpis.get("profitability", {}).get("net_margin_pct", 0),
+            executive_kpis.get("earnings_quality", {}).get("quality_score", 0),
+            executive_kpis.get("concentration", {}).get("top1_concentration_pct", 0),
+        )
+
         # ── Step 16: Merge math + LLM → AccountAnalysis ──────────────────────
         analysis_results = self._merge_results(
             variations=variations,
@@ -452,6 +469,10 @@ class FinancialAnalyzerService:
             if payload.niif_validation else {},
             fund_analysis=fund_dict,
             macro_context=macro_ctx or {},
+            executive_kpis=executive_kpis,
+            portfolio_thesis=llm_result.portfolio_thesis,
+            insight_tiers=llm_result.insight_tiers,
+            narrative_layers=llm_result.narrative_layers,
         )
 
         self._save_to_s3(result)

@@ -55,26 +55,44 @@ No text outside JSON.
 
 {
   "overall_financial_health": "see rule 9",
-  "executive_narrative": "string — 3 executive-level paragraphs",
-  "niif_notes_required": ["IFRS 9", "IAS 32"],
+  "portfolio_thesis": "One paragraph: strategic portfolio thesis — what the portfolio is doing, where it is rotating, what market positioning is emerging, what investment style it reflects.",
+  "executive_narrative": "3 board-level paragraphs following the structure in rule 10",
+  "narrative_layers": {
+    "executive": "Portfolio-level interpretation — what economically happened, AUM behavior, investor flows, overall performance.",
+    "tactical": "Portfolio movements and allocation changes — rebalancing signals, sector rotation, new and closed positions, concentration shifts.",
+    "technical": "Raw financial and accounting observations — account-level variations, ratio movements, NIIF compliance notes."
+  },
+  "insight_tiers": {
+    "tier1_critical": [
+      {
+        "signal": "Concise critical portfolio-level signal (max 25 words)",
+        "so_what": "Why this matters to the board — strategic implication (1 sentence)",
+        "category": "AUM | CONCENTRATION | VALUATION | LIQUIDITY | FLOWS | ROTATION | PROFITABILITY | RISK"
+      }
+    ],
+    "tier2_material": [
+      {
+        "account_id": "act-001",
+        "signal": "Material finding for this account",
+        "so_what": "Strategic or operational implication"
+      }
+    ]
+  },
+  "niif_notes_required": ["NIIF 9", "NIC 32"],
   "accounts_analysis": [
     {
       "account_id": "act-001",
       "requires_niif_note": true,
-      "niif_note_references": ["IFRS 9"],
+      "niif_note_references": ["NIIF 9"],
       "risk_level": "LOW" | "MEDIUM" | "HIGH",
-      "possible_causes": ["specific cause 1", "specific cause 2"],
-      "executive_insight": "Concise executive insight.",
-      "business_impact": "Strategic business implication.",
-      "recommended_action": "Suggested management action.",
+      "possible_causes": ["specific cause 1 anchored in data", "specific cause 2"],
+      "executive_insight": "Insight that answers: what happened, why it matters, so what for the portfolio.",
       "anomaly_override": false,
       "llm_confidence_hint": 0.85,
       "evidence_sources": ["evidence source 1"],
       "is_related_party": false,
       "related_party_counterpart": null,
-      "investment_signal": null,
-      "market_context_hint": null,
-      "investor_behavior_signal": null
+      "investment_signal": "Dashboard-ready signal (e.g. 'Strategic rotation toward sovereign debt')"
     }
   ]
 }
@@ -348,4 +366,86 @@ NOT like:
 - a balance-sheet parser
 - a simple accounting analyzer
 - a generic LLM summarizer.
+
+23. "SO WHAT?" THINKING — MANDATORY FOR ALL INSIGHTS
+Every insight, signal, and narrative paragraph must answer: WHY DOES THIS MATTER?
+
+NOT: "The Bancolombia position was liquidated."
+YES: "The liquidation of Bancolombia materially reduced the portfolio's traditional banking
+     exposure, signaling a strategic rotation away from domestic financial sector risk."
+
+NOT: "Cash decreased."
+YES: "The deployment of cash into sovereign fixed-income positions reduced immediate liquidity
+     while improving portfolio duration alignment with a lower interest-rate environment."
+
+NOT: "Valuation gains increased."
+YES: "The portfolio's profitability is now predominantly driven by unrealized valuation
+     gains rather than recurring cash generation, creating dependency on continued market
+     appreciation to sustain reported results."
+
+EVERY tier1_critical signal must be actionable and board-relevant.
+EVERY executive_insight must explain the strategic implication, not just the movement.
+
+24. PORTFOLIO THESIS INFERENCE
+portfolio_thesis must synthesize the portfolio's strategic direction:
+
+ANALYZE:
+- Which asset classes are growing vs. shrinking as a % of portfolio?
+- What sectors or issuers are gaining or losing weight?
+- Is concentration increasing or decreasing? Is this intentional?
+- What investment style is emerging: defensive, growth, income, liquidity-focused?
+- Is the portfolio rotating? What is the apparent destination?
+
+CONNECT to macro context when provided:
+- "Rotation toward sovereign debt in a rate-reduction cycle..."
+- "Reduction of equity exposure consistent with defensive positioning..."
+- "Concentration in infrastructure and holding companies suggests strategic conviction..."
+
+THE THESIS MUST BE A COHERENT NARRATIVE, not a bullet list.
+
+25. INSIGHT TIERING RULES
+
+tier1_critical — 3 to 5 signals ONLY:
+- Select the portfolio-level findings with the highest executive relevance.
+- Each must be directional, concrete, and board-actionable.
+- Priority criteria: AUM movement >5%, concentration >40% single issuer,
+  unrealized gain dependency >50%, liquidity ratio <1.0, net redemptions >10%,
+  major strategic rotation detected.
+
+tier2_material — up to 10 items:
+- One entry per HIGH or MEDIUM materiality account with a concrete finding.
+- Only include accounts where the LLM has specific, non-obvious insight.
+- Omit LOW materiality accounts from tier2.
+
+26. NARRATIVE LAYERS STRUCTURE
+
+narrative_layers.executive:
+- What economically happened at the portfolio level.
+- AUM behavior, investor flows, overall performance, macro backdrop.
+- Written for a CIO or board member — strategic framing.
+
+narrative_layers.tactical:
+- Portfolio movements and allocation changes.
+- Rebalancing, sector rotation, new/closed positions.
+- Written for a portfolio manager — allocation framing.
+
+narrative_layers.technical:
+- Raw financial and accounting observations.
+- Specific ratio movements, NIIF flags, account-level variations.
+- Written for a financial analyst — granular framing.
+
+27. MARKET-AWARE REASONING — EXPANDED PERMISSION
+You MAY infer and describe directional market environments when:
+- The financial data directionally supports the inference.
+- The macro context (when provided) is consistent with the inference.
+- The reasoning is framed as interpretation, not fabricated fact.
+
+PERMITTED inferences (qualitative, not quantitative):
+- "In a rate-reduction environment, fixed-income valuation gains are consistent..."
+- "The portfolio's rotation toward sovereign debt may reflect defensive positioning..."
+- "Unrealized gains in equity positions suggest a favorable equity market during the period..."
+- "Investor outflows in a high-rate environment are consistent with redemption pressure..."
+
+NEVER fabricate: exact rates, COLCAP returns, inflation figures, Bloomberg data,
+specific market statistics, or events not mentioned in the provided context.
 ```

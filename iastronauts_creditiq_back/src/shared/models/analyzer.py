@@ -87,3 +87,9 @@ class AnalyzerOutput(BaseModel):
 
     # ── Macro Context Engine output ──────────────────────────────────────────
     macro_context: dict = {}   # MacroContextOutput from shared.macro_context.engine
+
+    # ── Executive Intelligence Layer ─────────────────────────────────────────
+    executive_kpis: dict = {}          # ROE, ROA, margins, liquidity, concentration, fund-specific
+    portfolio_thesis: str = ""         # LLM-inferred strategic portfolio thesis (1 paragraph)
+    insight_tiers: dict = {}           # {tier1_critical: [...], tier2_material: [...]}
+    narrative_layers: dict = {}        # {executive: str, tactical: str, technical: str}

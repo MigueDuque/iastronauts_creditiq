@@ -108,13 +108,49 @@ interface ExtractorOutput {
   accounts: Account[]
 }
 
+interface DashboardMetric {
+  key: string
+  label: string
+  value: string
+  signal: 'positive' | 'neutral' | 'negative'
+}
+
+interface InsightTier1 {
+  signal: string
+  so_what: string
+  category: string
+}
+
+interface InsightTier2 {
+  account_id: string
+  signal: string
+  so_what: string
+}
+
 interface AnalyzerOutput {
   job_id: string
   company_name: string
   currency: string
   periods: string[]
-  overall_financial_health: 'STABLE' | 'DECLINING' | 'GROWING' | 'CRITICAL'
+  overall_financial_health: string
   executive_narrative: string
+  portfolio_thesis?: string
+  insight_tiers?: {
+    tier1_critical?: InsightTier1[]
+    tier2_material?: InsightTier2[]
+  }
+  narrative_layers?: {
+    executive?: string
+    tactical?: string
+    technical?: string
+  }
+  executive_kpis?: {
+    dashboard_metrics?: DashboardMetric[]
+    profitability?: { roe_pct: number; net_margin_pct: number; ebitda_margin_pct: number }
+    earnings_quality?: { quality_score: number; quality_label: string; unrealized_gain_dependency_pct: number }
+    concentration?: { top1_concentration_pct: number; top3_concentration_pct: number }
+    fund?: { aum_growth_pct?: number; net_investor_flow_cop_mm?: number; redemption_ratio_pct?: number }
+  }
   high_materiality_accounts: string[]
   niif_notes_required: string[]
   financial_ratios: {
@@ -639,79 +675,154 @@ export default function AnalysisPage() {
               </>
             )}
 
-            {/* ── AGENT 2 COMPLETE: analysis summary (shown for analysis_complete AND completed) ── */}
+            {/* ── AGENT 2 COMPLETE: executive intelligence dashboard ── */}
             {analyzerData && (jobStatus?.status === 'analysis_complete' || jobStatus?.status === 'completed') && (
               <>
-                {/* Key metrics grid */}
+                {/* ── Row 1: Financial health + smart KPI cards ── */}
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {/* Health — always first */}
                   <MetricCard
                     label="Financial Health"
                     value={analyzerData.overall_financial_health}
-                    color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#8d90a2'}
+                    color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#b7c4ff'}
                     icon="monitor_heart"
                   />
-                  <MetricCard
-                    label="Net Income (MM)"
-                    value={analyzerData.financial_ratios.totals.net_income.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
-                    color={analyzerData.financial_ratios.totals.net_income >= 0 ? '#3FB950' : '#F85149'}
-                    icon="payments"
-                  />
-                  <MetricCard
-                    label="Razón Corriente"
-                    value={analyzerData.financial_ratios.ratios.razon_corriente.toFixed(2)}
-                    color={analyzerData.financial_ratios.ratios.razon_corriente >= 1 ? '#3FB950' : '#F85149'}
-                    icon="account_balance"
-                  />
-                  <MetricCard
-                    label="NIIF 18 Score"
-                    value={`${analyzerData.financial_ratios.niif18?.compliance?.compliance_score ?? '—'}/100`}
+                  {/* Smart KPI cards from executive_kpis.dashboard_metrics */}
+                  {(analyzerData.executive_kpis?.dashboard_metrics ?? []).slice(0, 3).map(m => (
+                    <MetricCard
+                      key={m.key}
+                      label={m.label}
+                      value={m.value}
+                      color={m.signal === 'positive' ? '#3FB950' : m.signal === 'negative' ? '#F85149' : '#D29922'}
+                      icon={
+                        m.key === 'aum_growth'      ? 'trending_up'    :
+                        m.key === 'net_flow'         ? 'swap_vert'      :
+                        m.key === 'roe'              ? 'percent'        :
+                        m.key === 'net_margin'       ? 'payments'       :
+                        m.key === 'ebitda_margin'    ? 'bar_chart'      :
+                        m.key === 'earnings_quality' ? 'verified'       :
+                        m.key === 'concentration'    ? 'hub'            :
+                        m.key === 'current_ratio'    ? 'account_balance': 'analytics'
+                      }
+                    />
+                  ))}
+                </div>
+
+                {/* ── Row 2: Secondary KPI cards + stat counters ── */}
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                  {(analyzerData.executive_kpis?.dashboard_metrics ?? []).slice(3, 5).map(m => (
+                    <MetricCard
+                      key={m.key}
+                      label={m.label}
+                      value={m.value}
+                      color={m.signal === 'positive' ? '#3FB950' : m.signal === 'negative' ? '#F85149' : '#D29922'}
+                      icon={
+                        m.key === 'concentration' ? 'hub' :
+                        m.key === 'current_ratio' ? 'account_balance' : 'analytics'
+                      }
+                    />
+                  ))}
+                  <StatCounter label="High Materiality" value={analyzerData.high_materiality_accounts.length} unit="accounts" />
+                  <StatCounter label="Anomalies" value={anomalyCount} unit="detected" color={anomalyCount > 0 ? '#D29922' : '#3FB950'} />
+                  <StatCounter
+                    label="NIIF 18"
+                    value={analyzerData.financial_ratios.niif18?.compliance?.compliance_score ?? 0}
+                    unit="/100"
                     color="#b7c4ff"
-                    icon="gavel"
                   />
                 </div>
 
-                {/* Summary stats row */}
-                <div className="grid grid-cols-3 gap-3">
-                  <div className="bg-surface border border-border rounded p-3 text-center">
-                    <div className="text-[11px] font-mono text-outline uppercase mb-1">High Materiality</div>
-                    <div className="text-[22px] font-mono font-bold text-on-surface">
-                      {analyzerData.high_materiality_accounts.length}
+                {/* ── Tier 1: Critical executive signals ── */}
+                {(analyzerData.insight_tiers?.tier1_critical ?? []).length > 0 && (
+                  <div className="bg-surface border rounded overflow-hidden"
+                       style={{ borderColor: 'rgba(248,81,73,0.35)' }}>
+                    <div className="px-5 py-3 border-b flex items-center gap-2"
+                         style={{ borderColor: 'rgba(248,81,73,0.2)', background: 'rgba(248,81,73,0.05)' }}>
+                      <span className="material-symbols-outlined text-[15px]" style={{ color: '#F85149' }}>priority_high</span>
+                      <span className="text-[10px] font-mono uppercase tracking-widest" style={{ color: '#F85149' }}>
+                        Critical Executive Signals
+                      </span>
+                      <span className="ml-auto text-[9px] font-mono text-outline">
+                        {analyzerData.insight_tiers!.tier1_critical!.length} signal{analyzerData.insight_tiers!.tier1_critical!.length !== 1 ? 's' : ''}
+                      </span>
                     </div>
-                    <div className="text-[10px] font-mono text-outline">accounts</div>
-                  </div>
-                  <div className="bg-surface border border-border rounded p-3 text-center">
-                    <div className="text-[11px] font-mono text-outline uppercase mb-1">Anomalies</div>
-                    <div className="text-[22px] font-mono font-bold" style={{ color: anomalyCount > 0 ? '#D29922' : '#3FB950' }}>
-                      {anomalyCount}
+                    <div className="divide-y divide-border">
+                      {analyzerData.insight_tiers!.tier1_critical!.map((t, i) => (
+                        <div key={i} className="px-5 py-3 flex gap-4 items-start">
+                          <span className="text-[9px] font-mono px-1.5 py-0.5 rounded shrink-0 mt-0.5"
+                                style={{ color: '#F85149', background: 'rgba(248,81,73,0.12)', border: '1px solid rgba(248,81,73,0.25)' }}>
+                            {t.category || 'SIGNAL'}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-body-sm font-body-sm font-semibold text-on-surface">{t.signal}</p>
+                            {t.so_what && (
+                              <p className="text-[11px] text-outline mt-0.5 leading-snug">{t.so_what}</p>
+                            )}
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                    <div className="text-[10px] font-mono text-outline">detected</div>
                   </div>
-                  <div className="bg-surface border border-border rounded p-3 text-center">
-                    <div className="text-[11px] font-mono text-outline uppercase mb-1">NIIF Notes</div>
-                    <div className="text-[22px] font-mono font-bold text-on-surface">
-                      {analyzerData.niif_notes_required.length}
-                    </div>
-                    <div className="text-[10px] font-mono text-outline">required</div>
-                  </div>
-                </div>
+                )}
 
-                {/* Executive narrative */}
-                {analyzerData.executive_narrative && (
+                {/* ── Portfolio thesis ── */}
+                {analyzerData.portfolio_thesis && (
+                  <div className="bg-surface border border-border rounded p-5">
+                    <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
+                      <span className="material-symbols-outlined text-[14px]">strategy</span>
+                      Portfolio Thesis
+                    </div>
+                    <p className="text-body-sm font-body-sm text-on-surface leading-relaxed">
+                      {analyzerData.portfolio_thesis}
+                    </p>
+                  </div>
+                )}
+
+                {/* ── Narrative layers ── */}
+                {analyzerData.narrative_layers && (
+                  analyzerData.narrative_layers.executive ||
+                  analyzerData.narrative_layers.tactical ||
+                  analyzerData.narrative_layers.technical
+                ) ? (
+                  <NarrativeLayers layers={analyzerData.narrative_layers} />
+                ) : analyzerData.executive_narrative ? (
                   <div className="bg-surface border border-border rounded p-5">
                     <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
                       <span className="material-symbols-outlined text-[14px]">description</span>
                       Executive Narrative
                     </div>
                     <p className="text-body-sm font-body-sm text-on-surface leading-relaxed">
-                      {analyzerData.executive_narrative.slice(0, 500)}
-                      {analyzerData.executive_narrative.length > 500 && (
-                        <span className="text-outline"> …</span>
-                      )}
+                      {analyzerData.executive_narrative}
                     </p>
+                  </div>
+                ) : null}
+
+                {/* ── Tier 2: Material account findings ── */}
+                {(analyzerData.insight_tiers?.tier2_material ?? []).length > 0 && (
+                  <div className="bg-surface border border-border rounded overflow-hidden">
+                    <div className="px-5 py-3 border-b border-border bg-surface-container-low flex items-center gap-2">
+                      <span className="material-symbols-outlined text-[14px] text-outline">insights</span>
+                      <span className="text-[10px] font-mono text-on-surface-variant uppercase tracking-widest">
+                        Material Account Findings
+                      </span>
+                    </div>
+                    <div className="divide-y divide-border">
+                      {analyzerData.insight_tiers!.tier2_material!.map((t, i) => (
+                        <div key={i} className="px-5 py-3 flex gap-4 items-start">
+                          <span className="text-[9px] font-mono text-outline shrink-0 mt-0.5 w-16 truncate">{t.account_id}</span>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-body-sm font-body-sm text-on-surface">{t.signal}</p>
+                            {t.so_what && (
+                              <p className="text-[11px] text-outline mt-0.5">{t.so_what}</p>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
 
-                {/* Top accounts by variation */}
+                {/* ── Top accounts table ── */}
                 {analyzerData.analysis_results.length > 0 && (
                   <div className="bg-surface border border-border rounded overflow-hidden">
                     <div className="p-4 border-b border-border bg-surface-container-low flex items-center justify-between">
@@ -771,7 +882,7 @@ export default function AnalysisPage() {
                   </div>
                 )}
 
-                {/* NIIF 18 compliance flags */}
+                {/* ── NIIF 18 compliance flags ── */}
                 {(analyzerData.financial_ratios.niif18?.compliance?.flags?.length ?? 0) > 0 && (
                   <div className="bg-surface border border-border rounded p-4">
                     <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
@@ -1066,6 +1177,58 @@ function MetricCard({ label, value, color, icon }: { label: string; value: strin
         <span className="material-symbols-outlined text-[15px] text-outline">{icon}</span>
       </div>
       <div className="text-[20px] font-mono font-bold" style={{ color }}>{value}</div>
+    </div>
+  )
+}
+
+function StatCounter({ label, value, unit, color = '#e2e1ee' }: { label: string; value: number; unit: string; color?: string }) {
+  return (
+    <div className="bg-surface border border-border rounded p-3 text-center">
+      <div className="text-[10px] font-mono text-outline uppercase mb-1 tracking-wide">{label}</div>
+      <div className="text-[22px] font-mono font-bold" style={{ color }}>{value}</div>
+      <div className="text-[9px] font-mono text-outline">{unit}</div>
+    </div>
+  )
+}
+
+function NarrativeLayers({ layers }: { layers: { executive?: string; tactical?: string; technical?: string } }) {
+  const tabs = [
+    { key: 'executive', label: 'Executive',  icon: 'person',       text: layers.executive },
+    { key: 'tactical',  label: 'Tactical',   icon: 'swap_horiz',   text: layers.tactical  },
+    { key: 'technical', label: 'Technical',  icon: 'data_object',  text: layers.technical },
+  ].filter(t => t.text)
+
+  const [active, setActive] = useState(tabs[0]?.key ?? 'executive')
+  const current = tabs.find(t => t.key === active)
+
+  if (tabs.length === 0) return null
+
+  return (
+    <div className="bg-surface border border-border rounded overflow-hidden">
+      <div className="flex border-b border-border bg-surface-container-low">
+        <span className="flex items-center gap-1 px-4 py-3 text-[10px] font-mono text-outline uppercase tracking-widest border-r border-border">
+          <span className="material-symbols-outlined text-[13px]">layers</span>
+          Narrative
+        </span>
+        {tabs.map(t => (
+          <button
+            key={t.key}
+            onClick={() => setActive(t.key)}
+            className={`flex items-center gap-1.5 px-4 py-3 text-[11px] font-mono transition-colors border-r border-border
+              ${active === t.key ? 'text-on-surface bg-surface' : 'text-outline hover:text-on-surface-variant'}`}
+          >
+            <span className="material-symbols-outlined text-[12px]">{t.icon}</span>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {current && (
+        <div className="p-5">
+          <p className="text-body-sm font-body-sm text-on-surface leading-relaxed">
+            {current.text}
+          </p>
+        </div>
+      )}
     </div>
   )
 }
