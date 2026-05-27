@@ -78,6 +78,8 @@ from .niif18_engine import (
     niif18_to_dict,
 )
 from .fund_engine import FundAnalysis, analyze_fund, fund_analysis_to_dict
+from shared.progress_store import emit as _emit_step
+from shared.macro_context import generate_macro_context
 
 logger = logging.getLogger("financial_analyzer.service")
 
@@ -107,6 +109,7 @@ class FinancialAnalyzerService:
         Returns AnalyzerOutput ready to be passed to the RiskScorer agent.
         """
         # ── Step 1: Enrich previous_value from S3 history ──────────────────
+        _emit_step(payload.job_id, "Loading historical data")
         enriched_accounts = self._enrich_with_history(payload)
 
         # ── Step 2: Per-account variation ───────────────────────────────────
@@ -129,6 +132,7 @@ class FinancialAnalyzerService:
             )
 
         # ── Step 4: Global financial totals + ratios ─────────────────────────
+        _emit_step(payload.job_id, "Computing ratios & materiality")
         totals: FinancialTotals = calculate_financial_totals(enriched_accounts)
         ratios: FinancialRatios = calculate_ratios(totals)
         ratios_dict: dict = ratios_to_dict(totals, ratios)
@@ -174,6 +178,7 @@ class FinancialAnalyzerService:
         trends: dict[str, Trend] = {aid: ta.trend for aid, ta in trend_analyses.items()}
 
         # ── Step 8: Per-account anomaly detection ────────────────────────────
+        _emit_step(payload.job_id, "Detecting anomalies & causality")
         # Skip % -based anomaly rules for unreliable variations: the detector uses
         # thresholds like >200% which are meaningless on near-zero baselines or
         # reclassifications.  NEW_ACCOUNT is kept — a large new account IS a real signal.
@@ -252,6 +257,8 @@ class FinancialAnalyzerService:
             "concentration_label": concentration.concentration_label,
             "insight": concentration.insight,
             "top_accounts": concentration.top_accounts,
+            "hhi": concentration.hhi,
+            "effective_positions": concentration.effective_positions,
         }
         logger.info(
             "concentration | job=%s label=%s top1_pct=%.1f top3_pct=%.1f",
@@ -342,7 +349,29 @@ class FinancialAnalyzerService:
             anomaly_count, len(structural_issues), unreliable_count, len(causal_chains),
         )
 
+        # ── Step 14b: Macro context enrichment ───────────────────────────────
+        _emit_step(payload.job_id, "Fetching macro context")
+        macro_ctx: dict | None = None
+        try:
+            reporting_period = getattr(payload.business_context, "reporting_period", None) or ""
+            analysis_period = reporting_period or None
+            macro_ctx = generate_macro_context(
+                analysis_period=analysis_period,
+                llm_provider=self._llm,
+            )
+            logger.info(
+                "macro_context_ok | job=%s signals=%d assets=%d news=%d",
+                payload.job_id,
+                len(macro_ctx.get("macro_signals", [])),
+                len(macro_ctx.get("market_assets_context", [])),
+                len(macro_ctx.get("news_context", [])),
+            )
+        except Exception as exc:
+            logger.warning("macro_context_failed | job=%s error=%s", payload.job_id, exc)
+            macro_ctx = None
+
         # ── Step 15: LLM constrained qualitative reasoning [#7 + #8] ─────────
+        _emit_step(payload.job_id, "LLM qualitative analysis")
         llm_result: LLMAnalysisResult = run_llm_analysis(
             company_name=payload.company_name,
             periods=payload.periods,
@@ -361,6 +390,7 @@ class FinancialAnalyzerService:
             concentration=conc_dict,
             niif_validation_context=niif_validation_context,
             fund_analysis=fund_dict if fund_analysis.is_investment_fund else None,
+            macro_context=macro_ctx,
         )
 
         # ── Step 16: Merge math + LLM → AccountAnalysis ──────────────────────
@@ -421,6 +451,7 @@ class FinancialAnalyzerService:
             niif_validation=payload.niif_validation.model_dump(mode="json")
             if payload.niif_validation else {},
             fund_analysis=fund_dict,
+            macro_context=macro_ctx or {},
         )
 
         self._save_to_s3(result)
@@ -526,7 +557,7 @@ class FinancialAnalyzerService:
             impact = impact_scores[v.account_id]
 
             # NIIF references: keyword inference + LLM
-            inferred_niif = infer_niif_references(v.account_name, v.category)
+            inferred_niif = infer_niif_references(v.account_name, v.category, mat)
             llm_niif = insight.niif_note_references if insight else []
             niif_refs = sorted(set(inferred_niif) | set(llm_niif))
 
@@ -618,6 +649,9 @@ class FinancialAnalyzerService:
                 evidence_count=evidence_count,
                 evidence_sources=evidence_sources,
                 causality_chain=chain_narratives,
+                is_related_party=insight.is_related_party if insight else False,
+                related_party_counterpart=insight.related_party_counterpart if insight else None,
+                investment_signal=insight.investment_signal if insight else None,
             ))
 
         return results

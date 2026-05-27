@@ -6,6 +6,26 @@ from shared.models.base import MaterialityLevel
 logger = logging.getLogger("financial_math")
 logger.setLevel(logging.INFO)
 
+# These equity-category accounts come from the statement of changes in equity
+# (aportes, retiros, opening/closing balances, period result).  Including them
+# in total_equity double-counts values already reflected in the balance-sheet
+# equity and produces equity_ratio > 1.0, which is mathematically impossible.
+_EQUITY_FLOW_KEYWORDS: tuple[str, ...] = (
+    "aportes de inversionistas",
+    "aporte inversionistas",
+    "retiros de inversionistas",
+    "retiro inversionistas",
+    "patrimonio neto inicial",
+    "patrimonio neto final",
+    "saldo inicial",
+    "suscripciones",
+    "redenciones",
+    "utilidad del período",
+    "ganancia del período",
+    "pérdida del período",
+    "resultado del período",
+)
+
 
 def calculate_variations(current_val: float, previous_val: float | None) -> Tuple[float, float]:
     """
@@ -106,7 +126,9 @@ def calculate_financial_ratios(accounts: List[ExtractedAccount]) -> Dict[str, An
         elif cat == "liabilities":
             total_liabilities += val
         elif cat == "equity":
-            total_equity += val
+            name_lower = acc.normalized_account_name.lower()
+            if not any(kw in name_lower for kw in _EQUITY_FLOW_KEYWORDS):
+                total_equity += val
         elif cat == "revenue":
             total_revenue += val
         elif cat == "expense":

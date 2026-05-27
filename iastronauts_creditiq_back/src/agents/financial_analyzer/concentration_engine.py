@@ -10,6 +10,40 @@ from dataclasses import dataclass, field
 
 from .ratio_engine import AccountVariation, FinancialTotals
 
+# Cash-flow and flow-statement accounts contaminate portfolio concentration metrics.
+# Flows are NOT positions — excluding them gives a correct picture of holdings.
+_CASH_FLOW_KEYWORDS: tuple[str, ...] = (
+    "flujo de efectivo",
+    "flujo neto",
+    "cash flow",
+    "efectivo inicial",
+    "efectivo final",
+    "aumento neto de efectivo",
+    "net cash",
+    "variación de efectivo",
+    "flujo de caja",
+    "flujo neto de",
+    "aportes de inversionistas",
+    "retiros de inversionistas",
+    "patrimonio neto inicial",
+    "patrimonio neto final",
+    "utilidad del período",
+    "ganancia del período",
+    "pérdida del período",
+    "resultado del período",
+)
+
+
+def _is_portfolio_position(variation: AccountVariation) -> bool:
+    """Return True only for real asset holdings; exclude flow/P&L accounts."""
+    name = variation.account_name.lower()
+    if any(kw in name for kw in _CASH_FLOW_KEYWORDS):
+        return False
+    # Negative values are typical of flows/expenses, not balance-sheet positions
+    if variation.current_value < 0:
+        return False
+    return True
+
 
 @dataclass
 class ConcentrationResult:
@@ -20,6 +54,8 @@ class ConcentrationResult:
     concentration_label: str          # "LOW" | "MEDIUM" | "HIGH" | "CRITICAL"
     insight: str
     top_accounts: list[dict] = field(default_factory=list)   # [{name, value, pct, category}]
+    hhi: float = 0.0                  # Herfindahl-Hirschman Index = Σ(wi²); range 0–1
+    effective_positions: float = 0.0  # 1/HHI — equivalent number of equal-weight positions
 
 
 def analyze_concentration(
@@ -33,8 +69,14 @@ def analyze_concentration(
     base = totals.total_assets if totals.total_assets > 0 else totals.total_revenue
     base = max(base, 0.001)
 
+    # Filter to real portfolio positions only before computing concentration
+    portfolio_vars = [v for v in variations if _is_portfolio_position(v)]
+    # Fall back to all accounts if filtering leaves nothing (non-fund statements)
+    if not portfolio_vars:
+        portfolio_vars = variations
+
     # Sort by absolute current value descending
-    sorted_vars = sorted(variations, key=lambda v: abs(v.current_value), reverse=True)
+    sorted_vars = sorted(portfolio_vars, key=lambda v: abs(v.current_value), reverse=True)
 
     top_accounts = [
         {
@@ -49,9 +91,14 @@ def analyze_concentration(
     top1_pct = top_accounts[0]["pct_of_total"] if top_accounts else 0.0
     top3_pct = sum(a["pct_of_total"] for a in top_accounts[:3])
 
+    # Herfindahl-Hirschman Index: Σ(wi²) where wi = value/base (as a fraction 0–1)
+    hhi = sum((abs(v.current_value) / base) ** 2 for v in portfolio_vars)
+    hhi = round(min(hhi, 1.0), 4)
+    effective_positions = round(1.0 / hhi, 2) if hhi > 0 else 0.0
+
     # Category concentration
     cat_totals: dict[str, float] = {}
-    for v in variations:
+    for v in portfolio_vars:
         cat = v.category.lower()
         cat_totals[cat] = cat_totals.get(cat, 0.0) + abs(v.current_value)
 
@@ -60,12 +107,13 @@ def analyze_concentration(
         for cat, val in sorted(cat_totals.items(), key=lambda x: -x[1])
     }
 
-    # Concentration label thresholds
-    if top1_pct >= 50 or top3_pct >= 80:
+    # Concentration label — driven by HHI first, top-N as tiebreaker
+    # HHI > 0.25 → CRITICAL; 0.15–0.25 → HIGH; 0.10–0.15 → MEDIUM; < 0.10 → LOW
+    if hhi > 0.25 or top1_pct >= 50 or top3_pct >= 80:
         label = "CRITICAL"
-    elif top1_pct >= 30 or top3_pct >= 60:
+    elif hhi > 0.15 or top1_pct >= 30 or top3_pct >= 60:
         label = "HIGH"
-    elif top1_pct >= 15 or top3_pct >= 40:
+    elif hhi > 0.10 or top1_pct >= 15 or top3_pct >= 40:
         label = "MEDIUM"
     else:
         label = "LOW"
@@ -96,4 +144,6 @@ def analyze_concentration(
         concentration_label=label,
         insight=insight,
         top_accounts=top_accounts,
+        hhi=hhi,
+        effective_positions=effective_positions,
     )

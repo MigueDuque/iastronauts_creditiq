@@ -46,6 +46,15 @@ _NIIF_MAP: dict[str, dict[str, list[str]]] = {
         "activo por impuesto diferido": ["NIC 12"],
         "impuesto diferido": ["NIC 12"],
         "inversiones": ["NIIF 9", "NIIF 7"],
+        # Investment fund / portfolio keywords
+        "valor razonable": ["NIIF 9", "NIIF 13"],
+        "activos financieros": ["NIIF 9", "NIIF 7"],
+        "acciones": ["NIIF 9", "NIIF 13"],
+        "portafolio": ["NIIF 9", "NIIF 7"],
+        "fondo de inversión": ["NIIF 9"],
+        "fondo liquidez": ["NIIF 9"],
+        "efectivo": ["NIC 7"],
+        "banco": ["NIC 7"],
     },
     "liabilities": {
         "prestamo": ["NIIF 7", "NIC 32"],
@@ -64,6 +73,10 @@ _NIIF_MAP: dict[str, dict[str, list[str]]] = {
         "reserva": ["NIC 1"],
         "utilidad retenida": ["NIC 1"],
         "perdida acumulada": ["NIC 1"],
+        "patrimonio": ["NIC 32", "NIC 1"],
+        "suscripciones": ["NIC 32"],
+        "partícipes": ["NIC 32", "NIC 1"],
+        "inversionistas": ["NIC 32", "NIC 24"],
     },
     "revenue": {
         "ingreso": ["NIIF 15"],
@@ -71,6 +84,9 @@ _NIIF_MAP: dict[str, dict[str, list[str]]] = {
         "dividendo": ["NIIF 9"],
         "intereses recibidos": ["NIIF 9"],
         "contrato": ["NIIF 15"],
+        "valorización": ["NIIF 9", "NIIF 13"],
+        "valoración": ["NIIF 9", "NIIF 13"],
+        "valor razonable": ["NIIF 9", "NIIF 13"],
     },
     "expense": {
         "depreciacion": ["NIC 16"],
@@ -148,7 +164,11 @@ def calculate_impact_score(
     return round(min(mat_pts + size_pts + var_pts + anomaly_pts, 100.0), 2)
 
 
-def infer_niif_references(account_name: str, category: str) -> list[str]:
+def infer_niif_references(
+    account_name: str,
+    category: str,
+    materiality: MaterialityLevel | None = None,
+) -> list[str]:
     """
     Keyword-based NIIF standard lookup.
     Returns a sorted, deduplicated list of applicable NIIF/NIC references.
@@ -161,5 +181,17 @@ def infer_niif_references(account_name: str, category: str) -> list[str]:
     for keyword, standards in keyword_map.items():
         if keyword in name_lower:
             refs.update(standards)
+
+    # Cross-category keywords
+    if "partes relacionadas" in name_lower or "comisión de administración" in name_lower:
+        refs.add("NIC 24")
+    if "impuesto" in name_lower:
+        refs.add("NIC 12")
+    if "flujo de efectivo" in name_lower or "flujo neto" in name_lower:
+        refs.add("NIC 7")
+
+    # HIGH materiality always warrants NIC 1 disclosure
+    if materiality == MaterialityLevel.HIGH and refs:
+        refs.add("NIC 1")
 
     return sorted(refs)

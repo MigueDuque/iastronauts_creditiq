@@ -14,6 +14,28 @@ from .trend_engine import Trend
 
 logger = logging.getLogger("financial_analyzer.anomaly_detector")
 
+# ── Opening/closing balance exclusion ────────────────────────────────────────
+# These accounts carry the prior-period closing balance as their "previous" value,
+# so large swings (e.g., +381%) are structurally normal — not anomalies.
+_OPENING_CLOSING_KEYWORDS: tuple[str, ...] = (
+    "patrimonio neto inicial",
+    "patrimonio neto final",
+    "saldo inicial",
+    "saldo apertura",
+    "balance inicial",
+    "opening balance",
+    "closing balance",
+    "efectivo inicial",
+    "efectivo final",
+    "activos netos iniciales",
+)
+
+
+def _is_opening_closing_balance(account_name: str) -> bool:
+    name = account_name.lower()
+    return any(kw in name for kw in _OPENING_CLOSING_KEYWORDS)
+
+
 # ── Thresholds ────────────────────────────────────────────────────────────────
 
 # Per-account — percentage-based
@@ -68,7 +90,13 @@ def detect_account_anomaly(
     4. STRONG_DETERIORATION: variation ≤ -50 % (HIGH if ≤ -75 %).
     5. EXTREME_MAGNITUDE: |abs_var| ≥ 5× materiality threshold.
     6. LARGE_NEW_ACCOUNT: no prior period but current value ≥ 5× threshold.
+
+    Opening/closing balance accounts are excluded entirely — their swings reflect
+    accounting structure (prior-period carry-forward), not real anomalies.
     """
+    if _is_opening_closing_balance(variation.account_name):
+        return AnomalyResult(anomaly_detected=False)
+
     if not variation.has_previous_value:
         if abs(variation.current_value) >= threshold * _LARGE_NEW_ACCOUNT_MULTIPLIER:
             return AnomalyResult(

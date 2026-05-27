@@ -1,18 +1,35 @@
 type Status = 'pending' | 'processing' | 'extraction_complete' | 'analysis_complete' | 'completed' | 'failed' | null
 
+interface AgentProgressEntry {
+  index: number
+  label: string
+  title: string
+  detail: string
+  state: 'done' | 'running' | 'pending' | 'failed'
+  step: string | null
+}
+
+interface PipelineProgress {
+  current_agent: number | null
+  current_step: string | null
+  agents: AgentProgressEntry[]
+}
+
 interface Props {
   status: Status
   jobId?: string
+  progress?: PipelineProgress
 }
 
-const STEPS = [
-  { label: 'Agent 1', title: 'Document Ingestion & OCR',    detail: 'Textract PDF · pandas Excel' },
-  { label: 'Agent 2', title: 'Financial Analysis & NIIF',   detail: 'Account classification · variance' },
-  { label: 'Agent 3', title: 'Risk Scoring',                detail: 'Materiality · anomaly detection' },
-  { label: 'Agent 4', title: 'Report Generation',           detail: 'LLM narrative · NIIF notes draft' },
+// Fallback static definitions (used when no progress data in status.json yet)
+const STATIC_STEPS = [
+  { label: 'Agent 1', title: 'Document Ingestion & OCR',  detail: 'Textract PDF · pandas Excel' },
+  { label: 'Agent 2', title: 'Financial Analysis & NIIF', detail: 'Account classification · variance' },
+  { label: 'Agent 3', title: 'Risk Scoring',              detail: 'Materiality · anomaly detection' },
+  { label: 'Agent 4', title: 'Report Generation',         detail: 'LLM narrative · NIIF notes draft' },
 ]
 
-function stepStatus(index: number, status: Status): 'done' | 'active' | 'pending' | 'failed' {
+function derivedState(index: number, status: Status): 'done' | 'active' | 'pending' | 'failed' {
   if (status === 'failed')              return index === 0 ? 'failed' : 'pending'
   if (status === 'completed')           return 'done'
   if (status === 'analysis_complete')   return index <= 1 ? 'done' : index === 2 ? 'active' : 'pending'
@@ -21,7 +38,14 @@ function stepStatus(index: number, status: Status): 'done' | 'active' | 'pending
   return 'pending'
 }
 
-export default function AiReasoningPipeline({ status, jobId }: Props) {
+function derivedStep(index: number, status: Status): string | null {
+  if (status === 'completed' || (status === 'analysis_complete' && index <= 1)) {
+    return index === 0 ? 'Accounts extracted' : index === 1 ? 'Analysis complete' : null
+  }
+  return null
+}
+
+export default function AiReasoningPipeline({ status, jobId, progress }: Props) {
   const statusLabel =
     status === 'completed'           ? { text: 'COMPLETED', color: '#3FB950' } :
     status === 'failed'              ? { text: 'FAILED',    color: '#F85149' } :
@@ -30,6 +54,22 @@ export default function AiReasoningPipeline({ status, jobId }: Props) {
     status === 'processing'          ? { text: 'RUNNING',   color: '#b7c4ff' } :
     status === 'pending'             ? { text: 'QUEUED',    color: '#D29922' } :
                                        { text: 'IDLE',      color: '#8d90a2' }
+
+  // Build the steps array — prefer real progress data, fall back to derived
+  const steps: { label: string; title: string; detail: string; state: 'done' | 'active' | 'pending' | 'failed'; step: string | null }[] =
+    progress?.agents
+      ? progress.agents.map(a => ({
+          label:  a.label,
+          title:  a.title,
+          detail: a.detail,
+          state:  a.state === 'running' ? 'active' : a.state,
+          step:   a.step,
+        }))
+      : STATIC_STEPS.map((s, i) => ({
+          ...s,
+          state: derivedState(i, status),
+          step:  derivedStep(i, status),
+        }))
 
   return (
     <aside className="w-full md:w-[300px] flex-shrink-0 flex flex-col gap-4">
@@ -67,8 +107,8 @@ export default function AiReasoningPipeline({ status, jobId }: Props) {
         <div className="relative">
           <div className="absolute left-3 top-2 bottom-2 w-[1px] bg-border" />
           <div className="flex flex-col gap-5 relative z-10">
-            {STEPS.map((step, i) => {
-              const s = stepStatus(i, status)
+            {steps.map((step, i) => {
+              const s = step.state
               return (
                 <div key={i} className={`flex gap-4 items-start ${s === 'pending' ? 'opacity-40' : ''}`}>
                   {/* Indicator */}
@@ -102,14 +142,19 @@ export default function AiReasoningPipeline({ status, jobId }: Props) {
                       {step.title}
                     </p>
                     <p className="text-[10px] font-mono text-outline mt-0.5">{step.detail}</p>
+
+                    {/* Real-time sub-step from progress */}
                     {s === 'active' && (
                       <div className="mt-2 bg-surface p-2 rounded border border-border text-[10px] font-mono text-secondary-fixed leading-relaxed">
-                        <span className="animate-pulse">▊</span> Running…
+                        <span className="animate-pulse">▊</span>{' '}
+                        {step.step ?? 'Running…'}
                       </div>
                     )}
-                    {s === 'done' && i === 0 && (
+
+                    {/* Completion summary */}
+                    {s === 'done' && step.step && (
                       <div className="mt-1 text-[10px] font-mono text-risk-low">
-                        ✓ Accounts extracted
+                        ✓ {step.step}
                       </div>
                     )}
                   </div>
