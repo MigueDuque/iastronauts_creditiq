@@ -61,11 +61,28 @@ _system_prompt_cache: str | None = None
 
 
 def _get_system_prompt() -> str:
+    """
+    Prompt loading priority:
+      1. S3 key (allows hot-swapping without deployment when intentionally set)
+      2. Local prompts/analyzer_prompt.txt (the authoritative maintained version)
+      3. Inline fallback (emergency only)
+
+    The local file is preferred over the inline fallback so the improved
+    institutional-grade prompt takes effect immediately without S3 access.
+    """
     global _system_prompt_cache
     if _system_prompt_cache is None:
-        _system_prompt_cache = load_text(_PROMPT_S3_KEY, fallback=_LOCAL_FALLBACK_PROMPT)
-        source = "s3" if _system_prompt_cache != _LOCAL_FALLBACK_PROMPT else "local_fallback"
-        logger.info("system_prompt_loaded | source=%s chars=%d", source, len(_system_prompt_cache))
+        s3_prompt = load_text(_PROMPT_S3_KEY, fallback="")
+        if s3_prompt:
+            _system_prompt_cache = s3_prompt
+            logger.info("system_prompt_loaded | source=s3 chars=%d", len(_system_prompt_cache))
+        elif _LOCAL_FALLBACK_PROMPT and len(_LOCAL_FALLBACK_PROMPT) > 200:
+            # Local file exists and is substantive (not the short inline fallback)
+            _system_prompt_cache = _LOCAL_FALLBACK_PROMPT
+            logger.info("system_prompt_loaded | source=local_file chars=%d", len(_system_prompt_cache))
+        else:
+            _system_prompt_cache = _LOCAL_FALLBACK_PROMPT
+            logger.warning("system_prompt_loaded | source=inline_fallback — upload better prompt to S3")
     return _system_prompt_cache
 
 
@@ -102,6 +119,10 @@ class LLMAnalysisResult:
     portfolio_thesis: str = ""
     insight_tiers: dict = field(default_factory=dict)    # tier1_critical / tier2_material
     narrative_layers: dict = field(default_factory=dict) # executive / tactical / technical
+    # Institutional analysis layer (new)
+    structured_analysis: dict = field(default_factory=dict)   # 6-section structured breakdown
+    cross_statement_signals: list[dict] = field(default_factory=list)  # multi-statement patterns
+    earnings_sustainability: str = ""   # STRONG | MODERATE | WEAK
 
 
 # ── Deterministic confidence calculator ──────────────────────────────────────
@@ -178,6 +199,7 @@ def _build_user_prompt(
     fund_analysis: dict | None = None,
     macro_context: dict | None = None,
     executive_synthesis: dict | None = None,
+    financial_diagnostics: dict | None = None,
 ) -> str:
     """
     Constrained Financial Reasoning prompt.
@@ -334,6 +356,31 @@ def _build_user_prompt(
             f"{json.dumps(synth_summary, indent=2, ensure_ascii=False)}\n"
         )
 
+    if financial_diagnostics:
+        signals = financial_diagnostics.get("signals", [])
+        if signals:
+            # Include the most important diagnostic signals (HIGH first, then MEDIUM)
+            sorted_signals = sorted(
+                signals,
+                key=lambda s: {"HIGH": 0, "MEDIUM": 1, "LOW": 2}.get(s.get("severity", "LOW"), 2)
+            )
+            diag_compact = [
+                {
+                    "signal": s["signal_id"],
+                    "severity": s["severity"],
+                    "finding": s["finding"],
+                    "implication": s["implication"],
+                }
+                for s in sorted_signals[:6]  # top 6 signals to keep token budget
+            ]
+            extra_context += (
+                f"\nDIAGNÓSTICOS FINANCIEROS MULTI-ESTADO (determinísticos — cross-statement):\n"
+                f"Patrones detectados automáticamente correlacionando múltiples estados financieros.\n"
+                f"USA ESTOS PATRONES como base para cross_statement_signals y para enriquecer\n"
+                f"el executive_narrative y structured_analysis con análisis causal profundo.\n"
+                f"{json.dumps(diag_compact, indent=2, ensure_ascii=False)}\n"
+            )
+
     constraint_block = """
 ══════════════════════════════════════════════════════
 REGLAS DE RAZONAMIENTO (OBLIGATORIO)
@@ -443,8 +490,44 @@ def _validate_niif_refs(refs: list) -> list[str]:
     return valid
 
 
+def _parse_structured_analysis(raw: object) -> dict:
+    """Parse and validate the structured_analysis block."""
+    if not isinstance(raw, dict):
+        return {}
+    sections = [
+        "revenue_profitability", "balance_sheet_strength", "cash_flow_quality",
+        "equity_movement", "risk_signals", "forward_outlook",
+    ]
+    return {k: str(raw.get(k, "")) for k in sections if raw.get(k)}
+
+
+def _parse_cross_statement_signals(raw: object) -> list[dict]:
+    """Parse cross_statement_signals list from LLM."""
+    if not isinstance(raw, list):
+        return []
+    result = []
+    valid_severities = {"HIGH", "MEDIUM", "LOW"}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        severity = str(item.get("severity", "LOW")).upper()
+        if severity not in valid_severities:
+            severity = "LOW"
+        result.append({
+            "pattern": str(item.get("pattern", "")),
+            "description": str(item.get("description", "")),
+            "implication": str(item.get("implication", "")),
+            "severity": severity,
+        })
+    return result
+
+
 def _parse_response(raw: dict) -> LLMAnalysisResult:
     """Parse and validate raw LLM dict into typed result. Never raises."""
+    sustainability_raw = str(raw.get("earnings_sustainability", "")).upper()
+    if sustainability_raw not in {"STRONG", "MODERATE", "WEAK"}:
+        sustainability_raw = ""
+
     result = LLMAnalysisResult(
         overall_financial_health=str(raw.get("overall_financial_health", "STABLE")).upper(),
         executive_narrative=str(raw.get("executive_narrative", "")),
@@ -452,6 +535,9 @@ def _parse_response(raw: dict) -> LLMAnalysisResult:
         portfolio_thesis=str(raw.get("portfolio_thesis", "")),
         insight_tiers=_parse_insight_tiers(raw.get("insight_tiers", {})),
         narrative_layers=_parse_narrative_layers(raw.get("narrative_layers", {})),
+        structured_analysis=_parse_structured_analysis(raw.get("structured_analysis", {})),
+        cross_statement_signals=_parse_cross_statement_signals(raw.get("cross_statement_signals", [])),
+        earnings_sustainability=sustainability_raw,
     )
 
     for item in raw.get("accounts_analysis", []):
@@ -541,6 +627,7 @@ def run_llm_analysis(
     fund_analysis: dict | None = None,
     macro_context: dict | None = None,
     executive_synthesis: dict | None = None,
+    financial_diagnostics: dict | None = None,
 ) -> LLMAnalysisResult:
     """
     Full LLM analysis pipeline with constrained reasoning and reliability context.
@@ -564,6 +651,7 @@ def run_llm_analysis(
         fund_analysis=fund_analysis,
         macro_context=macro_context,
         executive_synthesis=executive_synthesis,
+        financial_diagnostics=financial_diagnostics,
     )
 
     logger.info(
