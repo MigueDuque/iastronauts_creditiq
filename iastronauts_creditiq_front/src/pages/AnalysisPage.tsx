@@ -151,6 +151,45 @@ interface AnalyzerOutput {
     concentration?: { top1_concentration_pct: number; top3_concentration_pct: number }
     fund?: { aum_growth_pct?: number; net_investor_flow_cop_mm?: number; redemption_ratio_pct?: number }
   }
+  portfolio_concentration?: {
+    top_account_name: string
+    top_account_pct: number
+    top3_concentration_pct: number
+    concentration_label: string
+    insight: string
+    hhi: number
+    effective_positions: number
+    category_concentration: Record<string, number>
+    top_accounts: Array<{ name: string; value_cop_mm: number; pct_of_total: number; category: string }>
+  }
+  fund_analysis?: {
+    is_investment_fund: boolean
+    fund_type: string
+    nav_reconciliation?: {
+      opening_nav: number | null
+      contributions: number | null
+      redemptions: number | null
+      investment_return: number | null
+      closing_nav: number
+      net_investor_flow: number | null
+      reconciles: boolean
+      gap_cop_mm: number
+      narrative: string
+    }
+    top_positions?: Array<{
+      account_id: string
+      account_name: string
+      asset_class: string
+      current_value: number
+      pct_of_portfolio: number
+      status: string
+    }>
+    asset_breakdown_pct?: Record<string, number>
+    cash_ratio?: number
+    top1_position_pct?: number
+    top3_concentration_pct?: number
+    insights?: string[]
+  }
   high_materiality_accounts: string[]
   niif_notes_required: string[]
   financial_ratios: {
@@ -690,8 +729,17 @@ export default function AnalysisPage() {
             {analyzerData && (jobStatus?.status === 'analysis_complete' || jobStatus?.status === 'completed') && (
               <>
                 {/* ── Row 1: Financial health + smart KPI cards ── */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  {/* Health — always first */}
+                <div className={`grid grid-cols-2 gap-3 ${analyzerData.fund_analysis?.is_investment_fund && analyzerData.fund_analysis.nav_reconciliation?.closing_nav != null ? 'md:grid-cols-5' : 'md:grid-cols-4'}`}>
+                  {/* AUM — investment funds only */}
+                  {analyzerData.fund_analysis?.is_investment_fund && analyzerData.fund_analysis.nav_reconciliation?.closing_nav != null && (
+                    <MetricCard
+                      label="AUM — Patrimonio Neto"
+                      value={`${analyzerData.fund_analysis.nav_reconciliation.closing_nav.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} MM`}
+                      color="#b7c4ff"
+                      icon="account_balance_wallet"
+                    />
+                  )}
+                  {/* Health — always shown */}
                   <MetricCard
                     label="Financial Health"
                     value={analyzerData.overall_financial_health}
@@ -720,7 +768,7 @@ export default function AnalysisPage() {
                 </div>
 
                 {/* ── Row 2: Secondary KPI cards + stat counters ── */}
-                <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                   {(analyzerData.executive_kpis?.dashboard_metrics ?? []).slice(3, 5).map(m => (
                     <MetricCard
                       key={m.key}
@@ -735,12 +783,6 @@ export default function AnalysisPage() {
                   ))}
                   <StatCounter label="High Materiality" value={analyzerData.high_materiality_accounts.length} unit="accounts" />
                   <StatCounter label="Anomalies" value={anomalyCount} unit="detected" color={anomalyCount > 0 ? '#D29922' : '#3FB950'} />
-                  <StatCounter
-                    label="NIIF 18"
-                    value={analyzerData.financial_ratios.niif18?.compliance?.compliance_score ?? 0}
-                    unit="/100"
-                    color="#b7c4ff"
-                  />
                 </div>
 
                 {/* ── Tier 1: Critical executive signals ── */}
@@ -891,6 +933,11 @@ export default function AnalysisPage() {
                       </table>
                     </div>
                   </div>
+                )}
+
+                {/* ── Portfolio Concentration ── */}
+                {analyzerData.portfolio_concentration && (analyzerData.portfolio_concentration.top_accounts?.length ?? 0) > 1 && (
+                  <ConcentrationSection concentration={analyzerData.portfolio_concentration} />
                 )}
 
                 {/* ── NIIF 18 compliance flags ── */}
@@ -1238,6 +1285,109 @@ function NarrativeLayers({ layers }: { layers: { executive?: string; tactical?: 
           <p className="text-body-sm font-body-sm text-on-surface leading-relaxed">
             {current.text}
           </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+const CONCENTRATION_COLOR: Record<string, string> = {
+  CRITICAL: '#F85149',
+  HIGH:     '#D29922',
+  MEDIUM:   '#b7c4ff',
+  LOW:      '#3FB950',
+}
+
+function ConcentrationSection({ concentration }: {
+  concentration: {
+    top_account_name: string
+    top_account_pct: number
+    top3_concentration_pct: number
+    concentration_label: string
+    insight: string
+    hhi: number
+    effective_positions: number
+    category_concentration: Record<string, number>
+    top_accounts: Array<{ name: string; value_cop_mm: number; pct_of_total: number; category: string }>
+  }
+}) {
+  const labelColor = CONCENTRATION_COLOR[concentration.concentration_label] ?? '#8d90a2'
+  const maxPct = concentration.top_accounts[0]?.pct_of_total || 1
+
+  return (
+    <div className="bg-surface border border-border rounded overflow-hidden">
+      <div className="px-5 py-3 border-b border-border bg-surface-container-low flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="material-symbols-outlined text-[14px] text-outline">hub</span>
+          <span className="text-[10px] font-mono text-on-surface-variant uppercase tracking-widest">
+            Portfolio Concentration
+          </span>
+        </div>
+        <div className="flex items-center gap-4">
+          <span className="text-[9px] font-mono text-outline">
+            HHI {concentration.hhi.toFixed(3)} · {concentration.effective_positions.toFixed(1)} effective positions
+          </span>
+          <span
+            className="text-[9px] font-mono px-2 py-0.5 rounded"
+            style={{ color: labelColor, background: `${labelColor}18`, border: `1px solid ${labelColor}40` }}
+          >
+            {concentration.concentration_label}
+          </span>
+        </div>
+      </div>
+
+      {concentration.insight && (
+        <div className="px-5 py-2.5 border-b border-border">
+          <p className="text-[11px] text-outline leading-snug">{concentration.insight}</p>
+        </div>
+      )}
+
+      <div className="divide-y divide-border">
+        {concentration.top_accounts.slice(0, 8).map((acc, i) => {
+          const catColor = CATEGORY_COLOR[acc.category] ?? '#8d90a2'
+          return (
+            <div key={i} className="px-5 py-2 flex items-center gap-3">
+              <span className="text-[10px] font-mono text-outline w-5 shrink-0 text-right">{i + 1}</span>
+              <span
+                className="text-[9px] font-mono px-1.5 py-0.5 rounded shrink-0"
+                style={{ color: catColor, background: `${catColor}15`, border: `1px solid ${catColor}30` }}
+              >
+                {acc.category.slice(0, 3).toUpperCase()}
+              </span>
+              <span className="text-[12px] text-on-surface flex-1 min-w-0 truncate">{acc.name}</span>
+              <div className="w-24 h-1.5 bg-surface-container rounded overflow-hidden shrink-0">
+                <div
+                  className="h-full rounded"
+                  style={{ width: `${(acc.pct_of_total / maxPct) * 100}%`, background: labelColor, opacity: 0.65 }}
+                />
+              </div>
+              <span className="text-[11px] font-mono w-12 text-right shrink-0" style={{ color: labelColor }}>
+                {acc.pct_of_total.toFixed(1)}%
+              </span>
+              <span className="text-[10px] font-mono text-outline w-28 text-right shrink-0">
+                {acc.value_cop_mm.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} MM
+              </span>
+            </div>
+          )
+        })}
+      </div>
+
+      {Object.keys(concentration.category_concentration).length > 0 && (
+        <div className="px-5 py-3 border-t border-border flex flex-wrap gap-3">
+          {Object.entries(concentration.category_concentration).slice(0, 6).map(([cat, pct]) => {
+            const catColor = CATEGORY_COLOR[cat] ?? '#8d90a2'
+            return (
+              <div key={cat} className="flex items-center gap-1.5">
+                <span
+                  className="text-[9px] font-mono px-1.5 py-0.5 rounded"
+                  style={{ color: catColor, background: `${catColor}15`, border: `1px solid ${catColor}30` }}
+                >
+                  {cat.toUpperCase()}
+                </span>
+                <span className="text-[11px] font-mono text-on-surface">{pct.toFixed(1)}%</span>
+              </div>
+            )
+          })}
         </div>
       )}
     </div>

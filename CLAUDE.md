@@ -449,10 +449,21 @@ The analyzer uses a **"Math First, Synthesis Second, LLM Third"** architecture w
 | `fund_engine` | `fund_engine.py` | Investment fund detection, NAV reconciliation, position tracking |
 | `kpi_engine` | `kpi_engine.py` | Executive KPI cards for dashboard display |
 | `synthesis_engine` | `synthesis_engine.py` | **Phase 1 Roadmap**: Portfolio-level executive synthesis — aggregates all engine outputs into investor flow story, strategic rotation, sector signals, board alerts, and structured `signals[]` list. Runs before the LLM so Claude narrativizes pre-formed conclusions instead of discovering patterns from 60+ raw rows. |
-| `llm_reasoning` | `llm_reasoning.py` | Constrained LLM call; receives pre-computed synthesis + only HIGH/MEDIUM materiality accounts (filters LOW to avoid token exhaustion) |
+| `llm_reasoning` | `llm_reasoning.py` | **4-sub-agent LLM pipeline** (Movement → Causality → Thesis → Narrative); assembles `LLMAnalysisResult` from 4 focused outputs |
 | `service` | `service.py` | Orchestrates all steps; merges deterministic + LLM results |
+| `contracts/` | `contracts/*.py` | Pydantic I/O contracts for each sub-agent (movement, causality, thesis, narrative) |
+| `subagents/` | `subagents/*.py` | 4 focused sub-agent modules: `movement_intelligence`, `causality_agent`, `thesis_agent`, `narrative_agent` |
 
-**LLM Token Strategy**: Only HIGH and MEDIUM materiality accounts are sent to the LLM per-account analysis (typically 15-25 of 60+ accounts). LOW materiality accounts were causing JSON truncation and silent fallback to template text. `max_tokens=32000`.
+**LLM Token Strategy (updated 2026-05-27)**: `llm_reasoning.py` was refactored from a single 32 000-token call into 4 focused sub-agents. Root cause was context window saturation with 60+ accounts causing empty narratives and shallow reasoning.
+
+| Sub-agent | File | Answers | Max tokens | S3 prompt key |
+|-----------|------|---------|-----------|---------------|
+| Movement Intelligence | `subagents/movement_intelligence.py` | What happened? | 5 000 | `instructions/prompts/02a_prompt_subagent_movement_intelligence.md` |
+| Causality Agent | `subagents/causality_agent.py` | Why did it happen? | 6 000 | `instructions/prompts/02b_prompt_subagent_causality.md` |
+| Financial Thesis | `subagents/thesis_agent.py` | What does this mean strategically? | 5 000 | `instructions/prompts/02c_prompt_subagent_thesis.md` |
+| Executive Narrative | `subagents/narrative_agent.py` | How do we communicate it? | 4 000 | `instructions/prompts/02d_prompt_subagent_narrative.md` |
+
+Each sub-agent loads its system prompt from S3 (`load_text(s3_key)`), falls back to `src/agents/system_pompts/02a–02d_prompt_subagent_*.md`, then to an inline fallback string. Prompt source is logged (`source=s3|local|inline_fallback`). Public API of `run_llm_analysis()` and `LLMAnalysisResult` is **unchanged** — `service.py` needs no modification.
 
 **`executive_synthesis`** field on `AnalyzerOutput` contains the structured portfolio story:
 - `main_portfolio_theme` — single-line characterization
@@ -467,7 +478,7 @@ Key execution pipeline flow (steps orchestrated in `service.py`):
 2. **Deterministic Computations**: Compute ratios, materiality, trend descriptions, reliability flags, concentrations, causal linkages, and earnings quality metrics.
 3. **Fund Analysis**: NAV reconciliation, position tracking, new/closed positions detection.
 4. **Executive Synthesis** (`synthesis_engine`): Aggregate all engine outputs into portfolio story, signals, and board-ready conclusions. This is the "portfolio intelligence layer".
-5. **LLM Qualitative Insights**: Pass pre-computed synthesis as context; LLM narrativizes and enriches rather than re-deriving conclusions. Ceiling rule prevents LLM from overriding deterministic risk levels.
+5. **LLM Qualitative Insights** (4 sub-agents): Movement Intelligence identifies what happened → Causality Agent explains why → Financial Thesis builds strategic interpretation → Executive Narrative converts conclusions to board-ready text. Each sub-agent receives a compact text digest (≤6 000 tokens) rather than full JSON dumps. Ceiling rule prevents LLM from overriding deterministic risk levels.
 6. **Consolidation**: Merge deterministic + LLM results into `AnalyzerOutput`.
 
 
