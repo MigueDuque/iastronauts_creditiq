@@ -33,43 +33,25 @@ function stepState(idx: number, starts: readonly number[], elapsed: number): 'pe
 // ── Color maps ────────────────────────────────────────────────────────────
 
 const CATEGORY_COLOR: Record<string, string> = {
-  assets:      'var(--color-brand-accent)',
-  liabilities: 'var(--color-danger-soft)',
-  equity:      'var(--color-success-low)',
-  revenue:     'var(--color-warning-soft)',
-  expense:     'var(--color-warning-soft)',
-  other:       'var(--color-on-surface-muted-strong)',
-}
-
-const CATEGORY_BG_COLOR: Record<string, string> = {
-  assets:      'var(--color-brand-accent-soft)',
-  liabilities: 'var(--color-danger-soft-soft)',
-  equity:      'var(--color-success-low-soft)',
-  revenue:     'var(--color-warning-soft-soft)',
-  expense:     'var(--color-warning-soft-soft)',
-  other:       'rgba(195,197,216,0.12)',
-}
-
-const CATEGORY_BORDER_COLOR: Record<string, string> = {
-  assets:      'rgba(183,196,255,0.25)',
-  liabilities: 'rgba(248,81,73,0.25)',
-  equity:      'rgba(63,185,80,0.25)',
-  revenue:     'rgba(210,153,34,0.25)',
-  expense:     'rgba(210,153,34,0.25)',
-  other:       'rgba(195,197,216,0.25)',
+  assets:      '#5BA4FF',    // soft blue
+  liabilities: '#FF6B9D',    // soft pink
+  equity:      '#6DD4FF',    // blue-cyan
+  revenue:     '#FFB84D',    // soft orange
+  expense:     '#7FD0FF',    // light cyan
+  other:       '#A8B8D8',    // blue-gray
 }
 
 const HEALTH_COLOR: Record<string, string> = {
-  STABLE:   'var(--color-success-low)',
-  GROWING:  'var(--color-brand-accent)',
-  DECLINING: 'var(--color-warning-soft)',
-  CRITICAL: 'var(--color-danger-soft)',
+  STABLE:   '#6DD4FF',       // blue-cyan
+  GROWING:  '#5BA4FF',       // soft blue
+  DECLINING:'#FFB84D',       // soft orange  
+  CRITICAL: '#FF6B9D',       // soft pink
 }
 
 const RISK_COLOR: Record<string, string> = {
-  LOW:    'var(--color-success-low)',
-  MEDIUM: 'var(--color-warning-soft)',
-  HIGH:   'var(--color-danger-soft)',
+  LOW:    '#6DD4FF',         // blue-cyan
+  MEDIUM: '#FFB84D',         // soft orange
+  HIGH:   '#FF6B9D',         // soft pink
 }
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -245,16 +227,9 @@ interface AnalyzerOutput {
 // ── Component ──────────────────────────────────────────────────────────────
 
 export default function AnalysisPage() {
-  // Read job ID once at mount so we can validate the stored status against it.
-  const _mountJobId = localStorage.getItem(STORAGE_KEY)
-  const [jobId, setJobId]   = useState<string | null>(_mountJobId)
+  const [jobId, setJobId]   = useState<string | null>(() => localStorage.getItem(STORAGE_KEY))
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(() => {
-    try {
-      const cached = JSON.parse(localStorage.getItem(STATUS_KEY) ?? 'null') as JobStatus | null
-      // Drop the cached status when it clearly belongs to a different job.
-      if (cached?.analysis_id && cached.analysis_id !== _mountJobId) return null
-      return cached
-    } catch { return null }
+    try { return JSON.parse(localStorage.getItem(STATUS_KEY) ?? 'null') } catch { return null }
   })
   const [report, setReport] = useState<ExtractorOutput | null>(() => {
     try { return JSON.parse(localStorage.getItem(REPORT_KEY) ?? 'null') } catch { return null }
@@ -297,28 +272,6 @@ export default function AnalysisPage() {
     else localStorage.removeItem(PHASE_KEY)
   }, [phase])
 
-  // ── New-job notification from UploadDialog (same-tab custom event) ─────
-  // localStorage's 'storage' event only fires in other tabs, so UploadDialog
-  // dispatches a custom event that we catch here to reset all state immediately.
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const newId = (e as CustomEvent<{ jobId: string }>).detail?.jobId
-      if (!newId || newId === jobId) return
-      if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
-      ;[STATUS_KEY, REPORT_KEY, ANALYZER_KEY, PHASE_KEY].forEach(k => localStorage.removeItem(k))
-      localStorage.setItem(STORAGE_KEY, newId)
-      setJobId(newId)
-      setJobStatus(null)
-      setReport(null)
-      setAnalyzerData(null)
-      setPhase(null)
-      setElapsed(0)
-      setCatFilter('all')
-    }
-    window.addEventListener('creditiq:newjob', handler)
-    return () => window.removeEventListener('creditiq:newjob', handler)
-  }, [jobId])
-
   // ── Main polling effect ────────────────────────────────────────────────
 
   const TERMINAL = new Set(['completed', 'failed', 'extraction_complete', 'analysis_complete'])
@@ -347,8 +300,7 @@ export default function AnalysisPage() {
         if (!res.ok || !alive) { console.error('[poll]', res.status, await res.text()); return }
         const data: JobStatus = await res.json()
         if (!alive) return
-        // Always stamp analysis_id so the stale-status check works on remount.
-        setJobStatus({ ...data, analysis_id: data.analysis_id ?? jobId })
+        setJobStatus(data)
 
         if (TERMINAL.has(data.status)) {
           if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
@@ -460,7 +412,7 @@ export default function AnalysisPage() {
         if (!res.ok || !alive) return
         const data: JobStatus = await res.json()
         if (!alive) return
-        setJobStatus({ ...data, analysis_id: data.analysis_id ?? jobId })
+        setJobStatus(data)
         onStatus(data)
         if (TERMINAL.has(data.status)) {
           if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
@@ -482,8 +434,6 @@ export default function AnalysisPage() {
   async function _doRunAgent2() {
     if (!jobId) return
     setPhase('agent2'); setReport(null); setAnalyzerData(null); setElapsed(0)
-    // Optimistically set processing so the sidebar updates immediately — don't wait for first poll.
-    setJobStatus({ analysis_id: jobId, status: 'processing' })
     // Use /reanalyze — always routes to Agent 2 regardless of current S3 status.
     // /continue is status-aware and would run Agents 3+4 if status is analysis_complete.
     await fetch(`${API}/analyses/${jobId}/reanalyze`, { method: 'POST', headers: HEADERS })
@@ -505,8 +455,6 @@ export default function AnalysisPage() {
   async function _doRunFinal() {
     if (!jobId) return
     setPhase('final'); setAnalyzerData(null); setElapsed(0)
-    // Optimistically set processing so the sidebar updates immediately — don't wait for first poll.
-    setJobStatus({ analysis_id: jobId, status: 'processing' })
     await fetch(`${API}/analyses/${jobId}/continue`, { method: 'POST', headers: HEADERS })
     _startPolling(() => {})
   }
@@ -532,12 +480,12 @@ export default function AnalysisPage() {
   const anomalyCount = analyzerData?.analysis_results.filter(r => r.anomaly_detected).length ?? 0
 
   const statusColor = {
-    pending:              'var(--color-warning-soft)',
-    processing:           'var(--color-brand-accent)',
-    extraction_complete:  'var(--color-warning-soft)',
-    analysis_complete:    'var(--color-brand-accent)',
-    completed:            'var(--color-success-low)',
-    failed:               'var(--color-danger-soft)',
+    pending:              '#FFB020',
+    processing:           '#56CCF2',
+    extraction_complete:  '#FFB020',
+    analysis_complete:    '#56CCF2',
+    completed:            '#56F2C1',
+    failed:               '#FF4D6D',
   }[jobStatus?.status ?? 'pending']
 
   // Show spinner only when genuinely running — not while loading historical data into state
@@ -557,7 +505,7 @@ export default function AnalysisPage() {
     <div className="p-margin-mobile md:p-margin-desktop flex flex-col md:flex-row gap-gutter min-h-0">
 
       {/* Left: AI Reasoning Pipeline */}
-      <AiReasoningPipeline status={jobStatus?.status ?? null} jobId={jobId ?? undefined} progress={jobStatus?.progress} phase={phase} />
+      <AiReasoningPipeline status={jobStatus?.status ?? null} jobId={jobId ?? undefined} progress={jobStatus?.progress} />
 
       {/* Right: Main canvas */}
       <div className="flex-1 flex flex-col gap-5 overflow-hidden min-w-0">
@@ -608,18 +556,18 @@ export default function AnalysisPage() {
 
               <div className="flex items-center gap-6">
                 <Kpi label="STATUS" value={(jobStatus?.status ?? '—').toUpperCase()} color={statusColor} />
-                {isProcessing && <Kpi label="ELAPSED" value={`${elapsed}s`} color="var(--color-on-surface-muted-strong)" />}
+                {isProcessing && <Kpi label="ELAPSED" value={`${elapsed}s`} color="#94A3B8" />}
                 {report && (
                   <>
-                    <Kpi label="ACCOUNTS"   value={String(report.accounts.length)} color="var(--color-brand-accent)" />
-                    <Kpi label="CONFIDENCE" value={`${(report.extraction_confidence * 100).toFixed(1)}%`} color="var(--color-success-low)" />
+                    <Kpi label="ACCOUNTS"   value={String(report.accounts.length)} color="#2F80FF" />
+                    <Kpi label="CONFIDENCE" value={`${(report.extraction_confidence * 100).toFixed(1)}%`} color="#56F2C1" />
                   </>
                 )}
                 {analyzerData && !report && (
                   <Kpi
                     label="HEALTH"
                     value={analyzerData.overall_financial_health}
-                    color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? 'var(--color-on-surface-muted-strong)'}
+                    color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#8d90a2'}
                   />
                 )}
                 <button
@@ -669,8 +617,8 @@ export default function AnalysisPage() {
                       return (
                         <div key={i} className={`flex items-start gap-4 relative z-10 transition-opacity duration-500 ${s === 'pending' ? 'opacity-35' : ''}`}>
                           {s === 'done' && (
-                            <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 bg-surface border border-success">
-                              <span className="material-symbols-outlined text-[13px]" style={{ color: 'var(--color-success-low)' }}>check</span>
+                            <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 bg-surface border border-[#56F2C1]">
+                              <span className="material-symbols-outlined text-[13px]" style={{ color: '#56F2C1' }}>check</span>
                             </div>
                           )}
                           {s === 'active' && (
@@ -684,11 +632,11 @@ export default function AnalysisPage() {
                             </div>
                           )}
                           <div className="pt-0.5">
-                            <p className={`text-body-sm font-body-sm ${s === 'active' ? 'text-on-surface font-semibold' : s === 'done' ? 'text-success' : 'text-outline'}`}>
+                            <p className={`text-body-sm font-body-sm ${s === 'active' ? 'text-on-surface font-semibold' : s === 'done' ? 'text-[#56F2C1]' : 'text-outline'}`}>
                               {step.label}
                             </p>
                             {s === 'active' && <p className="text-[10px] font-mono text-outline mt-1 animate-pulse">Running…</p>}
-                            {s === 'done'   && <p className="text-[10px] font-mono mt-1 text-success">✓ Complete</p>}
+                            {s === 'done'   && <p className="text-[10px] font-mono mt-1" style={{ color: '#56F2C1' }}>✓ Complete</p>}
                           </div>
                         </div>
                       )
@@ -709,7 +657,7 @@ export default function AnalysisPage() {
             {/* Error state */}
             {jobStatus?.status === 'failed' && (
               <div className="bg-surface border border-risk-high/30 rounded p-6"
-                   style={{ background: 'rgba(248,81,73,0.05)' }}>
+                   style={{ background: 'rgba(255, 77, 109, 0.05)' }}>
                 <div className="text-label-sm font-label-sm text-risk-high uppercase mb-2 font-mono">Pipeline failed</div>
                 <pre className="text-body-sm font-body-sm text-risk-high whitespace-pre-wrap font-mono">
                   {jobStatus.error ?? 'See logs for details.'}
@@ -743,9 +691,9 @@ export default function AnalysisPage() {
 
                 {/* Agent 1 continue banner */}
                 <div className="bg-surface border rounded p-5 flex flex-col md:flex-row items-center justify-between gap-4"
-                     style={{ borderColor: 'var(--color-warning-soft)', background: 'rgba(210,153,34,0.06)' }}>
+                     style={{ borderColor: '#FFB020', background: 'rgba(255, 176, 32, 0.06)' }}>
                   <div className="flex items-start gap-3">
-                    <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: 'var(--color-warning-soft)' }}>checklist</span>
+                    <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: '#FFB020' }}>checklist</span>
                     <div>
                       <p className="text-body-md font-body-md font-semibold text-on-surface mb-0.5">
                         Agent 1 complete — review extracted accounts
@@ -758,7 +706,7 @@ export default function AnalysisPage() {
                   <button
                     onClick={handleRunAgent2Click}
                     className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95 shrink-0"
-                    style={{ background: 'var(--color-warning-soft)', color: 'var(--color-on-surface)' }}
+                    style={{ background: '#FFB020', color: '#050816' }}
                   >
                     <span className="material-symbols-outlined text-[16px]">play_arrow</span>
                     Run Agent 2 — Financial Analysis
@@ -787,7 +735,7 @@ export default function AnalysisPage() {
                     <MetricCard
                       label="AUM — Patrimonio Neto"
                       value={`${analyzerData.fund_analysis.nav_reconciliation.closing_nav.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} MM`}
-                      color="var(--color-brand-accent)"
+                      color="#2F80FF"
                       icon="account_balance_wallet"
                     />
                   )}
@@ -795,7 +743,7 @@ export default function AnalysisPage() {
                   <MetricCard
                     label="Financial Health"
                     value={analyzerData.overall_financial_health}
-                    color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? 'var(--color-brand-accent)'}
+                    color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#2F80FF'}
                     icon="monitor_heart"
                   />
                   {/* Smart KPI cards from executive_kpis.dashboard_metrics */}
@@ -804,7 +752,7 @@ export default function AnalysisPage() {
                       key={m.key}
                       label={m.label}
                       value={m.value}
-                      color={m.signal === 'positive' ? 'var(--color-success-low)' : m.signal === 'negative' ? 'var(--color-danger-soft)' : 'var(--color-warning-soft)'}
+                      color={m.signal === 'positive' ? '#56F2C1' : m.signal === 'negative' ? '#FF4D6D' : '#FFB020'}
                       icon={
                         m.key === 'aum_growth'      ? 'trending_up'    :
                         m.key === 'net_flow'         ? 'swap_vert'      :
@@ -826,7 +774,7 @@ export default function AnalysisPage() {
                       key={m.key}
                       label={m.label}
                       value={m.value}
-                      color={m.signal === 'positive' ? 'var(--color-success-low)' : m.signal === 'negative' ? 'var(--color-danger-soft)' : 'var(--color-warning-soft)'}
+                      color={m.signal === 'positive' ? '#56F2C1' : m.signal === 'negative' ? '#FF4D6D' : '#FFB020'}
                       icon={
                         m.key === 'concentration' ? 'hub' :
                         m.key === 'current_ratio' ? 'account_balance' : 'analytics'
@@ -834,17 +782,17 @@ export default function AnalysisPage() {
                     />
                   ))}
                   <StatCounter label="High Materiality" value={analyzerData.high_materiality_accounts.length} unit="accounts" />
-                  <StatCounter label="Anomalies" value={anomalyCount} unit="detected" color={anomalyCount > 0 ? 'var(--color-warning-soft)' : 'var(--color-success-low)'} />
+                  <StatCounter label="Anomalies" value={anomalyCount} unit="detected" color={anomalyCount > 0 ? '#FFB020' : '#56F2C1'} />
                 </div>
 
                 {/* ── Tier 1: Critical executive signals ── */}
                 {(analyzerData.insight_tiers?.tier1_critical ?? []).length > 0 && (
                   <div className="bg-surface border rounded overflow-hidden"
-                       style={{ borderColor: 'rgba(248,81,73,0.35)' }}>
+                       style={{ borderColor: 'rgba(255, 77, 109, 0.35)' }}>
                     <div className="px-5 py-3 border-b flex items-center gap-2"
-                         style={{ borderColor: 'rgba(248,81,73,0.2)', background: 'rgba(248,81,73,0.05)' }}>
-                      <span className="material-symbols-outlined text-[15px]" style={{ color: 'var(--color-danger-soft)' }}>priority_high</span>
-                      <span className="text-[10px] font-mono uppercase tracking-widest" style={{ color: 'var(--color-danger-soft)' }}>
+                         style={{ borderColor: 'rgba(255, 77, 109, 0.20)', background: 'rgba(255, 77, 109, 0.05)' }}>
+                      <span className="material-symbols-outlined text-[15px]" style={{ color: '#FF4D6D' }}>priority_high</span>
+                      <span className="text-[10px] font-mono uppercase tracking-widest" style={{ color: '#FF4D6D' }}>
                         Critical Executive Signals
                       </span>
                       <span className="ml-auto text-[9px] font-mono text-outline">
@@ -855,7 +803,7 @@ export default function AnalysisPage() {
                       {analyzerData.insight_tiers!.tier1_critical!.map((t, i) => (
                         <div key={i} className="px-5 py-3 flex gap-4 items-start">
                           <span className="text-[9px] font-mono px-1.5 py-0.5 rounded shrink-0 mt-0.5"
-                                style={{ color: 'var(--color-danger-soft)', background: 'rgba(248,81,73,0.12)', border: '1px solid rgba(248,81,73,0.25)' }}>
+                                style={{ color: '#FF4D6D', background: 'rgba(255, 77, 109, 0.12)', border: '1px solid rgba(255, 77, 109, 0.25)' }}>
                             {t.category || 'SIGNAL'}
                           </span>
                           <div className="flex-1 min-w-0">
@@ -956,27 +904,27 @@ export default function AnalysisPage() {
                               <tr key={r.account_id} className={`hover:bg-surface-container-lowest/50 ${i % 2 ? 'bg-surface-container-lowest/20' : ''}`}>
                                 <td className="py-2 px-3 text-on-surface min-w-[200px]">{r.account_name}</td>
                                 <td className="py-2 px-3 text-right font-mono text-[11px]"
-                                    style={{ color: r.variation_pct > 0 ? 'var(--color-success-low)' : r.variation_pct < 0 ? 'var(--color-danger-soft)' : 'var(--color-on-surface-muted-strong)' }}>
+                                    style={{ color: r.variation_pct > 0 ? '#56F2C1' : r.variation_pct < 0 ? '#FF4D6D' : '#94A3B8' }}>
                                   {r.variation_pct !== 0 ? `${r.variation_pct > 0 ? '+' : ''}${r.variation_pct.toFixed(1)}%` : '—'}
                                 </td>
                                 <td className="py-2 px-3">
                                   <span className="text-[10px] font-mono px-2 py-0.5 rounded"
                                         style={{
-                                          color: r.materiality === 'HIGH' ? 'var(--color-danger-soft)' : r.materiality === 'MEDIUM' ? 'var(--color-warning-soft)' : 'var(--color-success-low)',
-                                          background: r.materiality === 'HIGH' ? 'rgba(248,81,73,0.12)' : r.materiality === 'MEDIUM' ? 'rgba(210,153,34,0.12)' : 'rgba(63,185,80,0.12)',
-                                          border: `1px solid ${r.materiality === 'HIGH' ? 'rgba(248,81,73,0.25)' : r.materiality === 'MEDIUM' ? 'rgba(210,153,34,0.25)' : 'rgba(63,185,80,0.25)'}`,
+                                          color: r.materiality === 'HIGH' ? '#FF4D6D' : r.materiality === 'MEDIUM' ? '#FFB020' : '#56F2C1',
+                                          background: r.materiality === 'HIGH' ? '#FF4D6D20' : r.materiality === 'MEDIUM' ? '#FFB02020' : '#56F2C120',
+                                          border: `1px solid ${r.materiality === 'HIGH' ? '#FF4D6D40' : r.materiality === 'MEDIUM' ? '#FFB02040' : '#56F2C140'}`,
                                         }}>
                                     {r.materiality}
                                   </span>
                                 </td>
                                 <td className="py-2 px-3">
-                                  <span className="text-[10px] font-mono" style={{ color: RISK_COLOR[r.risk_level] ?? 'var(--color-on-surface-muted-strong)' }}>
+                                  <span className="text-[10px] font-mono" style={{ color: RISK_COLOR[r.risk_level] ?? '#8d90a2' }}>
                                     {r.risk_level}
                                   </span>
                                 </td>
                                 <td className="py-2 px-3">
                                   {r.anomaly_detected && (
-                                    <span className="material-symbols-outlined text-[14px]" style={{ color: 'var(--color-warning-soft)' }}>warning</span>
+                                    <span className="material-symbols-outlined text-[14px]" style={{ color: '#FFB020' }}>warning</span>
                                   )}
                                 </td>
                               </tr>
@@ -1008,9 +956,9 @@ export default function AnalysisPage() {
                 {/* Agent 2 continue / completed banner */}
                 {jobStatus?.status === 'analysis_complete' && (
                   <div className="bg-surface border rounded p-5 flex flex-col md:flex-row items-center justify-between gap-4"
-                       style={{ borderColor: 'var(--color-brand-accent)', background: 'rgba(183,196,255,0.06)' }}>
+                       style={{ borderColor: '#b7c4ff', background: 'rgba(183,196,255,0.06)' }}>
                     <div className="flex items-start gap-3">
-                      <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: 'var(--color-brand-accent)' }}>analytics</span>
+                      <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: '#b7c4ff' }}>analytics</span>
                       <div>
                         <p className="text-body-md font-body-md font-semibold text-on-surface mb-0.5">
                           Agent 2 complete — review financial analysis
@@ -1031,7 +979,7 @@ export default function AnalysisPage() {
                       <button
                         onClick={handleRunFinalClick}
                         className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95"
-                        style={{ background: 'var(--color-brand-accent)', color: 'var(--color-on-surface)' }}
+                        style={{ background: '#56CCF2', color: '#050816' }}
                       >
                         <span className="material-symbols-outlined text-[16px]">play_arrow</span>
                         Run Agents 3–4
@@ -1041,9 +989,9 @@ export default function AnalysisPage() {
                 )}
                 {jobStatus?.status === 'completed' && (
                   <div className="bg-surface border rounded p-5 flex flex-col md:flex-row items-center justify-between gap-4"
-                       style={{ borderColor: 'var(--color-success-low)', background: 'rgba(63,185,80,0.04)' }}>
+                       style={{ borderColor: '#3FB950', background: 'rgba(63,185,80,0.04)' }}>
                     <div className="flex items-center gap-3">
-                      <span className="material-symbols-outlined text-[22px]" style={{ color: 'var(--color-success-low)' }}>check_circle</span>
+                      <span className="material-symbols-outlined text-[22px]" style={{ color: '#3FB950' }}>check_circle</span>
                       <div>
                         <p className="text-body-md font-body-md font-semibold text-on-surface mb-0.5">Pipeline complete</p>
                         <p className="text-label-sm font-label-sm text-outline">All agents finished. Report saved to S3.</p>
@@ -1073,8 +1021,8 @@ export default function AnalysisPage() {
             {/* ── COMPLETED with no analyzer data (edge case: Agent 2 never ran) ── */}
             {jobStatus?.status === 'completed' && !analyzerData && (
               <div className="bg-surface border rounded p-6 flex items-center gap-3"
-                   style={{ borderColor: 'var(--color-success-low)', background: 'rgba(63,185,80,0.04)' }}>
-                <span className="material-symbols-outlined text-[22px]" style={{ color: 'var(--color-success-low)' }}>check_circle</span>
+                   style={{ borderColor: '#56F2C1', background: 'rgba(86, 242, 193, 0.04)' }}>
+                <span className="material-symbols-outlined text-[22px]" style={{ color: '#56F2C1' }}>check_circle</span>
                 <p className="text-body-sm font-body-sm text-on-surface">Pipeline complete — report saved to S3.</p>
               </div>
             )}
@@ -1099,7 +1047,7 @@ export default function AnalysisPage() {
             onClick={e => e.stopPropagation()}
           >
             <div className="flex items-start gap-3 mb-5">
-              <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: 'var(--color-warning-soft)' }}>replay</span>
+              <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: '#D29922' }}>replay</span>
               <div>
                 <p className="text-body-md font-body-md font-semibold text-on-surface mb-1">
                   {restartIntent === 'agent2' ? 'Agent 2 already has results' : 'Pipeline already completed'}
@@ -1116,7 +1064,7 @@ export default function AnalysisPage() {
                 <button
                   onClick={skipToFinal}
                   className="w-full px-4 py-2.5 rounded border font-mono text-[12px] text-left flex items-center gap-2 hover:bg-surface-container transition-colors"
-                  style={{ borderColor: 'var(--color-brand-accent)', color: 'var(--color-brand-accent)' }}
+                  style={{ borderColor: '#56CCF2', color: '#56CCF2' }}
                 >
                   <span className="material-symbols-outlined text-[15px]">skip_next</span>
                   Skip Agent 2 — continue to Agents 3–4
@@ -1216,7 +1164,7 @@ export default function AnalysisPage() {
             onClick={e => e.stopPropagation()}
           >
             <div className="flex items-start gap-3 mb-5">
-              <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: 'var(--color-warning-soft)' }}>
+              <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: '#FFB020' }}>
                 warning
               </span>
               <div>
@@ -1239,7 +1187,7 @@ export default function AnalysisPage() {
               <button
                 onClick={confirmClear}
                 className="px-4 py-2 rounded text-[12px] font-mono font-semibold transition-all hover:opacity-90 active:scale-95"
-                style={{ background: 'var(--color-danger-soft)', color: 'var(--color-on-surface)' }}
+                style={{ background: '#FF4D6D', color: '#fff' }}
               >
                 Stop &amp; clear
               </button>
@@ -1253,20 +1201,17 @@ export default function AnalysisPage() {
 
 // ── Sub-components ────────────────────────────────────────────────────────
 
-const STATUS_BADGE_STYLE: Record<string, { color: string; background: string; border: string }> = {
-  completed:           { color: 'var(--color-success-low)', background: 'var(--color-success-low-soft)', border: 'rgba(63,185,80,0.25)' },
-  analysis_complete:   { color: 'var(--color-brand-accent)', background: 'var(--color-brand-accent-soft)', border: 'rgba(183,196,255,0.25)' },
-  extraction_complete: { color: 'var(--color-warning-soft)', background: 'var(--color-warning-soft-soft)', border: 'rgba(210,153,34,0.25)' },
-  failed:              { color: 'var(--color-danger-soft)', background: 'var(--color-danger-soft-soft)', border: 'rgba(248,81,73,0.25)' },
-  cancelled:           { color: 'var(--color-danger-soft)', background: 'var(--color-danger-soft-soft)', border: 'rgba(248,81,73,0.25)' },
-}
-
 function StatusBadge({ status }: { status: string }) {
-  const variant = STATUS_BADGE_STYLE[status] ?? { color: 'var(--color-on-surface-muted-strong)', background: 'rgba(195,197,216,0.12)', border: 'rgba(195,197,216,0.25)' }
+  const color =
+    status === 'completed'          ? '#56F2C1' :
+    status === 'analysis_complete'  ? '#56CCF2' :
+    status === 'extraction_complete'? '#FFB020' :
+    status === 'failed'             ? '#FF4D6D' :
+    status === 'cancelled'          ? '#FF4D6D' : '#94A3B8'
   return (
     <span
       className="text-[9px] font-mono px-2 py-0.5 rounded shrink-0"
-      style={{ color: variant.color, background: variant.background, border: variant.border }}
+      style={{ color, background: `${color}18`, border: `1px solid ${color}40` }}
     >
       {status.replace(/_/g, ' ').toUpperCase()}
     </span>
@@ -1294,7 +1239,7 @@ function MetricCard({ label, value, color, icon }: { label: string; value: strin
   )
 }
 
-function StatCounter({ label, value, unit, color = 'var(--color-on-surface-muted-strong)' }: { label: string; value: number; unit: string; color?: string }) {
+function StatCounter({ label, value, unit, color = '#e2e1ee' }: { label: string; value: number; unit: string; color?: string }) {
   return (
     <div className="bg-surface border border-border rounded p-3 text-center">
       <div className="text-[10px] font-mono text-outline uppercase mb-1 tracking-wide">{label}</div>
@@ -1347,24 +1292,10 @@ function NarrativeLayers({ layers }: { layers: { executive?: string; tactical?: 
 }
 
 const CONCENTRATION_COLOR: Record<string, string> = {
-  CRITICAL: 'var(--color-danger-soft)',
-  HIGH:     'var(--color-warning-soft)',
-  MEDIUM:   'var(--color-brand-accent)',
-  LOW:      'var(--color-success-low)',
-}
-
-const CONCENTRATION_BG_COLOR: Record<string, string> = {
-  CRITICAL: 'var(--color-danger-soft-soft)',
-  HIGH:     'var(--color-warning-soft-soft)',
-  MEDIUM:   'var(--color-brand-accent-soft)',
-  LOW:      'var(--color-success-low-soft)',
-}
-
-const CONCENTRATION_BORDER_COLOR: Record<string, string> = {
-  CRITICAL: 'rgba(248,81,73,0.25)',
-  HIGH:     'rgba(210,153,34,0.25)',
-  MEDIUM:   'rgba(183,196,255,0.25)',
-  LOW:      'rgba(63,185,80,0.25)',
+  CRITICAL: '#FF4D6D',
+  HIGH:     '#FFB020',
+  MEDIUM:   '#56CCF2',
+  LOW:      '#56F2C1',
 }
 
 function ConcentrationSection({ concentration }: {
@@ -1380,7 +1311,7 @@ function ConcentrationSection({ concentration }: {
     top_accounts: Array<{ name: string; value_cop_mm: number; pct_of_total: number; category: string }>
   }
 }) {
-  const labelColor = CONCENTRATION_COLOR[concentration.concentration_label] ?? 'var(--color-on-surface-muted-strong)'
+  const labelColor = CONCENTRATION_COLOR[concentration.concentration_label] ?? '#8d90a2'
   const maxPct = concentration.top_accounts[0]?.pct_of_total || 1
 
   return (
@@ -1413,7 +1344,7 @@ function ConcentrationSection({ concentration }: {
 
       <div className="divide-y divide-border">
         {concentration.top_accounts.slice(0, 8).map((acc, i) => {
-          const catColor = CATEGORY_COLOR[acc.category] ?? 'var(--color-on-surface-muted-strong)'
+          const catColor = CATEGORY_COLOR[acc.category] ?? '#8d90a2'
           return (
             <div key={i} className="px-5 py-2 flex items-center gap-3">
               <span className="text-[10px] font-mono text-outline w-5 shrink-0 text-right">{i + 1}</span>
@@ -1444,14 +1375,12 @@ function ConcentrationSection({ concentration }: {
       {Object.keys(concentration.category_concentration).length > 0 && (
         <div className="px-5 py-3 border-t border-border flex flex-wrap gap-3">
           {Object.entries(concentration.category_concentration).slice(0, 6).map(([cat, pct]) => {
-            const catColor = CATEGORY_COLOR[cat] ?? 'var(--color-on-surface-muted-strong)'
-            const catBg = CATEGORY_BG_COLOR[cat] ?? 'rgba(195,197,216,0.12)'
-            const catBorder = CATEGORY_BORDER_COLOR[cat] ?? 'rgba(195,197,216,0.25)'
+            const catColor = CATEGORY_COLOR[cat] ?? '#8d90a2'
             return (
               <div key={cat} className="flex items-center gap-1.5">
                 <span
                   className="text-[9px] font-mono px-1.5 py-0.5 rounded"
-                  style={{ color: catColor, background: catBg, border: `1px solid ${catBorder}` }}
+                  style={{ color: catColor, background: `${catColor}15`, border: `1px solid ${catColor}30` }}
                 >
                   {cat.toUpperCase()}
                 </span>
@@ -1485,27 +1414,22 @@ function AccountsTable({
           </p>
         </div>
         <div className="flex gap-1.5 flex-wrap">
-        {categories.map(cat => {
-          const filterColor = CATEGORY_COLOR[cat] ?? 'var(--color-brand-accent)'
-          const filterBg = CATEGORY_BG_COLOR[cat] ?? 'var(--color-brand-accent-soft)'
-
-          return (
+          {categories.map(cat => (
             <button
               key={cat}
               onClick={() => setCatFilter(cat)}
               className="px-2.5 py-0.5 rounded text-[10px] font-mono uppercase transition-all"
               style={{
-                border: `1px solid ${catFilter === cat ? filterColor : 'var(--color-surface-muted)'}`,
-                background: catFilter === cat ? filterBg : 'transparent',
-                color: catFilter === cat ? filterColor : 'var(--color-on-surface-muted-strong)',
+                border: `1px solid ${catFilter === cat ? (CATEGORY_COLOR[cat] ?? '#2F80FF') : 'rgba(47, 128, 255, 0.14)'}`,
+                background: catFilter === cat ? `${CATEGORY_COLOR[cat] ?? '#2F80FF'}18` : 'transparent',
+                color: catFilter === cat ? (CATEGORY_COLOR[cat] ?? '#2F80FF') : '#94A3B8',
               }}
             >
               {cat === 'all'
                 ? `All (${accounts.length})`
                 : `${cat} (${accounts.filter(a => a.category === cat).length})`}
             </button>
-          )
-        })}
+          ))}
         </div>
       </div>
 
@@ -1526,7 +1450,7 @@ function AccountsTable({
               const delta = a.previous_value != null && a.previous_value !== 0
                 ? ((a.current_value - a.previous_value) / Math.abs(a.previous_value)) * 100
                 : null
-              const catColor = CATEGORY_COLOR[a.category] ?? 'var(--color-on-surface-muted-strong)'
+              const catColor = CATEGORY_COLOR[a.category] ?? '#8d90a2'
               return (
                 <tr key={a.account_id} className={`hover:bg-surface-container-lowest/50 ${i % 2 ? 'bg-surface-container-lowest/20' : ''}`}>
                   <td className="py-2 px-3 font-mono text-[11px] text-outline">{a.account_id}</td>
@@ -1546,11 +1470,11 @@ function AccountsTable({
                       : '—'}
                   </td>
                   <td className="py-2 px-3 text-right font-mono text-[11px]"
-                      style={{ color: delta == null ? 'var(--color-on-surface-muted-strong)' : delta > 0 ? 'var(--color-success-low)' : 'var(--color-danger-soft)' }}>
+                      style={{ color: delta == null ? '#94A3B8' : delta > 0 ? '#56F2C1' : '#FF4D6D' }}>
                     {delta != null ? `${delta > 0 ? '+' : ''}${delta.toFixed(1)}%` : '—'}
                   </td>
                   <td className="py-2 px-3 text-right font-mono text-[11px]"
-                      style={{ color: a.confidence_score >= 0.8 ? 'var(--color-success-low)' : a.confidence_score >= 0.5 ? 'var(--color-warning-soft)' : 'var(--color-danger-soft)' }}>
+                      style={{ color: a.confidence_score >= 0.8 ? '#56F2C1' : a.confidence_score >= 0.5 ? '#FFB020' : '#FF4D6D' }}>
                     {(a.confidence_score * 100).toFixed(0)}%
                   </td>
                   <td className="py-2 px-3 font-mono text-[10px] text-outline max-w-[120px] overflow-hidden text-ellipsis"
@@ -1577,3 +1501,4 @@ function AccountsTable({
     </div>
   )
 }
+

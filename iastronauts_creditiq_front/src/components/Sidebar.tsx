@@ -21,8 +21,9 @@ const navItems = [
 const paperSx = {
   width: DRAWER_WIDTH,
   boxSizing: 'border-box' as const,
-  bgcolor: '#0A0C10',
-  borderRight: '1px solid #30363D',
+  bgcolor: '#050816',
+  borderRight: '1px solid rgba(47, 128, 255, 0.16)',
+  boxShadow: '4px 0 24px rgba(47, 128, 255, 0.06)',
   top: HEADER_HEIGHT,
   height: `calc(100vh - ${HEADER_HEIGHT}px)`,
 }
@@ -53,7 +54,7 @@ export default function Sidebar({ mobileOpen, onClose, onUploadClick }: SidebarP
           fontFamily: 'JetBrains Mono, monospace',
           fontSize: 10,
           letterSpacing: '0.05em',
-          color: '#8d90a2',
+          color: '#94A3B8',
           textTransform: 'uppercase',
         }}>Core Modules</span>
       </Box>
@@ -72,14 +73,14 @@ export default function Sidebar({ mobileOpen, onClose, onUploadClick }: SidebarP
               sx={{
                 borderRadius: '8px',
                 mb: 0.5,
-                color: active ? '#b7c4ff' : '#c3c5d8',
+                color: active ? '#56CCF2' : '#94A3B8',
                 '&.Mui-selected': {
-                  bgcolor: '#282933',
-                  color: '#b7c4ff',
-                  boxShadow: '0 0 20px rgba(183,196,255,0.1)',
-                  '&:hover': { bgcolor: '#282933' },
+                  bgcolor: '#111830',
+                  color: '#56CCF2',
+                  boxShadow: '0 0 20px rgba(47, 128, 255, 0.18)',
+                  '&:hover': { bgcolor: '#111830' },
                 },
-                '&:hover': { bgcolor: '#1d1f28', color: '#e2e1ee' },
+                '&:hover': { bgcolor: '#0d1228', color: '#F5F7FA' },
               }}
             >
               <ListItemIcon sx={{ minWidth: 36, color: 'inherit' }}>
@@ -98,10 +99,10 @@ export default function Sidebar({ mobileOpen, onClose, onUploadClick }: SidebarP
                 slotProps={{
                   primary: {
                     style: {
-                      fontFamily: 'JetBrains Mono, monospace',
-                      fontSize: 12,
-                      letterSpacing: '0.05em',
-                      fontWeight: 500,
+                      fontFamily: 'Geist, sans-serif',
+                      fontSize: 13,
+                      fontWeight: active ? 600 : 500,
+                      letterSpacing: '-0.01em',
                     },
                   },
                 }}
@@ -112,15 +113,15 @@ export default function Sidebar({ mobileOpen, onClose, onUploadClick }: SidebarP
       </List>
 
       {/* Bottom section */}
-      <Divider sx={{ borderColor: '#30363D', mx: 1 }} />
+      <Divider sx={{ borderColor: 'rgba(47, 128, 255, 0.14)', mx: 1 }} />
       <Box sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 2 }}>
         <Button
           fullWidth
           onClick={() => { onClose(); onUploadClick() }}
           startIcon={<span className="material-symbols-outlined" style={{ fontSize: 18 }}>upload_file</span>}
           sx={{
-            bgcolor: '#2e62ff',
-            color: '#f7f6ff',
+            bgcolor: '#2F80FF',
+            color: '#F5F7FA',
             borderRadius: '8px',
             fontFamily: 'JetBrains Mono, monospace',
             fontSize: 12,
@@ -128,7 +129,8 @@ export default function Sidebar({ mobileOpen, onClose, onUploadClick }: SidebarP
             textTransform: 'none',
             fontWeight: 500,
             py: 1.25,
-            '&:hover': { bgcolor: '#2e62ff', opacity: 0.88 },
+            boxShadow: '0 0 20px rgba(47, 128, 255, 0.30)',
+            '&:hover': { bgcolor: '#2F80FF', opacity: 0.88, boxShadow: '0 0 30px rgba(47, 128, 255, 0.45)' },
           }}
         >
           Upload Document
@@ -137,31 +139,32 @@ export default function Sidebar({ mobileOpen, onClose, onUploadClick }: SidebarP
         {/* System status */}
         <Box
           sx={{
-            bgcolor: '#191b24',
-            border: '1px solid #30363D',
+            bgcolor: '#0d1228',
+            border: '1px solid rgba(47, 128, 255, 0.16)',
             borderRadius: '8px',
             p: 1.5,
           }}
         >
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 0.5 }}>
-            <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: '#8d90a2', letterSpacing: '0.05em' }}>
+            <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: '#94A3B8', letterSpacing: '0.05em' }}>
               SYSTEM STATUS
             </span>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
               <Box
                 sx={{
-                  width: 7, height: 7, borderRadius: '50%', bgcolor: '#3FB950',
+                  width: 7, height: 7, borderRadius: '50%', bgcolor: '#56F2C1',
                   animation: 'pulse 2s infinite',
+                  boxShadow: '0 0 8px rgba(86, 242, 193, 0.6)',
                   '@keyframes pulse': {
                     '0%, 100%': { opacity: 1 },
                     '50%': { opacity: 0.4 },
                   },
                 }}
               />
-              <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: '#3FB950', letterSpacing: '0.05em' }}>Online</span>
+              <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: '#56F2C1', letterSpacing: '0.05em' }}>Online</span>
             </Box>
           </Box>
-          <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: '#8d90a2', letterSpacing: '0.05em' }}>
+          <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: '#94A3B8', letterSpacing: '0.05em' }}>
             Last model sync: 2m ago
           </span>
         </Box>
@@ -194,8 +197,8 @@ export default function Sidebar({ mobileOpen, onClose, onUploadClick }: SidebarP
           display: { xs: 'block', lg: 'none' },
           '& .MuiDrawer-paper': {
             width: DRAWER_WIDTH,
-            bgcolor: '#0A0C10',
-            borderRight: '1px solid #30363D',
+            bgcolor: '#050816',
+            borderRight: '1px solid rgba(47, 128, 255, 0.16)',
           },
         }}
       >

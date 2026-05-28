@@ -1,3 +1,4 @@
+
 import { Link, useLocation } from 'react-router-dom'
 import IconButton from '@mui/material/IconButton'
 
@@ -14,8 +15,9 @@ export default function Header({ onMenuToggle }: HeaderProps) {
         position: 'sticky',
         top: 0,
         zIndex: 1200,
-        backgroundColor: 'var(--color-surface-deep)',
-        borderBottom: '1px solid var(--color-border)',
+        backgroundColor: '#050816',
+        borderBottom: '1px solid rgba(47, 128, 255, 0.16)',
+        boxShadow: '0 0 30px rgba(47, 128, 255, 0.08)',
       }}
     >
       <div
@@ -37,8 +39,8 @@ export default function Header({ onMenuToggle }: HeaderProps) {
               onClick={onMenuToggle}
               sx={{
                 display: { xs: 'flex', lg: 'none' },
-                color: 'var(--color-on-surface-muted-strong)',
-                '&:hover': { color: 'var(--color-on-surface)', bgcolor: 'var(--color-surface-soft)' },
+                color: '#94A3B8',
+                '&:hover': { color: '#F5F7FA', bgcolor: '#0d1228' },
               }}
             >
               <span className="material-symbols-outlined">menu</span>
@@ -70,9 +72,9 @@ export default function Header({ onMenuToggle }: HeaderProps) {
                   gap: 8,
                   paddingBottom: 4,
                   textDecoration: 'none',
-                  color: active ? 'var(--color-brand-accent)' : 'var(--color-on-surface-muted-strong)',
+                  color: active ? '#2F80FF' : '#94A3B8',
                   fontWeight: active ? 700 : 500,
-                  borderBottom: active ? '2px solid #b7c4ff' : '2px solid transparent',
+                  borderBottom: active ? '2px solid #2F80FF' : '2px solid transparent',
                   transition: 'color 0.2s, border-color 0.2s',
                 }}
               >
@@ -105,7 +107,7 @@ export default function Header({ onMenuToggle }: HeaderProps) {
           {['search', 'help', 'language'].map((icon) => (
             <IconButton
               key={icon}
-              sx={{ color: 'var(--color-on-surface-muted-strong)', '&:hover': { color: 'var(--color-brand-accent)', bgcolor: 'var(--color-surface-soft)' } }}
+              sx={{ color: '#94A3B8', '&:hover': { color: '#56CCF2', bgcolor: '#0d1228' } }}
             >
               <span className="material-symbols-outlined" style={{ fontSize: 20 }}>{icon}</span>
             </IconButton>
@@ -115,15 +117,16 @@ export default function Header({ onMenuToggle }: HeaderProps) {
               width: 32,
               height: 32,
               borderRadius: '50%',
-              backgroundColor: 'var(--color-surface-muted)',
-              border: '1px solid var(--color-border)',
+              backgroundColor: '#111830',
+              border: '1px solid rgba(47, 128, 255, 0.20)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               marginLeft: 8,
+              boxShadow: '0 0 12px rgba(47, 128, 255, 0.10)',
             }}
           >
-            <span className="material-symbols-outlined" style={{ fontSize: 18, color: 'var(--color-on-surface-muted-strong)' }}>person</span>
+            <span className="material-symbols-outlined" style={{ fontSize: 18, color: '#94A3B8' }}>person</span>
           </div>
         </div>
       </div>
