@@ -1,75 +1,48 @@
 """
-llm_reasoning.py  —  Improvements #7 (Constrained Reasoning) + #8 (Confidence Engine)
+llm_reasoning.py — Multi-agent LLM pipeline for FinancialAnalyzer.
 
-LLM layer for QUALITATIVE financial reasoning only.
-All mathematical computations are completed before this module is invoked.
+Replaces a single overloaded LLM call with 4 focused internal sub-agents:
+  1. Movement Intelligence  — "What happened?"
+  2. Causality Agent        — "Why did it happen?"
+  3. Financial Thesis       — "What does this mean strategically?"
+  4. Executive Narrative    — "How do we communicate the conclusions?"
 
-Constraints:
-- LLM may ONLY narrate pre-computed deterministic facts.
-- LLM must NOT invent causality or generate unsupported claims.
-- Every insight must be grounded in evidence provided in the prompt.
-- Confidence is computed deterministically here, not by the LLM.
+External contract (run_llm_analysis signature and LLMAnalysisResult type) is
+unchanged — all callers in service.py continue to work without modification.
 """
 
 import logging
-import json
-import os
 from dataclasses import dataclass, field
-
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 from shared.llm_provider import LLMProvider
 from shared.models.base import MaterialityLevel
-from shared.s3_instructions import load_text
 
 from .ratio_engine import AccountVariation
 from .variation_reliability import ReliabilityResult, VariationReliability
 from .materiality_engine import _NIIF_MAP
 
+from .subagents.movement_intelligence import run_movement_intelligence
+from .subagents.causality_agent import run_causality_analysis
+from .subagents.thesis_agent import run_financial_thesis
+from .subagents.narrative_agent import run_executive_narrative
+
 logger = logging.getLogger("financial_analyzer.llm_reasoning")
 
-# Derive the valid NIIF/NIC whitelist from the standards this codebase actually
-# handles — sourced from materiality_engine._NIIF_MAP and niif18_engine (NIIF 18).
-# Never hardcode from external knowledge: the codebase IS the source of truth.
+
+# ── NIIF whitelist (sourced from codebase, never hardcoded from external knowledge) ──
+
 def _build_niif_whitelist() -> frozenset[str]:
     refs: set[str] = set()
     for category_map in _NIIF_MAP.values():
         for standards in category_map.values():
             refs.update(standards)
-    refs.add("NIIF 18")  # from niif18_engine.py
+    refs.add("NIIF 18")
     return frozenset(refs)
 
 _VALID_NIIF_REFS: frozenset[str] = _build_niif_whitelist()
 
-_PROMPT_S3_KEY = "instructions/prompts/02_prompt_agent_financial-analyzer.md"
-_NIIF_REF_CAP = 8_000
 
-_LOCAL_PROMPT_PATH = os.path.join(os.path.dirname(__file__), "prompts", "analyzer_prompt.txt")
-
-try:
-    with open(_LOCAL_PROMPT_PATH, encoding="utf-8") as _f:
-        _LOCAL_FALLBACK_PROMPT = _f.read()
-except FileNotFoundError:
-    _LOCAL_FALLBACK_PROMPT = (
-        "Eres un analista financiero NIIF experto. "
-        "Tu rol es EXCLUSIVAMENTE narrativo: describes hechos ya calculados. "
-        "NUNCA inventes causalidades. NUNCA generes riesgos no soportados por los datos. "
-        "Devuelve ÚNICAMENTE JSON válido sin markdown."
-    )
-
-_system_prompt_cache: str | None = None
-
-
-def _get_system_prompt() -> str:
-    global _system_prompt_cache
-    if _system_prompt_cache is None:
-        _system_prompt_cache = load_text(_PROMPT_S3_KEY, fallback=_LOCAL_FALLBACK_PROMPT)
-        source = "s3" if _system_prompt_cache != _LOCAL_FALLBACK_PROMPT else "local_fallback"
-        logger.info("system_prompt_loaded | source=%s chars=%d", source, len(_system_prompt_cache))
-    return _system_prompt_cache
-
-
-# ── Result types ──────────────────────────────────────────────────────────────
+# ── Result types (public contracts used by service.py) ───────────────────────
 
 @dataclass
 class AccountLLMInsight:
@@ -81,30 +54,31 @@ class AccountLLMInsight:
     requires_niif_note: bool = False
     niif_note_references: list[str] = field(default_factory=list)
     anomaly_override: bool = False
-    # Improvement #8: confidence signals from LLM (validated + clamped deterministically)
-    llm_confidence_hint: float = 0.8       # LLM's self-reported confidence (0.0–1.0)
+    llm_confidence_hint: float = 0.8
     llm_evidence_sources: list[str] = field(default_factory=list)
-    # Related-party detection (NIC 24)
     is_related_party: bool = False
     related_party_counterpart: str | None = None
-    # Dashboard signal for asset accounts
     investment_signal: str | None = None
 
 
 @dataclass
 class LLMAnalysisResult:
-    """Parsed and validated full LLM response."""
+    """Full qualitative analysis result assembled from the 4 sub-agent pipeline."""
     overall_financial_health: str = "STABLE"
     executive_narrative: str = ""
     niif_notes_required: list[str] = field(default_factory=list)
     account_insights: dict[str, AccountLLMInsight] = field(default_factory=dict)
     # Executive intelligence layer
     portfolio_thesis: str = ""
-    insight_tiers: dict = field(default_factory=dict)    # tier1_critical / tier2_material
-    narrative_layers: dict = field(default_factory=dict) # executive / tactical / technical
+    insight_tiers: dict = field(default_factory=dict)
+    narrative_layers: dict = field(default_factory=dict)
+    # Institutional analysis layer
+    structured_analysis: dict = field(default_factory=dict)
+    cross_statement_signals: list[dict] = field(default_factory=list)
+    earnings_sustainability: str = ""
 
 
-# ── Deterministic confidence calculator ──────────────────────────────────────
+# ── Deterministic confidence calculator (used by service.py) ─────────────────
 
 def compute_confidence(
     variation: AccountVariation,
@@ -114,16 +88,13 @@ def compute_confidence(
     llm_hint: float = 0.8,
 ) -> tuple[float, int, list[str]]:
     """
-    Improvement #8: Compute confidence score deterministically.
-    Returns (confidence: float, evidence_count: int, evidence_sources: list[str]).
-
-    The LLM hint is used as a soft signal — it's anchored to deterministic evidence
-    to prevent the LLM from artificially inflating confidence on weak data.
+    Compute confidence score deterministically.
+    LLM hint is anchored to deterministic evidence to prevent artificial inflation.
+    Returns (confidence, evidence_count, evidence_sources).
     """
     evidence: list[str] = []
     base = 1.0
 
-    # Reliability penalty
     if reliability.reliability == VariationReliability.NEW_ACCOUNT:
         base -= 0.30
         evidence.append("Nueva cuenta (sin período anterior)")
@@ -136,306 +107,27 @@ def compute_confidence(
     else:
         evidence.append("Variación confiable con período comparativo")
 
-    # Materiality bonus: high-materiality accounts have more financial significance
     if materiality == MaterialityLevel.HIGH:
         base += 0.05
         evidence.append("Alta materialidad confirmada")
     elif materiality == MaterialityLevel.LOW:
         base -= 0.05
 
-    # Anomaly evidence
     if anomaly_detected:
         base += 0.03
         evidence.append("Anomalía detectada deterministicamente")
 
-    # Incorporate LLM hint as a bounded soft signal
-    llm_adj = (min(max(llm_hint, 0.0), 1.0) - 0.8) * 0.10  # ±0.10 range
+    llm_adj = (min(max(llm_hint, 0.0), 1.0) - 0.8) * 0.10
     base += llm_adj
 
     confidence = round(min(max(base, 0.30), 0.99), 2)
     return confidence, len(evidence), evidence
 
 
-# ── Prompt builder ────────────────────────────────────────────────────────────
-
-_HIGH_PRIORITY_MATS = {MaterialityLevel.HIGH, MaterialityLevel.MEDIUM}
-
-
-def _build_user_prompt(
-    company_name: str,
-    periods: list[str],
-    business_context_snippet: str,
-    ratios_dict: dict,
-    threshold: float,
-    variations: list[AccountVariation],
-    materialities: dict[str, MaterialityLevel],
-    reliabilities: dict[str, ReliabilityResult],
-    niif_reference_text: str,
-    causality_chains: list[dict] | None = None,
-    earnings_quality: dict | None = None,
-    concentration: dict | None = None,
-    niif_validation_context: str | None = None,
-    fund_analysis: dict | None = None,
-    macro_context: dict | None = None,
-    executive_synthesis: dict | None = None,
-) -> str:
-    """
-    Constrained Financial Reasoning prompt.
-
-    Key design decisions:
-    - Only HIGH + MEDIUM materiality accounts are sent to the LLM for per-account
-      analysis.  LOW materiality accounts (often 30–40 entries) are excluded to
-      prevent token exhaustion that causes the JSON to truncate and all per-account
-      insights to be silently discarded.
-    - executive_synthesis (pre-computed by synthesis_engine) is included as a
-      structured context block so the LLM can narrativize pre-formed conclusions
-      rather than discover them from raw number tables.
-    """
-    # Filter to HIGH + MEDIUM materiality only to avoid token exhaustion
-    priority_variations = [
-        v for v in variations
-        if materialities.get(v.account_id, MaterialityLevel.LOW) in _HIGH_PRIORITY_MATS
-    ]
-    low_mat_count = len(variations) - len(priority_variations)
-
-    accounts_payload = []
-    for v in priority_variations:
-        rel = reliabilities.get(v.account_id)
-        entry: dict = {
-            "account_id": v.account_id,
-            "account_name": v.account_name,
-            "category": v.category,
-            "current_value_cop_mm": v.current_value,
-            "has_previous_period": v.has_previous_value,
-            "materiality": materialities[v.account_id].value,
-            "variation_reliability": rel.reliability.value if rel else "RELIABLE",
-            "reliability_display": rel.display_label if rel else "",
-        }
-        if rel and not rel.suppress_pct and v.has_previous_value:
-            entry["previous_value_cop_mm"] = v.previous_value
-            entry["absolute_variation_cop_mm"] = v.absolute_variation
-            entry["variation_pct"] = v.variation_pct
-        else:
-            entry["previous_value_cop_mm"] = None
-            entry["absolute_variation_cop_mm"] = v.absolute_variation if v.has_previous_value else None
-            entry["variation_pct_note"] = rel.display_label if rel else "Sin datos previos"
-        accounts_payload.append(entry)
-
-    low_mat_note = (
-        f"\n[NOTA: {low_mat_count} cuentas de baja materialidad excluidas de este análisis "
-        f"por priorización. Solo se analizan cuentas de alta y media materialidad.]\n"
-        if low_mat_count > 0 else ""
-    )
-
-    niif_section = ""
-    if niif_reference_text.strip():
-        niif_section = (
-            "\nREFERENCIA NORMATIVA NIIF (para decisiones de compliance):\n"
-            f"{niif_reference_text[:_NIIF_REF_CAP]}\n"
-        )
-
-    extra_context = ""
-    if niif_validation_context:
-        extra_context += (
-            f"\nVALIDACIÓN NIIF ESTRUCTURAL (determinístico — del DocumentExtractor):\n"
-            f"{niif_validation_context}\n"
-        )
-    if earnings_quality:
-        extra_context += (
-            f"\nCALIDAD DE UTILIDADES (determinístico):\n"
-            f"{json.dumps(earnings_quality, indent=2, ensure_ascii=False)}\n"
-        )
-    if concentration:
-        extra_context += (
-            f"\nCONCENTRACIÓN DE PORTAFOLIO (determinístico):\n"
-            f"{json.dumps(concentration, indent=2, ensure_ascii=False)}\n"
-        )
-    if causality_chains:
-        extra_context += (
-            f"\nCADENAS DE CAUSALIDAD DETECTADAS (determinístico):\n"
-            f"{json.dumps(causality_chains, indent=2, ensure_ascii=False)}\n"
-        )
-    if macro_context:
-        # Compact macro context: signals + top-level qualitative states only
-        macro_summary = {
-            "macro_context": macro_context.get("macro_context", {}),
-            "market_context": macro_context.get("market_context", {}),
-            "sector_context": macro_context.get("sector_context", []),
-            "macro_signals": macro_context.get("macro_signals", []),
-            "top_news": [
-                {"headline": n.get("headline", ""), "relevance": n.get("relevance", 0)}
-                for n in (macro_context.get("news_context") or [])[:3]
-            ],
-        }
-        extra_context += (
-            f"\nCONTEXTO MACROECONÓMICO Y DE MERCADO (Colombia, período de análisis):\n"
-            f"{json.dumps(macro_summary, indent=2, ensure_ascii=False)}\n"
-        )
-
-    if fund_analysis:
-        # Include only the narrative-relevant fields; raw position list is too large
-        fund_summary = {
-            "is_investment_fund": fund_analysis.get("is_investment_fund"),
-            "fund_type": fund_analysis.get("fund_type"),
-            "fund_type_rationale": fund_analysis.get("fund_type_rationale"),
-            "asset_breakdown_pct": fund_analysis.get("asset_breakdown_pct"),
-            "cash_ratio": fund_analysis.get("cash_ratio"),
-            "top1_position_pct": fund_analysis.get("top1_position_pct"),
-            "top3_concentration_pct": fund_analysis.get("top3_concentration_pct"),
-            "nav_reconciliation": fund_analysis.get("nav_reconciliation"),
-            "net_investor_flow_cop_mm": fund_analysis.get("net_investor_flow_cop_mm"),
-            "new_positions": [
-                {"name": p["account_name"], "value": p["current_value"], "pct": p["pct_of_portfolio"]}
-                for p in (fund_analysis.get("new_positions") or [])
-            ],
-            "closed_positions": [
-                {"name": p["account_name"], "prev_value": p["previous_value"]}
-                for p in (fund_analysis.get("closed_positions") or [])
-            ],
-            "top_positions": [
-                {"name": p["account_name"], "value": p["current_value"],
-                 "pct": p["pct_of_portfolio"], "status": p["status"], "asset_class": p["asset_class"]}
-                for p in (fund_analysis.get("top_positions") or [])
-            ],
-            "insights": fund_analysis.get("insights"),
-        }
-        extra_context += (
-            f"\nANÁLISIS DE FONDO DE INVERSIÓN (determinístico — fund_engine):\n"
-            f"{json.dumps(fund_summary, indent=2, ensure_ascii=False)}\n"
-        )
-
-    if executive_synthesis:
-        # Pre-computed portfolio synthesis — the most important context block.
-        # The LLM should use this as the foundation for all portfolio-level narratives
-        # rather than re-deriving conclusions from raw account data.
-        synth_summary = {
-            "main_portfolio_theme": executive_synthesis.get("main_portfolio_theme"),
-            "signals": executive_synthesis.get("signals", []),
-            "portfolio_story": executive_synthesis.get("portfolio_story"),
-            "strategic_rotation": executive_synthesis.get("strategic_rotation"),
-            "investor_flow_story": executive_synthesis.get("investor_flow_story"),
-            "earnings_quality_story": executive_synthesis.get("earnings_quality_story"),
-            "concentration_story": executive_synthesis.get("concentration_story"),
-            "executive_conclusions": executive_synthesis.get("executive_conclusions", []),
-            "board_alerts": executive_synthesis.get("board_alerts", []),
-            "top_risks": executive_synthesis.get("top_risks", []),
-            "top_strengths": executive_synthesis.get("top_strengths", []),
-            "aum_change_pct": executive_synthesis.get("aum_change_pct"),
-            "net_investor_flow_cop_mm": executive_synthesis.get("net_investor_flow_cop_mm"),
-            "top_issuer": executive_synthesis.get("top_issuer"),
-            "top_issuer_pct": executive_synthesis.get("top_issuer_pct"),
-            "valuation_dependency_pct": executive_synthesis.get("valuation_dependency_pct"),
-            "recurring_income_pct": executive_synthesis.get("recurring_income_pct"),
-        }
-        extra_context += (
-            f"\nSÍNTESIS EJECUTIVA PRE-CALCULADA (determinística — synthesis_engine):\n"
-            f"Úsala como base para el portfolio_thesis, executive_narrative, y insight_tiers.\n"
-            f"Narrativiza y enriquece estas conclusiones — no las contradiga sin evidencia en los datos.\n"
-            f"{json.dumps(synth_summary, indent=2, ensure_ascii=False)}\n"
-        )
-
-    constraint_block = """
-══════════════════════════════════════════════════════
-REGLAS DE RAZONAMIENTO (OBLIGATORIO)
-══════════════════════════════════════════════════════
-1. HECHOS PRIMERO, NARRATIVA DESPUÉS.
-   Solo puedes narrar datos ya calculados y provistos en este prompt.
-
-2. VARIACIONES NO CONFIABLES.
-   Si variation_reliability ≠ "RELIABLE", NO uses variation_pct como evidencia.
-   En cambio, menciona el display_label (ej: "Nueva cuenta / sin período anterior").
-
-3. CAUSALIDAD INTELIGENTE.
-   Puedes establecer relaciones causales cuando estén en las cadenas detectadas
-   O cuando sean económica y financieramente coherentes con los datos del prompt.
-   Usa razonamiento financiero experto para conectar movimientos entre cuentas.
-
-4. CLASIFICACIÓN DE SALUD FINANCIERA.
-   overall_financial_health — elige el valor más representativo:
-   STABLE | DECLINING | GROWING | CRITICAL |
-   LIQUID | LEVERAGED | SPECULATIVE | CASH_STRESSED |
-   VALUATION_DRIVEN | CONCENTRATED
-   Prefiere los valores descriptivos (VALUATION_DRIVEN, CONCENTRATED, etc.)
-   cuando el análisis del fondo o empresa los justifique claramente.
-
-5. POSSIBLE_CAUSES: CAUSAS ESPECÍFICAS, NO GENÉRICAS.
-   Para cada cuenta, genera 2-3 causas CONCRETAS usando el contexto del fondo.
-   PROHIBIDO: repetir la variación porcentual como causa.
-   PROHIBIDO: frases genéricas sin anclaje en datos del prompt.
-   OBLIGATORIO: referenciar datos concretos (flujos, posiciones, ratios, eventos).
-
-6. CONFIDENCE HONESTA.
-   llm_confidence_hint: usa 0.9–0.99 solo si tienes ≥3 evidencias concretas.
-   Usa 0.5–0.7 para cuentas nuevas o con variaciones no confiables.
-
-7. CONTEXTO MACRO — RAZONAMIENTO DE MERCADO PERMITIDO.
-   Cuando se provea CONTEXTO MACROECONÓMICO, úsalo activamente para:
-   - Conectar movimientos de portafolio con el entorno de tasas/inflación/FX.
-   - Interpretar variaciones de valorización en el contexto de ciclo de mercado.
-   - Explicar flows de inversionistas en relación con apetito de riesgo de mercado.
-   - Enriquecer el portfolio_thesis con tesis de posicionamiento de mercado.
-   PUEDES inferir: "entorno de tasas a la baja", "mercado de renta fija favorable",
-   "ciclo de reducción de exposición bancaria", "recomposición hacia activos reales".
-   PROHIBIDO SIEMPRE: inventar tasas exactas, retornos de índices, datos de Bloomberg.
-
-8. "SO WHAT?" — IMPACTO EJECUTIVO OBLIGATORIO.
-   Cada insight y señal debe responder: ¿Por qué le importa esto a la junta directiva?
-   NO: "La posición en Bancolombia fue liquidada."
-   SÍ: "La liquidación de Bancolombia redujo materialmente la exposición bancaria del portafolio."
-   NO: "El efectivo disminuyó."
-   SÍ: "El despliegue de liquidez hacia TES soberanos redujo la disponibilidad inmediata."
-
-9. PORTFOLIO THESIS.
-   Infiere la tesis estratégica del portafolio basada en los movimientos observados:
-   - ¿Hacia qué sectores/activos está rotando?
-   - ¿Está aumentando o reduciendo concentración?
-   - ¿Qué estilo de inversión predomina (defensivo, growth, income, especulativo)?
-   - ¿Hay señales de rebalanceo estratégico vs. movimiento táctico?
-   La tesis DEBE ser coherente con los datos de composición provistos.
-
-10. INSIGHT TIERS — PRIORIZACIÓN EJECUTIVA.
-    tier1_critical: 3–5 señales de mayor impacto ejecutivo.
-    Criterios: AUM material, concentración crítica, dependencia de valorizaciones,
-    estrés de liquidez, flujos significativos de inversionistas, rotación estratégica.
-    tier2_material: ≤10 hallazgos por cuenta de alta/media materialidad.
-══════════════════════════════════════════════════════
-"""
-
-    return (
-        f"EMPRESA: {company_name}\n"
-        f"PERÍODOS ANALIZADOS: {', '.join(periods)}\n"
-        f"CONTEXTO DEL NEGOCIO: {business_context_snippet[:600]}\n"
-        f"{niif_section}"
-        f"\nRATIOS FINANCIEROS GLOBALES (COP MM, determinísticos):\n"
-        f"{json.dumps(ratios_dict, indent=2, ensure_ascii=False)}\n\n"
-        f"UMBRAL DE MATERIALIDAD: {threshold:.2f} COP MM\n"
-        f"{extra_context}"
-        f"{constraint_block}\n"
-        f"{low_mat_note}"
-        f"CUENTAS PARA ANÁLISIS — ALTA Y MEDIA MATERIALIDAD ({len(accounts_payload)} de {len(variations)} cuentas totales):\n"
-        f"{json.dumps(accounts_payload, indent=2, ensure_ascii=False)}\n"
-    )
-
-
-# ── LLM invocation ────────────────────────────────────────────────────────────
-
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
-def _invoke(system_prompt: str, user_prompt: str, llm: LLMProvider, tenant_id: str, job_id: str) -> dict:
-    result = llm.generate_json(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        temperature=0.2,
-        tenant_id=tenant_id,
-        job_id=job_id,
-        max_tokens=32000,
-    )
-    return result if isinstance(result, dict) else {}
-
-
-# ── Response parser ───────────────────────────────────────────────────────────
+# ── NIIF reference validator ──────────────────────────────────────────────────
 
 def _validate_niif_refs(refs: list) -> list[str]:
-    """Drop any NIIF/NIC reference the LLM invented that isn't in the known standard set."""
+    """Drop any NIIF/NIC reference not in the known standard set."""
     valid = [str(r).strip() for r in refs if str(r).strip() in _VALID_NIIF_REFS]
     dropped = len(refs) - len(valid)
     if dropped:
@@ -443,83 +135,91 @@ def _validate_niif_refs(refs: list) -> list[str]:
     return valid
 
 
-def _parse_response(raw: dict) -> LLMAnalysisResult:
-    """Parse and validate raw LLM dict into typed result. Never raises."""
-    result = LLMAnalysisResult(
-        overall_financial_health=str(raw.get("overall_financial_health", "STABLE")).upper(),
-        executive_narrative=str(raw.get("executive_narrative", "")),
-        niif_notes_required=_validate_niif_refs(list(raw.get("niif_notes_required", []))),
-        portfolio_thesis=str(raw.get("portfolio_thesis", "")),
-        insight_tiers=_parse_insight_tiers(raw.get("insight_tiers", {})),
-        narrative_layers=_parse_narrative_layers(raw.get("narrative_layers", {})),
-    )
+# ── Result assembly ───────────────────────────────────────────────────────────
 
-    for item in raw.get("accounts_analysis", []):
-        account_id = str(item.get("account_id", "")).strip()
-        if not account_id:
-            logger.warning("llm_parse_skip | missing account_id in item: %s", item)
-            continue
+_HIGH_MAT = MaterialityLevel.HIGH
+_HIGH_PRIORITY = {MaterialityLevel.HIGH, MaterialityLevel.MEDIUM}
 
-        llm_conf = float(item.get("llm_confidence_hint", 0.8))
-        llm_conf = max(0.0, min(1.0, llm_conf))
 
-        counterpart_raw = item.get("related_party_counterpart")
-        investment_signal_raw = item.get("investment_signal")
+def _assemble_result(
+    movement_result,
+    causality_result,
+    thesis_result,
+    narrative_result,
+    variations: list[AccountVariation],
+    materialities: dict[str, MaterialityLevel],
+) -> LLMAnalysisResult:
+    """
+    Assemble LLMAnalysisResult from the 4 sub-agent outputs.
 
-        result.account_insights[account_id] = AccountLLMInsight(
-            account_id=account_id,
-            risk_level=str(item.get("risk_level", "LOW")).upper(),
-            possible_causes=list(item.get("possible_causes", [])),
-            executive_insight=str(item.get("executive_insight", "")),
-            requires_niif_note=bool(item.get("requires_niif_note", False)),
-            niif_note_references=_validate_niif_refs(list(item.get("niif_note_references", []))),
-            anomaly_override=bool(item.get("anomaly_override", False)),
-            llm_confidence_hint=llm_conf,
-            llm_evidence_sources=list(item.get("evidence_sources", [])),
-            is_related_party=bool(item.get("is_related_party", False)),
-            related_party_counterpart=str(counterpart_raw) if counterpart_raw else None,
-            investment_signal=str(investment_signal_raw) if investment_signal_raw else None,
+    account_insights are built from causality results, enriched with movement signals.
+    Fields not produced by sub-agents default to safe values; service.py applies
+    ceiling rules and deterministic overrides on top of these.
+    """
+    global_niif_refs = _validate_niif_refs(narrative_result.niif_notes_required)
+
+    high_mat_ids = {
+        v.account_id for v in variations
+        if materialities.get(v.account_id, MaterialityLevel.LOW) == _HIGH_MAT
+    }
+
+    movement_map = {m.account_id: m for m in movement_result.key_movements}
+
+    account_insights: dict[str, AccountLLMInsight] = {}
+
+    # Build insights from causality agent output
+    for caus in causality_result.account_causality:
+        aid = caus.account_id
+        movement = movement_map.get(aid)
+        is_high = aid in high_mat_ids
+
+        account_insights[aid] = AccountLLMInsight(
+            account_id=aid,
+            risk_level="LOW",           # ceiling rule applied by service.py
+            possible_causes=caus.possible_causes,
+            executive_insight=caus.executive_insight or (movement.summary if movement else ""),
+            requires_niif_note=is_high,
+            niif_note_references=global_niif_refs if is_high else [],
+            llm_confidence_hint=caus.confidence,
+            llm_evidence_sources=caus.linked_accounts,
+            investment_signal=movement.movement_type if movement else None,
         )
 
-    return result
+    # Ensure HIGH materiality accounts always have an entry (may not have causality data)
+    for aid in high_mat_ids:
+        if aid not in account_insights:
+            movement = movement_map.get(aid)
+            account_insights[aid] = AccountLLMInsight(
+                account_id=aid,
+                risk_level="LOW",
+                possible_causes=[movement.summary] if movement else [],
+                executive_insight=movement.summary if movement else "",
+                requires_niif_note=True,
+                niif_note_references=global_niif_refs,
+                llm_confidence_hint=0.65,
+                investment_signal=movement.movement_type if movement else None,
+            )
+
+    # Merge narrative_layers: use sub-agent output; board_summary goes into "board" key
+    narrative_layers = dict(narrative_result.narrative_layers)
+    if narrative_result.board_summary:
+        narrative_layers["board"] = narrative_result.board_summary
+
+    return LLMAnalysisResult(
+        overall_financial_health=thesis_result.overall_financial_health,
+        executive_narrative=narrative_result.executive_narrative,
+        niif_notes_required=global_niif_refs,
+        account_insights=account_insights,
+        portfolio_thesis=thesis_result.portfolio_thesis,
+        insight_tiers=thesis_result.insight_tiers,
+        narrative_layers=narrative_layers,
+        structured_analysis=thesis_result.structured_analysis,
+        cross_statement_signals=thesis_result.cross_statement_signals,
+        earnings_sustainability=thesis_result.earnings_sustainability,
+    )
 
 
-def _parse_insight_tiers(raw: object) -> dict:
-    if not isinstance(raw, dict):
-        return {}
-    tier1 = raw.get("tier1_critical") or []
-    tier2 = raw.get("tier2_material") or []
-    return {
-        "tier1_critical": [
-            {
-                "signal":   str(t.get("signal",   "")),
-                "so_what":  str(t.get("so_what",  "")),
-                "category": str(t.get("category", "")),
-            }
-            for t in tier1 if isinstance(t, dict)
-        ],
-        "tier2_material": [
-            {
-                "account_id": str(t.get("account_id", "")),
-                "signal":     str(t.get("signal",     "")),
-                "so_what":    str(t.get("so_what",    "")),
-            }
-            for t in tier2 if isinstance(t, dict)
-        ],
-    }
-
-
-def _parse_narrative_layers(raw: object) -> dict:
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        "executive": str(raw.get("executive", "")),
-        "tactical":  str(raw.get("tactical",  "")),
-        "technical": str(raw.get("technical", "")),
-    }
-
-
-# ── Public API ────────────────────────────────────────────────────────────────
+# ── Public API (backward-compatible) ─────────────────────────────────────────
 
 def run_llm_analysis(
     company_name: str,
@@ -541,47 +241,107 @@ def run_llm_analysis(
     fund_analysis: dict | None = None,
     macro_context: dict | None = None,
     executive_synthesis: dict | None = None,
+    financial_diagnostics: dict | None = None,
 ) -> LLMAnalysisResult:
     """
-    Full LLM analysis pipeline with constrained reasoning and reliability context.
-    On total failure (all retries exhausted), returns a safe empty result.
+    Multi-agent LLM pipeline for qualitative financial reasoning.
+
+    Runs 4 focused sub-agents sequentially:
+      Movement → Causality → Thesis → Narrative
+
+    Each sub-agent operates on a compact context digest rather than the full
+    raw data payload, which was the root cause of context-window saturation
+    and empty narrative fields in the previous single-call architecture.
+
+    On any sub-agent failure the pipeline continues with an empty result for
+    that step — the assembly stage handles missing data gracefully.
     """
-    system_prompt = _get_system_prompt()
-    user_prompt = _build_user_prompt(
+    logger.info(
+        "llm_pipeline_start | job=%s accounts=%d high_medium=%d",
+        job_id,
+        len(variations),
+        sum(1 for v in variations if materialities.get(v.account_id, MaterialityLevel.LOW) in _HIGH_PRIORITY),
+    )
+
+    # Step 1 — Movement Intelligence: what happened?
+    movement_result = run_movement_intelligence(
         company_name=company_name,
         periods=periods,
-        business_context_snippet=business_context_snippet,
-        ratios_dict=ratios_dict,
-        threshold=threshold,
+        variations=variations,
+        materialities=materialities,
+        llm=llm,
+        tenant_id=tenant_id,
+        job_id=job_id,
+        fund_analysis=fund_analysis,
+        executive_synthesis=executive_synthesis,
+        concentration=concentration,
+    )
+
+    # Step 2 — Causality: why did it happen?
+    causality_result = run_causality_analysis(
+        company_name=company_name,
+        periods=periods,
         variations=variations,
         materialities=materialities,
         reliabilities=reliabilities,
-        niif_reference_text=niif_reference_text,
+        movement_result=movement_result,
+        llm=llm,
+        tenant_id=tenant_id,
+        job_id=job_id,
         causality_chains=causality_chains,
+        fund_analysis=fund_analysis,
+        business_context_snippet=business_context_snippet,
+        macro_context=macro_context,
+    )
+
+    # Step 3 — Financial Thesis: what does this mean strategically?
+    thesis_result = run_financial_thesis(
+        company_name=company_name,
+        periods=periods,
+        movement_result=movement_result,
+        causality_result=causality_result,
+        llm=llm,
+        tenant_id=tenant_id,
+        job_id=job_id,
+        executive_synthesis=executive_synthesis,
         earnings_quality=earnings_quality,
         concentration=concentration,
-        niif_validation_context=niif_validation_context,
-        fund_analysis=fund_analysis,
+        ratios_dict=ratios_dict,
         macro_context=macro_context,
-        executive_synthesis=executive_synthesis,
+        financial_diagnostics=financial_diagnostics,
+    )
+
+    # Step 4 — Executive Narrative: communicate the conclusions
+    narrative_result = run_executive_narrative(
+        company_name=company_name,
+        periods=periods,
+        business_context_snippet=business_context_snippet,
+        thesis_result=thesis_result,
+        movement_result=movement_result,
+        causality_result=causality_result,
+        llm=llm,
+        tenant_id=tenant_id,
+        job_id=job_id,
+    )
+
+    result = _assemble_result(
+        movement_result=movement_result,
+        causality_result=causality_result,
+        thesis_result=thesis_result,
+        narrative_result=narrative_result,
+        variations=variations,
+        materialities=materialities,
     )
 
     logger.info(
-        "llm_start | job=%s accounts=%d prompt_chars=%d",
-        job_id, len(variations), len(user_prompt),
-    )
-
-    try:
-        raw = _invoke(system_prompt, user_prompt, llm, tenant_id, job_id)
-    except Exception as exc:
-        logger.error("llm_failed | job=%s error=%s", job_id, exc)
-        return LLMAnalysisResult()
-
-    result = _parse_response(raw)
-
-    logger.info(
-        "llm_done | job=%s health=%s insights=%d niif_notes=%d",
-        job_id, result.overall_financial_health,
-        len(result.account_insights), len(result.niif_notes_required),
+        "llm_pipeline_done | job=%s health=%s insights=%d niif_notes=%d "
+        "movements=%d narrative_len=%d thesis_len=%d",
+        job_id,
+        result.overall_financial_health,
+        len(result.account_insights),
+        len(result.niif_notes_required),
+        len(movement_result.key_movements),
+        len(result.executive_narrative),
+        len(result.portfolio_thesis),
     )
     return result

@@ -71,25 +71,44 @@ def check_niif18_compliance(
     oci_recyclable_count = 0
     oci_non_recyclable_count = 0
 
+    # Per-category account tracking (name, net COP MM) for informative flags
+    investing_items: list[tuple[str, float]] = []
+    financing_items: list[tuple[str, float]] = []
+
+    # Balance-sheet context — suppress noise flags when a category genuinely doesn't apply
+    has_bs_investments = False  # any asset account with investment-related name
+    has_bs_liabilities = False  # any liability account present
+    _BS_INVEST_KW = ("inversion", "portafolio", "fondo", "activo financiero", "valor razonable")
+
     for acc in accounts:
         cat = acc.category.lower()
         name = acc.normalized_account_name
+        name_lower = name.lower()
+
+        # Balance-sheet context
+        if cat == "assets" and any(kw in name_lower for kw in _BS_INVEST_KW):
+            has_bs_investments = True
+        if cat == "liabilities":
+            has_bs_liabilities = True
 
         # P&L category detection
         if cat in ("revenue", "expense", "other"):
             has_pl_accounts = True
             pl_cat = classify_pl_category(name, cat)
+            net_val = acc.current_value if cat != "expense" else -acc.current_value
+
             if pl_cat == PLCategory.OPERATING:
                 result.has_operating_category = True
             elif pl_cat == PLCategory.INVESTING:
                 result.has_investing_category = True
+                investing_items.append((name, net_val))
             elif pl_cat == PLCategory.FINANCING:
                 result.has_financing_category = True
+                financing_items.append((name, net_val))
             elif pl_cat == PLCategory.TAXES:
                 result.has_taxes_category = True
 
         # MPM detection (any account, any category)
-        name_lower = name.lower()
         if any(mpm in name_lower for mpm in _MPM_KEYWORDS):
             mpm_names_found.append(name)
 
@@ -104,35 +123,58 @@ def check_niif18_compliance(
     result.oci_properly_split = (oci_recyclable_count + oci_non_recyclable_count) > 0
     result.mandatory_subtotals_present = result.has_operating_category and has_pl_accounts
 
-    # Build flags
+    # ── Build flags ──────────────────────────────────────────────────────────
+
+    # OPERATING absent — always flag when P&L accounts exist
     if has_pl_accounts and not result.has_operating_category:
         result.flags.append(
             "No se identificaron cuentas de la categoría OPERATIVA — requerido por NIIF 18"
         )
-    if not result.has_investing_category:
+
+    # INVESTING — show what was detected; flag gap only when BS has investment assets
+    if result.has_investing_category and investing_items:
+        inv_total = sum(v for _, v in investing_items)
+        sample = "; ".join(n[:45] for n, _ in investing_items[:2])
         result.flags.append(
-            "Categoría INVERSIÓN no detectada — verificar si aplica para esta entidad"
+            f"INVERSIÓN: {len(investing_items)} cuenta(s) — {sample} → resultado {inv_total:+,.0f} MM"
         )
-    if not result.has_financing_category:
+    elif has_pl_accounts and not result.has_investing_category and has_bs_investments:
         result.flags.append(
-            "Categoría FINANCIAMIENTO no detectada — verificar si hay instrumentos de deuda"
+            "Activos de inversión en balance sin ingresos/gastos clasificados como INVERSIÓN en P&L — "
+            "verificar que los rendimientos estén correctamente clasificados"
         )
-    if has_pl_accounts and not result.has_taxes_category:
+
+    # FINANCING — show what was detected; flag gap only when BS has liabilities
+    if result.has_financing_category and financing_items:
+        fin_total = sum(v for _, v in financing_items)
+        sample = "; ".join(n[:45] for n, _ in financing_items[:2])
         result.flags.append(
-            "Gasto por impuesto de renta no detectado — verificar si la entidad es contribuyente"
+            f"FINANCIAMIENTO: {len(financing_items)} cuenta(s) — {sample} → resultado {fin_total:+,.0f} MM"
         )
+    elif has_pl_accounts and not result.has_financing_category and has_bs_liabilities:
+        result.flags.append(
+            "Pasivos registrados en balance sin gastos de FINANCIAMIENTO en P&L — "
+            "verificar si hay costos financieros no reportados"
+        )
+
+    # TAXES — only flag when entity appears profitable (antes de impuestos > 0)
+    if has_pl_accounts and not result.has_taxes_category and subtotals.resultado_antes_impuestos > 0:
+        result.flags.append(
+            f"Resultado antes de impuestos: {subtotals.resultado_antes_impuestos:+,.0f} MM — "
+            "no se detectó gasto por impuesto de renta"
+        )
+
+    # Mandatory subtotals
     if not result.mandatory_subtotals_present:
         result.flags.append(
-            "Los 4 subtotales obligatorios de NIIF 18 no son calculables con las cuentas disponibles"
+            "Los subtotales obligatorios de NIIF 18 no son calculables con las cuentas disponibles"
         )
+
+    # MPMs
     if result.mpm_disclosure_required:
         sample = ", ".join(mpm_names_found[:3])
         result.flags.append(
             f"MPMs detectadas que requieren nota de conciliación NIIF 18 §61: {sample}"
-        )
-    if has_pl_accounts and not result.oci_properly_split:
-        result.flags.append(
-            "No se detectaron partidas de ORI clasificadas — verificar si aplica para esta entidad"
         )
 
     # Compliance score

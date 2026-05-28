@@ -80,7 +80,11 @@ from .niif18_engine import (
 )
 from .fund_engine import FundAnalysis, analyze_fund, fund_analysis_to_dict
 from .kpi_engine import calculate_executive_kpis
+from .sheet_concentration_engine import (
+    SheetConcentrationResult, analyze_sheet_concentration, sheet_concentration_to_dict
+)
 from .synthesis_engine import ExecutiveSynthesis, synthesize as synthesize_portfolio, synthesis_to_dict
+from .financial_diagnostics_engine import DiagnosticsResult, run_diagnostics, diagnostics_to_dict
 from shared.progress_store import emit as _emit_step
 from shared.macro_context import generate_macro_context
 
@@ -301,6 +305,17 @@ class FinancialAnalyzerService:
                 payload.job_id, len(fund_chains), len(causal_chains),
             )
 
+        # ── Step 12b2: Sheet-based concentration (Activos / Instrumentos / Bancos) ──
+        sheet_conc: SheetConcentrationResult = analyze_sheet_concentration(enriched_accounts)
+        sheet_conc_dict = sheet_concentration_to_dict(sheet_conc)
+        logger.info(
+            "sheet_concentration | job=%s asset=%s instrument=%s bank=%s",
+            payload.job_id,
+            "available" if sheet_conc.asset_available else "unavailable",
+            "available" if sheet_conc.instrument_available else "unavailable",
+            "available" if sheet_conc.bank_available else "unavailable",
+        )
+
         # ── Step 12c: Executive Synthesis ────────────────────────────────────
         _emit_step(payload.job_id, "Building executive synthesis")
         portfolio_synthesis: ExecutiveSynthesis = synthesize_portfolio(
@@ -316,6 +331,23 @@ class FinancialAnalyzerService:
             len(portfolio_synthesis.executive_conclusions),
             len(portfolio_synthesis.board_alerts),
         )
+
+        # ── Step 12d: Financial Diagnostics (cross-statement heuristics) ─────
+        _emit_step(payload.job_id, "Running cross-statement diagnostics")
+        diagnostics_result: DiagnosticsResult = run_diagnostics(
+            variations=variations,
+            totals=totals,
+            ratios=ratios,
+        )
+        diagnostics_dict = diagnostics_to_dict(diagnostics_result)
+        if diagnostics_result.signals:
+            logger.info(
+                "diagnostics | job=%s signals=%d high=%d flags=%s",
+                payload.job_id,
+                len(diagnostics_result.signals),
+                sum(1 for s in diagnostics_result.signals if s.severity == "HIGH"),
+                diagnostics_result.summary_flags,
+            )
 
         # ── Step 13: NIIF 18 subtotals ───────────────────────────────────────
         niif18_subtotals: NIIF18Subtotals = calculate_niif18_subtotals(
@@ -423,6 +455,7 @@ class FinancialAnalyzerService:
             fund_analysis=fund_dict if fund_analysis.is_investment_fund else None,
             macro_context=macro_ctx,
             executive_synthesis=synthesis_dict,
+            financial_diagnostics=diagnostics_dict if diagnostics_result.signals else None,
         )
 
         # ── Step 15b: Executive KPI consolidation ────────────────────────────
@@ -505,6 +538,12 @@ class FinancialAnalyzerService:
             insight_tiers=llm_result.insight_tiers,
             narrative_layers=llm_result.narrative_layers,
             executive_synthesis=synthesis_dict,
+            # Financial intelligence upgrade
+            structured_analysis=llm_result.structured_analysis,
+            cross_statement_signals=llm_result.cross_statement_signals,
+            earnings_sustainability=llm_result.earnings_sustainability,
+            financial_diagnostics=diagnostics_dict,
+            sheet_concentration=sheet_conc_dict,
         )
 
         self._save_to_s3(result)

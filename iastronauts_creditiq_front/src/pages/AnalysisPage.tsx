@@ -33,25 +33,43 @@ function stepState(idx: number, starts: readonly number[], elapsed: number): 'pe
 // ── Color maps ────────────────────────────────────────────────────────────
 
 const CATEGORY_COLOR: Record<string, string> = {
-  assets:      '#b7c4ff',
-  liabilities: '#F85149',
-  equity:      '#3FB950',
-  revenue:     '#D29922',
-  expense:     '#ff7b72',
-  other:       '#8d90a2',
+  assets:      'var(--color-brand-accent)',
+  liabilities: 'var(--color-danger-soft)',
+  equity:      'var(--color-success-low)',
+  revenue:     'var(--color-warning-soft)',
+  expense:     'var(--color-warning-soft)',
+  other:       'var(--color-on-surface-muted-strong)',
+}
+
+const CATEGORY_BG_COLOR: Record<string, string> = {
+  assets:      'var(--color-brand-accent-soft)',
+  liabilities: 'var(--color-danger-soft-soft)',
+  equity:      'var(--color-success-low-soft)',
+  revenue:     'var(--color-warning-soft-soft)',
+  expense:     'var(--color-warning-soft-soft)',
+  other:       'rgba(195,197,216,0.12)',
+}
+
+const CATEGORY_BORDER_COLOR: Record<string, string> = {
+  assets:      'rgba(183,196,255,0.25)',
+  liabilities: 'rgba(248,81,73,0.25)',
+  equity:      'rgba(63,185,80,0.25)',
+  revenue:     'rgba(210,153,34,0.25)',
+  expense:     'rgba(210,153,34,0.25)',
+  other:       'rgba(195,197,216,0.25)',
 }
 
 const HEALTH_COLOR: Record<string, string> = {
-  STABLE:   '#3FB950',
-  GROWING:  '#b7c4ff',
-  DECLINING:'#D29922',
-  CRITICAL: '#F85149',
+  STABLE:   'var(--color-success-low)',
+  GROWING:  'var(--color-brand-accent)',
+  DECLINING: 'var(--color-warning-soft)',
+  CRITICAL: 'var(--color-danger-soft)',
 }
 
 const RISK_COLOR: Record<string, string> = {
-  LOW:    '#3FB950',
-  MEDIUM: '#D29922',
-  HIGH:   '#F85149',
+  LOW:    'var(--color-success-low)',
+  MEDIUM: 'var(--color-warning-soft)',
+  HIGH:   'var(--color-danger-soft)',
 }
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -151,8 +169,63 @@ interface AnalyzerOutput {
     concentration?: { top1_concentration_pct: number; top3_concentration_pct: number }
     fund?: { aum_growth_pct?: number; net_investor_flow_cop_mm?: number; redemption_ratio_pct?: number }
   }
+  portfolio_concentration?: {
+    top_account_name: string
+    top_account_pct: number
+    top3_concentration_pct: number
+    concentration_label: string
+    insight: string
+    hhi: number
+    effective_positions: number
+    category_concentration: Record<string, number>
+    top_accounts: Array<{ name: string; value_cop_mm: number; pct_of_total: number; category: string }>
+  }
+  fund_analysis?: {
+    is_investment_fund: boolean
+    fund_type: string
+    nav_reconciliation?: {
+      opening_nav: number | null
+      contributions: number | null
+      redemptions: number | null
+      investment_return: number | null
+      closing_nav: number
+      net_investor_flow: number | null
+      reconciles: boolean
+      gap_cop_mm: number
+      narrative: string
+    }
+    top_positions?: Array<{
+      account_id: string
+      account_name: string
+      asset_class: string
+      current_value: number
+      pct_of_portfolio: number
+      status: string
+    }>
+    asset_breakdown_pct?: Record<string, number>
+    cash_ratio?: number
+    top1_position_pct?: number
+    top3_concentration_pct?: number
+    insights?: string[]
+  }
   high_materiality_accounts: string[]
   niif_notes_required: string[]
+  sheet_concentration?: {
+    asset_total: number
+    asset_breakdown: Array<{ name: string; value: number; pct: number }>
+    asset_available: boolean
+    instrument_total: number
+    instrument_breakdown: Array<{
+      instrument_type: string
+      total: number
+      pct: number
+      emisores: Array<{ name: string; value: number; pct: number }>
+    }>
+    instrument_available: boolean
+    bank_total: number
+    bank_breakdown: Array<{ name: string; value: number; pct: number }>
+    bank_available: boolean
+  }
   financial_ratios: {
     totals: {
       total_assets: number
@@ -188,9 +261,16 @@ interface AnalyzerOutput {
 // ── Component ──────────────────────────────────────────────────────────────
 
 export default function AnalysisPage() {
-  const [jobId, setJobId]   = useState<string | null>(() => localStorage.getItem(STORAGE_KEY))
+  // Read job ID once at mount so we can validate the stored status against it.
+  const _mountJobId = localStorage.getItem(STORAGE_KEY)
+  const [jobId, setJobId]   = useState<string | null>(_mountJobId)
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(() => {
-    try { return JSON.parse(localStorage.getItem(STATUS_KEY) ?? 'null') } catch { return null }
+    try {
+      const cached = JSON.parse(localStorage.getItem(STATUS_KEY) ?? 'null') as JobStatus | null
+      // Drop the cached status when it clearly belongs to a different job.
+      if (cached?.analysis_id && cached.analysis_id !== _mountJobId) return null
+      return cached
+    } catch { return null }
   })
   const [report, setReport] = useState<ExtractorOutput | null>(() => {
     try { return JSON.parse(localStorage.getItem(REPORT_KEY) ?? 'null') } catch { return null }
@@ -233,6 +313,28 @@ export default function AnalysisPage() {
     else localStorage.removeItem(PHASE_KEY)
   }, [phase])
 
+  // ── New-job notification from UploadDialog (same-tab custom event) ─────
+  // localStorage's 'storage' event only fires in other tabs, so UploadDialog
+  // dispatches a custom event that we catch here to reset all state immediately.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const newId = (e as CustomEvent<{ jobId: string }>).detail?.jobId
+      if (!newId || newId === jobId) return
+      if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
+      ;[STATUS_KEY, REPORT_KEY, ANALYZER_KEY, PHASE_KEY].forEach(k => localStorage.removeItem(k))
+      localStorage.setItem(STORAGE_KEY, newId)
+      setJobId(newId)
+      setJobStatus(null)
+      setReport(null)
+      setAnalyzerData(null)
+      setPhase(null)
+      setElapsed(0)
+      setCatFilter('all')
+    }
+    window.addEventListener('creditiq:newjob', handler)
+    return () => window.removeEventListener('creditiq:newjob', handler)
+  }, [jobId])
+
   // ── Main polling effect ────────────────────────────────────────────────
 
   const TERMINAL = new Set(['completed', 'failed', 'extraction_complete', 'analysis_complete'])
@@ -261,7 +363,8 @@ export default function AnalysisPage() {
         if (!res.ok || !alive) { console.error('[poll]', res.status, await res.text()); return }
         const data: JobStatus = await res.json()
         if (!alive) return
-        setJobStatus(data)
+        // Always stamp analysis_id so the stale-status check works on remount.
+        setJobStatus({ ...data, analysis_id: data.analysis_id ?? jobId })
 
         if (TERMINAL.has(data.status)) {
           if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
@@ -373,7 +476,7 @@ export default function AnalysisPage() {
         if (!res.ok || !alive) return
         const data: JobStatus = await res.json()
         if (!alive) return
-        setJobStatus(data)
+        setJobStatus({ ...data, analysis_id: data.analysis_id ?? jobId })
         onStatus(data)
         if (TERMINAL.has(data.status)) {
           if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
@@ -395,6 +498,8 @@ export default function AnalysisPage() {
   async function _doRunAgent2() {
     if (!jobId) return
     setPhase('agent2'); setReport(null); setAnalyzerData(null); setElapsed(0)
+    // Optimistically set processing so the sidebar updates immediately — don't wait for first poll.
+    setJobStatus({ analysis_id: jobId, status: 'processing' })
     // Use /reanalyze — always routes to Agent 2 regardless of current S3 status.
     // /continue is status-aware and would run Agents 3+4 if status is analysis_complete.
     await fetch(`${API}/analyses/${jobId}/reanalyze`, { method: 'POST', headers: HEADERS })
@@ -416,6 +521,8 @@ export default function AnalysisPage() {
   async function _doRunFinal() {
     if (!jobId) return
     setPhase('final'); setAnalyzerData(null); setElapsed(0)
+    // Optimistically set processing so the sidebar updates immediately — don't wait for first poll.
+    setJobStatus({ analysis_id: jobId, status: 'processing' })
     await fetch(`${API}/analyses/${jobId}/continue`, { method: 'POST', headers: HEADERS })
     _startPolling(() => {})
   }
@@ -441,12 +548,12 @@ export default function AnalysisPage() {
   const anomalyCount = analyzerData?.analysis_results.filter(r => r.anomaly_detected).length ?? 0
 
   const statusColor = {
-    pending:              '#D29922',
-    processing:           '#b7c4ff',
-    extraction_complete:  '#D29922',
-    analysis_complete:    '#b7c4ff',
-    completed:            '#3FB950',
-    failed:               '#F85149',
+    pending:              'var(--color-warning-soft)',
+    processing:           'var(--color-brand-accent)',
+    extraction_complete:  'var(--color-warning-soft)',
+    analysis_complete:    'var(--color-brand-accent)',
+    completed:            'var(--color-success-low)',
+    failed:               'var(--color-danger-soft)',
   }[jobStatus?.status ?? 'pending']
 
   // Show spinner only when genuinely running — not while loading historical data into state
@@ -466,7 +573,7 @@ export default function AnalysisPage() {
     <div className="p-margin-mobile md:p-margin-desktop flex flex-col md:flex-row gap-gutter min-h-0">
 
       {/* Left: AI Reasoning Pipeline */}
-      <AiReasoningPipeline status={jobStatus?.status ?? null} jobId={jobId ?? undefined} progress={jobStatus?.progress} />
+      <AiReasoningPipeline status={jobStatus?.status ?? null} jobId={jobId ?? undefined} progress={jobStatus?.progress} phase={phase} />
 
       {/* Right: Main canvas */}
       <div className="flex-1 flex flex-col gap-5 overflow-hidden min-w-0">
@@ -517,18 +624,18 @@ export default function AnalysisPage() {
 
               <div className="flex items-center gap-6">
                 <Kpi label="STATUS" value={(jobStatus?.status ?? '—').toUpperCase()} color={statusColor} />
-                {isProcessing && <Kpi label="ELAPSED" value={`${elapsed}s`} color="#8d90a2" />}
+                {isProcessing && <Kpi label="ELAPSED" value={`${elapsed}s`} color="var(--color-on-surface-muted-strong)" />}
                 {report && (
                   <>
-                    <Kpi label="ACCOUNTS"   value={String(report.accounts.length)} color="#b7c4ff" />
-                    <Kpi label="CONFIDENCE" value={`${(report.extraction_confidence * 100).toFixed(1)}%`} color="#3FB950" />
+                    <Kpi label="ACCOUNTS"   value={String(report.accounts.length)} color="var(--color-brand-accent)" />
+                    <Kpi label="CONFIDENCE" value={`${(report.extraction_confidence * 100).toFixed(1)}%`} color="var(--color-success-low)" />
                   </>
                 )}
                 {analyzerData && !report && (
                   <Kpi
                     label="HEALTH"
                     value={analyzerData.overall_financial_health}
-                    color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#8d90a2'}
+                    color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? 'var(--color-on-surface-muted-strong)'}
                   />
                 )}
                 <button
@@ -578,8 +685,8 @@ export default function AnalysisPage() {
                       return (
                         <div key={i} className={`flex items-start gap-4 relative z-10 transition-opacity duration-500 ${s === 'pending' ? 'opacity-35' : ''}`}>
                           {s === 'done' && (
-                            <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 bg-surface border border-[#3FB950]">
-                              <span className="material-symbols-outlined text-[13px]" style={{ color: '#3FB950' }}>check</span>
+                            <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 bg-surface border border-success">
+                              <span className="material-symbols-outlined text-[13px]" style={{ color: 'var(--color-success-low)' }}>check</span>
                             </div>
                           )}
                           {s === 'active' && (
@@ -593,11 +700,11 @@ export default function AnalysisPage() {
                             </div>
                           )}
                           <div className="pt-0.5">
-                            <p className={`text-body-sm font-body-sm ${s === 'active' ? 'text-on-surface font-semibold' : s === 'done' ? 'text-[#3FB950]' : 'text-outline'}`}>
+                            <p className={`text-body-sm font-body-sm ${s === 'active' ? 'text-on-surface font-semibold' : s === 'done' ? 'text-success' : 'text-outline'}`}>
                               {step.label}
                             </p>
                             {s === 'active' && <p className="text-[10px] font-mono text-outline mt-1 animate-pulse">Running…</p>}
-                            {s === 'done'   && <p className="text-[10px] font-mono mt-1" style={{ color: '#3FB950' }}>✓ Complete</p>}
+                            {s === 'done'   && <p className="text-[10px] font-mono mt-1 text-success">✓ Complete</p>}
                           </div>
                         </div>
                       )
@@ -652,9 +759,9 @@ export default function AnalysisPage() {
 
                 {/* Agent 1 continue banner */}
                 <div className="bg-surface border rounded p-5 flex flex-col md:flex-row items-center justify-between gap-4"
-                     style={{ borderColor: '#D29922', background: 'rgba(210,153,34,0.06)' }}>
+                     style={{ borderColor: 'var(--color-warning-soft)', background: 'rgba(210,153,34,0.06)' }}>
                   <div className="flex items-start gap-3">
-                    <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: '#D29922' }}>checklist</span>
+                    <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: 'var(--color-warning-soft)' }}>checklist</span>
                     <div>
                       <p className="text-body-md font-body-md font-semibold text-on-surface mb-0.5">
                         Agent 1 complete — review extracted accounts
@@ -667,7 +774,7 @@ export default function AnalysisPage() {
                   <button
                     onClick={handleRunAgent2Click}
                     className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95 shrink-0"
-                    style={{ background: '#D29922', color: '#0d1117' }}
+                    style={{ background: 'var(--color-warning-soft)', color: 'var(--color-on-surface)' }}
                   >
                     <span className="material-symbols-outlined text-[16px]">play_arrow</span>
                     Run Agent 2 — Financial Analysis
@@ -690,12 +797,21 @@ export default function AnalysisPage() {
             {analyzerData && (jobStatus?.status === 'analysis_complete' || jobStatus?.status === 'completed') && (
               <>
                 {/* ── Row 1: Financial health + smart KPI cards ── */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  {/* Health — always first */}
+                <div className={`grid grid-cols-2 gap-3 ${analyzerData.fund_analysis?.is_investment_fund && analyzerData.fund_analysis.nav_reconciliation?.closing_nav != null ? 'md:grid-cols-5' : 'md:grid-cols-4'}`}>
+                  {/* AUM — investment funds only */}
+                  {analyzerData.fund_analysis?.is_investment_fund && analyzerData.fund_analysis.nav_reconciliation?.closing_nav != null && (
+                    <MetricCard
+                      label="AUM — Patrimonio Neto"
+                      value={`${analyzerData.fund_analysis.nav_reconciliation.closing_nav.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} MM`}
+                      color="var(--color-brand-accent)"
+                      icon="account_balance_wallet"
+                    />
+                  )}
+                  {/* Health — always shown */}
                   <MetricCard
                     label="Financial Health"
                     value={analyzerData.overall_financial_health}
-                    color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#b7c4ff'}
+                    color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? 'var(--color-brand-accent)'}
                     icon="monitor_heart"
                   />
                   {/* Smart KPI cards from executive_kpis.dashboard_metrics */}
@@ -704,7 +820,7 @@ export default function AnalysisPage() {
                       key={m.key}
                       label={m.label}
                       value={m.value}
-                      color={m.signal === 'positive' ? '#3FB950' : m.signal === 'negative' ? '#F85149' : '#D29922'}
+                      color={m.signal === 'positive' ? 'var(--color-success-low)' : m.signal === 'negative' ? 'var(--color-danger-soft)' : 'var(--color-warning-soft)'}
                       icon={
                         m.key === 'aum_growth'      ? 'trending_up'    :
                         m.key === 'net_flow'         ? 'swap_vert'      :
@@ -713,34 +829,28 @@ export default function AnalysisPage() {
                         m.key === 'ebitda_margin'    ? 'bar_chart'      :
                         m.key === 'earnings_quality' ? 'verified'       :
                         m.key === 'concentration'    ? 'hub'            :
-                        m.key === 'current_ratio'    ? 'account_balance': 'analytics'
+                        m.key === 'aum'             ? 'account_balance_wallet': 'analytics'
                       }
                     />
                   ))}
                 </div>
 
                 {/* ── Row 2: Secondary KPI cards + stat counters ── */}
-                <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                   {(analyzerData.executive_kpis?.dashboard_metrics ?? []).slice(3, 5).map(m => (
                     <MetricCard
                       key={m.key}
                       label={m.label}
                       value={m.value}
-                      color={m.signal === 'positive' ? '#3FB950' : m.signal === 'negative' ? '#F85149' : '#D29922'}
+                      color={m.signal === 'positive' ? 'var(--color-success-low)' : m.signal === 'negative' ? 'var(--color-danger-soft)' : 'var(--color-warning-soft)'}
                       icon={
                         m.key === 'concentration' ? 'hub' :
-                        m.key === 'current_ratio' ? 'account_balance' : 'analytics'
+                        m.key === 'aum'           ? 'account_balance_wallet' : 'analytics'
                       }
                     />
                   ))}
                   <StatCounter label="High Materiality" value={analyzerData.high_materiality_accounts.length} unit="accounts" />
-                  <StatCounter label="Anomalies" value={anomalyCount} unit="detected" color={anomalyCount > 0 ? '#D29922' : '#3FB950'} />
-                  <StatCounter
-                    label="NIIF 18"
-                    value={analyzerData.financial_ratios.niif18?.compliance?.compliance_score ?? 0}
-                    unit="/100"
-                    color="#b7c4ff"
-                  />
+                  <StatCounter label="Anomalies" value={anomalyCount} unit="detected" color={anomalyCount > 0 ? 'var(--color-warning-soft)' : 'var(--color-success-low)'} />
                 </div>
 
                 {/* ── Tier 1: Critical executive signals ── */}
@@ -749,8 +859,8 @@ export default function AnalysisPage() {
                        style={{ borderColor: 'rgba(248,81,73,0.35)' }}>
                     <div className="px-5 py-3 border-b flex items-center gap-2"
                          style={{ borderColor: 'rgba(248,81,73,0.2)', background: 'rgba(248,81,73,0.05)' }}>
-                      <span className="material-symbols-outlined text-[15px]" style={{ color: '#F85149' }}>priority_high</span>
-                      <span className="text-[10px] font-mono uppercase tracking-widest" style={{ color: '#F85149' }}>
+                      <span className="material-symbols-outlined text-[15px]" style={{ color: 'var(--color-danger-soft)' }}>priority_high</span>
+                      <span className="text-[10px] font-mono uppercase tracking-widest" style={{ color: 'var(--color-danger-soft)' }}>
                         Critical Executive Signals
                       </span>
                       <span className="ml-auto text-[9px] font-mono text-outline">
@@ -761,7 +871,7 @@ export default function AnalysisPage() {
                       {analyzerData.insight_tiers!.tier1_critical!.map((t, i) => (
                         <div key={i} className="px-5 py-3 flex gap-4 items-start">
                           <span className="text-[9px] font-mono px-1.5 py-0.5 rounded shrink-0 mt-0.5"
-                                style={{ color: '#F85149', background: 'rgba(248,81,73,0.12)', border: '1px solid rgba(248,81,73,0.25)' }}>
+                                style={{ color: 'var(--color-danger-soft)', background: 'rgba(248,81,73,0.12)', border: '1px solid rgba(248,81,73,0.25)' }}>
                             {t.category || 'SIGNAL'}
                           </span>
                           <div className="flex-1 min-w-0">
@@ -862,27 +972,27 @@ export default function AnalysisPage() {
                               <tr key={r.account_id} className={`hover:bg-surface-container-lowest/50 ${i % 2 ? 'bg-surface-container-lowest/20' : ''}`}>
                                 <td className="py-2 px-3 text-on-surface min-w-[200px]">{r.account_name}</td>
                                 <td className="py-2 px-3 text-right font-mono text-[11px]"
-                                    style={{ color: r.variation_pct > 0 ? '#3FB950' : r.variation_pct < 0 ? '#F85149' : '#8d90a2' }}>
+                                    style={{ color: r.variation_pct > 0 ? 'var(--color-success-low)' : r.variation_pct < 0 ? 'var(--color-danger-soft)' : 'var(--color-on-surface-muted-strong)' }}>
                                   {r.variation_pct !== 0 ? `${r.variation_pct > 0 ? '+' : ''}${r.variation_pct.toFixed(1)}%` : '—'}
                                 </td>
                                 <td className="py-2 px-3">
                                   <span className="text-[10px] font-mono px-2 py-0.5 rounded"
                                         style={{
-                                          color: r.materiality === 'HIGH' ? '#F85149' : r.materiality === 'MEDIUM' ? '#D29922' : '#3FB950',
-                                          background: r.materiality === 'HIGH' ? '#F8514920' : r.materiality === 'MEDIUM' ? '#D2992220' : '#3FB95020',
-                                          border: `1px solid ${r.materiality === 'HIGH' ? '#F8514940' : r.materiality === 'MEDIUM' ? '#D2992240' : '#3FB95040'}`,
+                                          color: r.materiality === 'HIGH' ? 'var(--color-danger-soft)' : r.materiality === 'MEDIUM' ? 'var(--color-warning-soft)' : 'var(--color-success-low)',
+                                          background: r.materiality === 'HIGH' ? 'rgba(248,81,73,0.12)' : r.materiality === 'MEDIUM' ? 'rgba(210,153,34,0.12)' : 'rgba(63,185,80,0.12)',
+                                          border: `1px solid ${r.materiality === 'HIGH' ? 'rgba(248,81,73,0.25)' : r.materiality === 'MEDIUM' ? 'rgba(210,153,34,0.25)' : 'rgba(63,185,80,0.25)'}`,
                                         }}>
                                     {r.materiality}
                                   </span>
                                 </td>
                                 <td className="py-2 px-3">
-                                  <span className="text-[10px] font-mono" style={{ color: RISK_COLOR[r.risk_level] ?? '#8d90a2' }}>
+                                  <span className="text-[10px] font-mono" style={{ color: RISK_COLOR[r.risk_level] ?? 'var(--color-on-surface-muted-strong)' }}>
                                     {r.risk_level}
                                   </span>
                                 </td>
                                 <td className="py-2 px-3">
                                   {r.anomaly_detected && (
-                                    <span className="material-symbols-outlined text-[14px]" style={{ color: '#D29922' }}>warning</span>
+                                    <span className="material-symbols-outlined text-[14px]" style={{ color: 'var(--color-warning-soft)' }}>warning</span>
                                   )}
                                 </td>
                               </tr>
@@ -891,6 +1001,20 @@ export default function AnalysisPage() {
                       </table>
                     </div>
                   </div>
+                )}
+
+                {/* ── Portfolio Concentration ── */}
+                {analyzerData.portfolio_concentration && (analyzerData.portfolio_concentration.top_accounts?.length ?? 0) > 1 && (
+                  <ConcentrationSection concentration={analyzerData.portfolio_concentration} />
+                )}
+
+                {/* ── Sheet-based Concentration (Activos / Instrumentos / Bancos) ── */}
+                {analyzerData.sheet_concentration && (
+                  analyzerData.sheet_concentration.asset_available ||
+                  analyzerData.sheet_concentration.instrument_available ||
+                  analyzerData.sheet_concentration.bank_available
+                ) && (
+                  <SheetConcentrationSection sc={analyzerData.sheet_concentration} />
                 )}
 
                 {/* ── NIIF 18 compliance flags ── */}
@@ -909,9 +1033,9 @@ export default function AnalysisPage() {
                 {/* Agent 2 continue / completed banner */}
                 {jobStatus?.status === 'analysis_complete' && (
                   <div className="bg-surface border rounded p-5 flex flex-col md:flex-row items-center justify-between gap-4"
-                       style={{ borderColor: '#b7c4ff', background: 'rgba(183,196,255,0.06)' }}>
+                       style={{ borderColor: 'var(--color-brand-accent)', background: 'rgba(183,196,255,0.06)' }}>
                     <div className="flex items-start gap-3">
-                      <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: '#b7c4ff' }}>analytics</span>
+                      <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: 'var(--color-brand-accent)' }}>analytics</span>
                       <div>
                         <p className="text-body-md font-body-md font-semibold text-on-surface mb-0.5">
                           Agent 2 complete — review financial analysis
@@ -932,7 +1056,7 @@ export default function AnalysisPage() {
                       <button
                         onClick={handleRunFinalClick}
                         className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95"
-                        style={{ background: '#b7c4ff', color: '#0d1117' }}
+                        style={{ background: 'var(--color-brand-accent)', color: 'var(--color-on-surface)' }}
                       >
                         <span className="material-symbols-outlined text-[16px]">play_arrow</span>
                         Run Agents 3–4
@@ -942,9 +1066,9 @@ export default function AnalysisPage() {
                 )}
                 {jobStatus?.status === 'completed' && (
                   <div className="bg-surface border rounded p-5 flex flex-col md:flex-row items-center justify-between gap-4"
-                       style={{ borderColor: '#3FB950', background: 'rgba(63,185,80,0.04)' }}>
+                       style={{ borderColor: 'var(--color-success-low)', background: 'rgba(63,185,80,0.04)' }}>
                     <div className="flex items-center gap-3">
-                      <span className="material-symbols-outlined text-[22px]" style={{ color: '#3FB950' }}>check_circle</span>
+                      <span className="material-symbols-outlined text-[22px]" style={{ color: 'var(--color-success-low)' }}>check_circle</span>
                       <div>
                         <p className="text-body-md font-body-md font-semibold text-on-surface mb-0.5">Pipeline complete</p>
                         <p className="text-label-sm font-label-sm text-outline">All agents finished. Report saved to S3.</p>
@@ -974,8 +1098,8 @@ export default function AnalysisPage() {
             {/* ── COMPLETED with no analyzer data (edge case: Agent 2 never ran) ── */}
             {jobStatus?.status === 'completed' && !analyzerData && (
               <div className="bg-surface border rounded p-6 flex items-center gap-3"
-                   style={{ borderColor: '#3FB950', background: 'rgba(63,185,80,0.04)' }}>
-                <span className="material-symbols-outlined text-[22px]" style={{ color: '#3FB950' }}>check_circle</span>
+                   style={{ borderColor: 'var(--color-success-low)', background: 'rgba(63,185,80,0.04)' }}>
+                <span className="material-symbols-outlined text-[22px]" style={{ color: 'var(--color-success-low)' }}>check_circle</span>
                 <p className="text-body-sm font-body-sm text-on-surface">Pipeline complete — report saved to S3.</p>
               </div>
             )}
@@ -1000,7 +1124,7 @@ export default function AnalysisPage() {
             onClick={e => e.stopPropagation()}
           >
             <div className="flex items-start gap-3 mb-5">
-              <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: '#D29922' }}>replay</span>
+              <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: 'var(--color-warning-soft)' }}>replay</span>
               <div>
                 <p className="text-body-md font-body-md font-semibold text-on-surface mb-1">
                   {restartIntent === 'agent2' ? 'Agent 2 already has results' : 'Pipeline already completed'}
@@ -1017,7 +1141,7 @@ export default function AnalysisPage() {
                 <button
                   onClick={skipToFinal}
                   className="w-full px-4 py-2.5 rounded border font-mono text-[12px] text-left flex items-center gap-2 hover:bg-surface-container transition-colors"
-                  style={{ borderColor: '#b7c4ff', color: '#b7c4ff' }}
+                  style={{ borderColor: 'var(--color-brand-accent)', color: 'var(--color-brand-accent)' }}
                 >
                   <span className="material-symbols-outlined text-[15px]">skip_next</span>
                   Skip Agent 2 — continue to Agents 3–4
@@ -1117,7 +1241,7 @@ export default function AnalysisPage() {
             onClick={e => e.stopPropagation()}
           >
             <div className="flex items-start gap-3 mb-5">
-              <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: '#D29922' }}>
+              <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color: 'var(--color-warning-soft)' }}>
                 warning
               </span>
               <div>
@@ -1140,7 +1264,7 @@ export default function AnalysisPage() {
               <button
                 onClick={confirmClear}
                 className="px-4 py-2 rounded text-[12px] font-mono font-semibold transition-all hover:opacity-90 active:scale-95"
-                style={{ background: '#F85149', color: '#fff' }}
+                style={{ background: 'var(--color-danger-soft)', color: 'var(--color-on-surface)' }}
               >
                 Stop &amp; clear
               </button>
@@ -1154,17 +1278,20 @@ export default function AnalysisPage() {
 
 // ── Sub-components ────────────────────────────────────────────────────────
 
+const STATUS_BADGE_STYLE: Record<string, { color: string; background: string; border: string }> = {
+  completed:           { color: 'var(--color-success-low)', background: 'var(--color-success-low-soft)', border: 'rgba(63,185,80,0.25)' },
+  analysis_complete:   { color: 'var(--color-brand-accent)', background: 'var(--color-brand-accent-soft)', border: 'rgba(183,196,255,0.25)' },
+  extraction_complete: { color: 'var(--color-warning-soft)', background: 'var(--color-warning-soft-soft)', border: 'rgba(210,153,34,0.25)' },
+  failed:              { color: 'var(--color-danger-soft)', background: 'var(--color-danger-soft-soft)', border: 'rgba(248,81,73,0.25)' },
+  cancelled:           { color: 'var(--color-danger-soft)', background: 'var(--color-danger-soft-soft)', border: 'rgba(248,81,73,0.25)' },
+}
+
 function StatusBadge({ status }: { status: string }) {
-  const color =
-    status === 'completed'          ? '#3FB950' :
-    status === 'analysis_complete'  ? '#b7c4ff' :
-    status === 'extraction_complete'? '#D29922' :
-    status === 'failed'             ? '#F85149' :
-    status === 'cancelled'          ? '#F85149' : '#8d90a2'
+  const variant = STATUS_BADGE_STYLE[status] ?? { color: 'var(--color-on-surface-muted-strong)', background: 'rgba(195,197,216,0.12)', border: 'rgba(195,197,216,0.25)' }
   return (
     <span
       className="text-[9px] font-mono px-2 py-0.5 rounded shrink-0"
-      style={{ color, background: `${color}18`, border: `1px solid ${color}40` }}
+      style={{ color: variant.color, background: variant.background, border: variant.border }}
     >
       {status.replace(/_/g, ' ').toUpperCase()}
     </span>
@@ -1192,7 +1319,7 @@ function MetricCard({ label, value, color, icon }: { label: string; value: strin
   )
 }
 
-function StatCounter({ label, value, unit, color = '#e2e1ee' }: { label: string; value: number; unit: string; color?: string }) {
+function StatCounter({ label, value, unit, color = 'var(--color-on-surface-muted-strong)' }: { label: string; value: number; unit: string; color?: string }) {
   return (
     <div className="bg-surface border border-border rounded p-3 text-center">
       <div className="text-[10px] font-mono text-outline uppercase mb-1 tracking-wide">{label}</div>
@@ -1244,6 +1371,256 @@ function NarrativeLayers({ layers }: { layers: { executive?: string; tactical?: 
   )
 }
 
+const CONCENTRATION_COLOR: Record<string, string> = {
+  CRITICAL: 'var(--color-danger-soft)',
+  HIGH:     'var(--color-warning-soft)',
+  MEDIUM:   'var(--color-brand-accent)',
+  LOW:      'var(--color-success-low)',
+}
+
+const CONCENTRATION_BG_COLOR: Record<string, string> = {
+  CRITICAL: 'var(--color-danger-soft-soft)',
+  HIGH:     'var(--color-warning-soft-soft)',
+  MEDIUM:   'var(--color-brand-accent-soft)',
+  LOW:      'var(--color-success-low-soft)',
+}
+
+const CONCENTRATION_BORDER_COLOR: Record<string, string> = {
+  CRITICAL: 'rgba(248,81,73,0.25)',
+  HIGH:     'rgba(210,153,34,0.25)',
+  MEDIUM:   'rgba(183,196,255,0.25)',
+  LOW:      'rgba(63,185,80,0.25)',
+}
+
+function ConcentrationSection({ concentration }: {
+  concentration: {
+    top_account_name: string
+    top_account_pct: number
+    top3_concentration_pct: number
+    concentration_label: string
+    insight: string
+    hhi: number
+    effective_positions: number
+    category_concentration: Record<string, number>
+    top_accounts: Array<{ name: string; value_cop_mm: number; pct_of_total: number; category: string }>
+  }
+}) {
+  const labelColor = CONCENTRATION_COLOR[concentration.concentration_label] ?? 'var(--color-on-surface-muted-strong)'
+  const maxPct = concentration.top_accounts[0]?.pct_of_total || 1
+
+  return (
+    <div className="bg-surface border border-border rounded overflow-hidden">
+      <div className="px-5 py-3 border-b border-border bg-surface-container-low flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="material-symbols-outlined text-[14px] text-outline">hub</span>
+          <span className="text-[10px] font-mono text-on-surface-variant uppercase tracking-widest">
+            Portfolio Concentration
+          </span>
+        </div>
+        <div className="flex items-center gap-4">
+          <span className="text-[9px] font-mono text-outline">
+            HHI {concentration.hhi.toFixed(3)} · {concentration.effective_positions.toFixed(1)} effective positions
+          </span>
+          <span
+            className="text-[9px] font-mono px-2 py-0.5 rounded"
+            style={{ color: labelColor, background: `${labelColor}18`, border: `1px solid ${labelColor}40` }}
+          >
+            {concentration.concentration_label}
+          </span>
+        </div>
+      </div>
+
+      {concentration.insight && (
+        <div className="px-5 py-2.5 border-b border-border">
+          <p className="text-[11px] text-outline leading-snug">{concentration.insight}</p>
+        </div>
+      )}
+
+      <div className="divide-y divide-border">
+        {concentration.top_accounts.slice(0, 8).map((acc, i) => {
+          const catColor = CATEGORY_COLOR[acc.category] ?? 'var(--color-on-surface-muted-strong)'
+          return (
+            <div key={i} className="px-5 py-2 flex items-center gap-3">
+              <span className="text-[10px] font-mono text-outline w-5 shrink-0 text-right">{i + 1}</span>
+              <span
+                className="text-[9px] font-mono px-1.5 py-0.5 rounded shrink-0"
+                style={{ color: catColor, background: `${catColor}15`, border: `1px solid ${catColor}30` }}
+              >
+                {acc.category.slice(0, 3).toUpperCase()}
+              </span>
+              <span className="text-[12px] text-on-surface flex-1 min-w-0 truncate">{acc.name}</span>
+              <div className="w-24 h-1.5 bg-surface-container rounded overflow-hidden shrink-0">
+                <div
+                  className="h-full rounded"
+                  style={{ width: `${(acc.pct_of_total / maxPct) * 100}%`, background: labelColor, opacity: 0.65 }}
+                />
+              </div>
+              <span className="text-[11px] font-mono w-12 text-right shrink-0" style={{ color: labelColor }}>
+                {acc.pct_of_total.toFixed(1)}%
+              </span>
+              <span className="text-[10px] font-mono text-outline w-28 text-right shrink-0">
+                {acc.value_cop_mm.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} MM
+              </span>
+            </div>
+          )
+        })}
+      </div>
+
+      {Object.keys(concentration.category_concentration).length > 0 && (
+        <div className="px-5 py-3 border-t border-border flex flex-wrap gap-3">
+          {Object.entries(concentration.category_concentration).slice(0, 6).map(([cat, pct]) => {
+            const catColor = CATEGORY_COLOR[cat] ?? 'var(--color-on-surface-muted-strong)'
+            const catBg = CATEGORY_BG_COLOR[cat] ?? 'rgba(195,197,216,0.12)'
+            const catBorder = CATEGORY_BORDER_COLOR[cat] ?? 'rgba(195,197,216,0.25)'
+            return (
+              <div key={cat} className="flex items-center gap-1.5">
+                <span
+                  className="text-[9px] font-mono px-1.5 py-0.5 rounded"
+                  style={{ color: catColor, background: catBg, border: `1px solid ${catBorder}` }}
+                >
+                  {cat.toUpperCase()}
+                </span>
+                <span className="text-[11px] font-mono text-on-surface">{pct.toFixed(1)}%</span>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+type SheetConc = NonNullable<AnalyzerOutput['sheet_concentration']>
+
+function SheetConcentrationSection({ sc }: { sc: SheetConc }) {
+  const tabs = [
+    { key: 'asset',      label: 'Activos',      icon: 'account_balance',  available: sc.asset_available },
+    { key: 'instrument', label: 'Instrumentos',  icon: 'candlestick_chart', available: sc.instrument_available },
+    { key: 'bank',       label: 'Bancos',        icon: 'corporate_fare',   available: sc.bank_available },
+  ].filter(t => t.available)
+
+  const [active, setActive] = useState(tabs[0]?.key ?? 'asset')
+
+  if (tabs.length === 0) return null
+
+  const barColor = 'var(--color-brand-accent)'
+
+  function BarRow({ name, value, pct, maxPct, indent = false }: {
+    name: string; value: number; pct: number; maxPct: number; indent?: boolean
+  }) {
+    return (
+      <div className={`flex items-center gap-3 py-2 px-5 border-b border-border last:border-b-0 ${indent ? 'pl-10' : ''}`}>
+        {indent && (
+          <span className="text-[10px] font-mono text-outline shrink-0">└─</span>
+        )}
+        <span className="text-[12px] text-on-surface flex-1 min-w-0 truncate" title={name}>{name}</span>
+        <div className="w-24 h-1.5 bg-surface-container rounded overflow-hidden shrink-0">
+          <div className="h-full rounded" style={{ width: `${(pct / maxPct) * 100}%`, background: barColor, opacity: 0.65 }} />
+        </div>
+        <span className="text-[11px] font-mono w-10 text-right shrink-0" style={{ color: barColor }}>
+          {pct.toFixed(1)}%
+        </span>
+        <span className="text-[10px] font-mono text-outline w-32 text-right shrink-0">
+          {value.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} MM
+        </span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="bg-surface border border-border rounded overflow-hidden">
+      {/* Header + tabs */}
+      <div className="border-b border-border bg-surface-container-low">
+        <div className="px-5 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[14px] text-outline">donut_small</span>
+            <span className="text-[10px] font-mono text-on-surface-variant uppercase tracking-widest">
+              Concentración por hoja
+            </span>
+          </div>
+        </div>
+        <div className="flex border-t border-border">
+          {tabs.map(t => (
+            <button
+              key={t.key}
+              onClick={() => setActive(t.key)}
+              className={`flex items-center gap-1.5 px-4 py-2.5 text-[11px] font-mono transition-colors border-r border-border
+                ${active === t.key ? 'text-on-surface bg-surface' : 'text-outline hover:text-on-surface-variant'}`}
+            >
+              <span className="material-symbols-outlined text-[12px]">{t.icon}</span>
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Asset view */}
+      {active === 'asset' && sc.asset_available && (
+        <div>
+          <div className="px-5 py-2 border-b border-border flex items-center justify-between">
+            <span className="text-[10px] font-mono text-outline">Activos del Balance General</span>
+            <span className="text-[10px] font-mono text-outline">
+              Total: {sc.asset_total.toLocaleString('en-US', { maximumFractionDigits: 0 })} MM
+            </span>
+          </div>
+          {sc.asset_breakdown.map(r => (
+            <BarRow key={r.name} name={r.name} value={r.value} pct={r.pct}
+              maxPct={sc.asset_breakdown[0]?.pct || 1} />
+          ))}
+        </div>
+      )}
+
+      {/* Instrument view */}
+      {active === 'instrument' && sc.instrument_available && (
+        <div>
+          <div className="px-5 py-2 border-b border-border flex items-center justify-between">
+            <span className="text-[10px] font-mono text-outline">Tipos de instrumento · Emisores</span>
+            <span className="text-[10px] font-mono text-outline">
+              Total: {sc.instrument_total.toLocaleString('en-US', { maximumFractionDigits: 0 })} MM
+            </span>
+          </div>
+          {sc.instrument_breakdown.map(ib => (
+            <div key={ib.instrument_type}>
+              {/* Type header row */}
+              <div className="flex items-center gap-3 px-5 py-2 border-b border-border bg-surface-container-low/50">
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded shrink-0"
+                      style={{ color: barColor, background: `${barColor}18`, border: `1px solid ${barColor}30` }}>
+                  {ib.pct.toFixed(1)}%
+                </span>
+                <span className="text-[12px] font-semibold text-on-surface flex-1">{ib.instrument_type}</span>
+                <span className="text-[10px] font-mono text-outline">
+                  {ib.total.toLocaleString('en-US', { maximumFractionDigits: 0 })} MM
+                </span>
+              </div>
+              {/* Emisor rows */}
+              {ib.emisores.map(e => (
+                <BarRow key={e.name} name={e.name} value={e.value} pct={e.pct}
+                  maxPct={ib.emisores[0]?.pct || 1} indent />
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Bank view */}
+      {active === 'bank' && sc.bank_available && (
+        <div>
+          <div className="px-5 py-2 border-b border-border flex items-center justify-between">
+            <span className="text-[10px] font-mono text-outline">Efectivo por entidad bancaria</span>
+            <span className="text-[10px] font-mono text-outline">
+              Total: {sc.bank_total.toLocaleString('en-US', { maximumFractionDigits: 0 })} MM
+            </span>
+          </div>
+          {sc.bank_breakdown.map(r => (
+            <BarRow key={r.name} name={r.name} value={r.value} pct={r.pct}
+              maxPct={sc.bank_breakdown[0]?.pct || 1} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AccountsTable({
   report, filtered, accounts, categories, catFilter, setCatFilter,
 }: {
@@ -1264,22 +1641,27 @@ function AccountsTable({
           </p>
         </div>
         <div className="flex gap-1.5 flex-wrap">
-          {categories.map(cat => (
+        {categories.map(cat => {
+          const filterColor = CATEGORY_COLOR[cat] ?? 'var(--color-brand-accent)'
+          const filterBg = CATEGORY_BG_COLOR[cat] ?? 'var(--color-brand-accent-soft)'
+
+          return (
             <button
               key={cat}
               onClick={() => setCatFilter(cat)}
               className="px-2.5 py-0.5 rounded text-[10px] font-mono uppercase transition-all"
               style={{
-                border: `1px solid ${catFilter === cat ? (CATEGORY_COLOR[cat] ?? '#b7c4ff') : '#30363D'}`,
-                background: catFilter === cat ? `${CATEGORY_COLOR[cat] ?? '#b7c4ff'}18` : 'transparent',
-                color: catFilter === cat ? (CATEGORY_COLOR[cat] ?? '#b7c4ff') : '#8d90a2',
+                border: `1px solid ${catFilter === cat ? filterColor : 'var(--color-surface-muted)'}`,
+                background: catFilter === cat ? filterBg : 'transparent',
+                color: catFilter === cat ? filterColor : 'var(--color-on-surface-muted-strong)',
               }}
             >
               {cat === 'all'
                 ? `All (${accounts.length})`
                 : `${cat} (${accounts.filter(a => a.category === cat).length})`}
             </button>
-          ))}
+          )
+        })}
         </div>
       </div>
 
@@ -1300,7 +1682,7 @@ function AccountsTable({
               const delta = a.previous_value != null && a.previous_value !== 0
                 ? ((a.current_value - a.previous_value) / Math.abs(a.previous_value)) * 100
                 : null
-              const catColor = CATEGORY_COLOR[a.category] ?? '#8d90a2'
+              const catColor = CATEGORY_COLOR[a.category] ?? 'var(--color-on-surface-muted-strong)'
               return (
                 <tr key={a.account_id} className={`hover:bg-surface-container-lowest/50 ${i % 2 ? 'bg-surface-container-lowest/20' : ''}`}>
                   <td className="py-2 px-3 font-mono text-[11px] text-outline">{a.account_id}</td>
@@ -1320,11 +1702,11 @@ function AccountsTable({
                       : '—'}
                   </td>
                   <td className="py-2 px-3 text-right font-mono text-[11px]"
-                      style={{ color: delta == null ? '#8d90a2' : delta > 0 ? '#3FB950' : '#F85149' }}>
+                      style={{ color: delta == null ? 'var(--color-on-surface-muted-strong)' : delta > 0 ? 'var(--color-success-low)' : 'var(--color-danger-soft)' }}>
                     {delta != null ? `${delta > 0 ? '+' : ''}${delta.toFixed(1)}%` : '—'}
                   </td>
                   <td className="py-2 px-3 text-right font-mono text-[11px]"
-                      style={{ color: a.confidence_score >= 0.8 ? '#3FB950' : a.confidence_score >= 0.5 ? '#D29922' : '#F85149' }}>
+                      style={{ color: a.confidence_score >= 0.8 ? 'var(--color-success-low)' : a.confidence_score >= 0.5 ? 'var(--color-warning-soft)' : 'var(--color-danger-soft)' }}>
                     {(a.confidence_score * 100).toFixed(0)}%
                   </td>
                   <td className="py-2 px-3 font-mono text-[10px] text-outline max-w-[120px] overflow-hidden text-ellipsis"

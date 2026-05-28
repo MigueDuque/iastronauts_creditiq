@@ -14,6 +14,10 @@ class ExtractedAccount(BaseModel):
     currency: str
     confidence_score: float = Field(ge=0.0, le=1.0)
     source_file: str
+    source_sheet: str | None = None  # Excel sheet name where this row was found (None for PDF/CSV)
+    is_total: bool = False            # True when this row is a sum/subtotal/total — skip when re-summing categories
+    investment_type: str | None = None  # equity | bond | sovereign_debt | trust_rights | futures | fund | cash | null
+    issuer_name: str | None = None       # Emisor del instrumento financiero (ej. "Ecopetrol S.A.")
 
 
 class NiifValidationFlag(BaseModel):

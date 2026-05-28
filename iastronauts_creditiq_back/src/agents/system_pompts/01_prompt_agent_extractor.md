@@ -53,10 +53,12 @@ Devuelve ÚNICAMENTE un JSON válido con esta estructura:
       "current_value": número en COP MM,
       "previous_value": número en COP MM o null,
       "confidence_score": 0.0 a 1.0,
+      "source_sheet": "nombre de la hoja Excel o null si es PDF/CSV",
+      "is_total": true | false,
       "position_status": "existing | new_position | liquidated_position",
       "issuer_name": "nombre del emisor si aplica, o null",
       "sector_hint": "financials | sovereign | infrastructure | energy | utilities | mixed | unknown | null",
-      "investment_type": "equity | bond | fund | cash | sovereign_debt | private_equity | unknown | null",
+      "investment_type": "equity | bond | fund | cash | sovereign_debt | private_equity | trust_rights | futures | unknown | null",
       "materiality_hint": "high | medium | low"
     }
   ]
@@ -126,6 +128,84 @@ REGLAS DE INTELIGENCIA DE PORTAFOLIO
    - issuer_name: emisor del instrumento (ej. "Grupo Cibest", "Ministerio de Hacienda")
    - investment_type: tipo de instrumento (equity, bond, fund, sovereign_debt)
    - sector_hint: sector económico del emisor
+
+═══════════════════════════════════════════════════════
+CAMPO source_sheet (OBLIGATORIO para Excel)
+═══════════════════════════════════════════════════════
+
+El texto de entrada marca cada hoja con un encabezado "=== Hoja: <nombre> ===".
+TODOS los registros extraídos de filas que aparezcan debajo de ese marcador deben llevar:
+  "source_sheet": "<nombre exacto de la hoja tal como aparece en el marcador>"
+
+Ejemplos correctos:
+  - Fila de "Estado Situación Financiera" → "source_sheet": "Estado Situación Financiera"
+  - Fila de "Inversiones"                 → "source_sheet": "Inversiones"
+  - Fila de "Ingresos Operacionales"      → "source_sheet": "Ingresos Operacionales"
+
+Para documentos PDF o CSV donde no existen marcadores de hoja:
+  "source_sheet": null
+
+═══════════════════════════════════════════════════════
+CAMPO is_total — IDENTIFICACIÓN DE FILAS RESUMEN (CRÍTICO)
+═══════════════════════════════════════════════════════
+
+Marcar "is_total": true cuando la fila es una fila de SUMA o SUBTOTAL — es decir, cuando
+su valor es la suma de otras filas de la misma tabla o sección.
+
+Señales típicas de que una fila ES un total (is_total: true):
+  - El raw_account_name empieza o contiene: "Total", "TOTAL", "Subtotal", "SUBTOTAL",
+    "Total activos", "Total pasivos", "Total patrimonio", "Total activo neto",
+    "Efectivo neto operación", "Efectivo neto financiación", "Total instrumentos",
+    "Total activos financieros", "Total pasivos financieros", "Aumento efectivo".
+  - Es la última fila de una sección y su valor coincide con la suma de las filas anteriores.
+  - En hojas de detalle (ej. Inversiones, Efectivo, Cuentas por Pagar, Ingresos Operacionales,
+    Gastos Operacionales, Gastos Administrativos), la fila "Total" al final de la tabla.
+
+Marcar "is_total": false para todas las demás filas: líneas individuales de cuenta,
+posiciones de inversión por emisor, gastos individuales, activos individuales, etc.
+
+IMPORTANTE: Extraer TANTO las filas de detalle COMO las filas de total cuando sean
+materiales — ambas son útiles para análisis. El campo is_total permite al Agente 2
+evitar doble conteo al calcular sumas por categoría: cuando suma activos, solo usa
+filas con is_total=false (las partidas individuales), ignorando las filas resumen.
+
+═══════════════════════════════════════════════════════
+HOJAS DE CONCENTRACIÓN — EXTRACCIÓN OBLIGATORIA DE DETALLE
+═══════════════════════════════════════════════════════
+
+Los agentes downstream producen tres tablas de concentración que el usuario final
+visualiza en la interfaz. Para que funcionen correctamente, DEBES extraer el detalle
+individual de cada hoja (no solo los totales). Estas hojas tienen prioridad máxima.
+
+1. HOJA DE EFECTIVO  ("Efectivo", "EFECTIVO", "Caja y Bancos", "Caja"):
+   - Extrae CADA ENTIDAD BANCARIA como una cuenta separada (Bancolombia, BTG Pactual, etc.)
+   - category: "assets", investment_type: "cash"
+   - issuer_name: nombre del banco
+   - is_total: false para cada banco; is_total: true SOLO para la fila "Total Efectivo"
+   - No colapses los bancos en una sola cuenta "Efectivo" — el detalle por banco es esencial.
+
+2. HOJA DE INVERSIONES  ("Inversiones", "INSTRUMENTOS", "Portafolio"):
+   - Extrae CADA POSICIÓN/INSTRUMENTO individual con su emisor (una fila = un emisor).
+   - issuer_name: nombre exacto del emisor (ej. "Ecopetrol S.A.", "Ministerio de Hacienda",
+     "Grupo Cibest")
+   - Clasifica investment_type según el instrumento:
+       * "sovereign_debt" o "bond" → TES, bonos, CDTs, títulos de renta fija, deuda pública/privada
+       * "equity"                  → acciones, renta variable, participaciones accionarias
+       * "trust_rights"            → derechos fiduciarios, carteras colectivas, fideicomisos
+       * "futures"                 → futuros, forwards, opciones, derivados, compromisos futuros
+       * "fund"                    → fondos de inversión, ETFs
+   - is_total: false para cada instrumento; is_total: true SOLO para filas "Total [categoría]"
+   - Extrae también las filas de subtotal por tipo (ej. "Total Instrumentos de Deuda") con
+     is_total: true — ayudan a validar sumas.
+
+3. HOJA DE BALANCE  ("Balance", "Estado Situación Financiera", "ESF", "BALANCE"):
+   - Extrae las líneas principales de activos que agrupan el portafolio:
+       * "Efectivo y equivalentes de efectivo"
+       * "Instrumentos financieros de inversión" / "Activos financieros a valor razonable"
+       * "Cuentas por cobrar" / "Cartera"
+   - Estas cuentas resumen son is_total: false (son partidas del balance, no filas de suma).
+   - Solo marca is_total: true si la fila es literalmente "Total Activos" o "Total Activos
+     Corrientes", etc.
 
 ═══════════════════════════════════════════════════════
 REGLAS DE SELECCIÓN DE COLUMNAS (CRÍTICO)

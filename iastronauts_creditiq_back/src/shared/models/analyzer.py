@@ -96,3 +96,17 @@ class AnalyzerOutput(BaseModel):
 
     # ── Phase 1 Roadmap: Executive Synthesis Engine ──────────────────────────
     executive_synthesis: dict = {}     # Deterministic portfolio story from synthesis_engine
+
+    # ── Financial Intelligence Upgrade ───────────────────────────────────────
+    # 6-section institutional analysis (revenue, balance, cashflow, equity, risks, outlook)
+    structured_analysis: dict = {}
+    # LLM-detected cross-statement correlation patterns (earnings-cashflow, etc.)
+    cross_statement_signals: list[dict] = []
+    # Sustainability classification of earnings: STRONG | MODERATE | WEAK
+    earnings_sustainability: str = ""
+    # Deterministic cross-statement diagnostic signals from financial_diagnostics_engine
+    financial_diagnostics: dict = {}
+
+    # ── Sheet-based Concentration (Activos / Instrumentos / Bancos) ──────────
+    # Populated from source_sheet metadata; empty dict when source lacks sheet data
+    sheet_concentration: dict = {}

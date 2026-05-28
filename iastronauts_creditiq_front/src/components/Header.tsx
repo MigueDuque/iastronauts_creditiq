@@ -14,8 +14,8 @@ export default function Header({ onMenuToggle }: HeaderProps) {
         position: 'sticky',
         top: 0,
         zIndex: 1200,
-        backgroundColor: '#0A0C10',
-        borderBottom: '1px solid #30363D',
+        backgroundColor: 'var(--color-surface-deep)',
+        borderBottom: '1px solid var(--color-border)',
       }}
     >
       <div
@@ -37,8 +37,8 @@ export default function Header({ onMenuToggle }: HeaderProps) {
               onClick={onMenuToggle}
               sx={{
                 display: { xs: 'flex', lg: 'none' },
-                color: '#c3c5d8',
-                '&:hover': { color: '#e2e1ee', bgcolor: '#1d1f28' },
+                color: 'var(--color-on-surface-muted-strong)',
+                '&:hover': { color: 'var(--color-on-surface)', bgcolor: 'var(--color-surface-soft)' },
               }}
             >
               <span className="material-symbols-outlined">menu</span>
@@ -70,7 +70,7 @@ export default function Header({ onMenuToggle }: HeaderProps) {
                   gap: 8,
                   paddingBottom: 4,
                   textDecoration: 'none',
-                  color: active ? '#b7c4ff' : '#c3c5d8',
+                  color: active ? 'var(--color-brand-accent)' : 'var(--color-on-surface-muted-strong)',
                   fontWeight: active ? 700 : 500,
                   borderBottom: active ? '2px solid #b7c4ff' : '2px solid transparent',
                   transition: 'color 0.2s, border-color 0.2s',
@@ -105,7 +105,7 @@ export default function Header({ onMenuToggle }: HeaderProps) {
           {['search', 'help', 'language'].map((icon) => (
             <IconButton
               key={icon}
-              sx={{ color: '#c3c5d8', '&:hover': { color: '#b7c4ff', bgcolor: '#1d1f28' } }}
+              sx={{ color: 'var(--color-on-surface-muted-strong)', '&:hover': { color: 'var(--color-brand-accent)', bgcolor: 'var(--color-surface-soft)' } }}
             >
               <span className="material-symbols-outlined" style={{ fontSize: 20 }}>{icon}</span>
             </IconButton>
@@ -115,15 +115,15 @@ export default function Header({ onMenuToggle }: HeaderProps) {
               width: 32,
               height: 32,
               borderRadius: '50%',
-              backgroundColor: '#282933',
-              border: '1px solid #30363D',
+              backgroundColor: 'var(--color-surface-muted)',
+              border: '1px solid var(--color-border)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
               marginLeft: 8,
             }}
           >
-            <span className="material-symbols-outlined" style={{ fontSize: 18, color: '#c3c5d8' }}>person</span>
+            <span className="material-symbols-outlined" style={{ fontSize: 18, color: 'var(--color-on-surface-muted-strong)' }}>person</span>
           </div>
         </div>
       </div>

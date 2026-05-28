@@ -77,8 +77,10 @@ def classify_current_noncurrent(accounts: List[ExtractedAccount]) -> Tuple[float
     non_current_assets = 0.0
     current_liabilities = 0.0
     non_current_liabilities = 0.0
-    
+
     for acc in accounts:
+        if acc.is_total:
+            continue
         cat = acc.category.lower()
         name = acc.normalized_account_name.lower()
         val = acc.current_value
@@ -112,13 +114,16 @@ def calculate_financial_ratios(accounts: List[ExtractedAccount]) -> Dict[str, An
     Retorna un diccionario estructurado con los ratios.
     """
     # 1. Agrupar totales generales por categoría
+    # Skip is_total rows to avoid double-counting detail rows + their sum row.
     total_assets = 0.0
     total_liabilities = 0.0
     total_equity = 0.0
     total_revenue = 0.0
     total_expense = 0.0
-    
+
     for acc in accounts:
+        if acc.is_total:
+            continue
         cat = acc.category.lower()
         val = acc.current_value
         if cat == "assets":
@@ -205,6 +210,8 @@ def determine_materiality_threshold(accounts: List[ExtractedAccount]) -> float:
     total_assets = 0.0
     total_revenue = 0.0
     for acc in accounts:
+        if acc.is_total:
+            continue
         cat = acc.category.lower()
         val = acc.current_value
         if cat == "assets":

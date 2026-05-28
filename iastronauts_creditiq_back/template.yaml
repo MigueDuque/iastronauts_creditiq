@@ -17,6 +17,10 @@ Parameters:
     Type: String
     NoEcho: true
     Default: ""
+  GnewsApiKey:
+    Type: String
+    NoEcho: true
+    Default: ""
 
 Globals:
   Function:
@@ -31,6 +35,7 @@ Globals:
         WORKFLOW_ARN: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:creditiq-analysis-workflow-${Stage}"
         LLM_PROVIDER: !Ref LlmProvider
         ANTHROPIC_API_KEY: !Ref AnthropicApiKey
+        GNEWS_API_KEY: !Ref GnewsApiKey
         AWS_ACCOUNT_ID: !Ref AWS::AccountId
   HttpApi:
     CorsConfiguration:

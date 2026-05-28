@@ -41,3 +41,10 @@ class ScorerOutput(BaseModel):
     requires_human_review: bool
     analysis_confidence: float = Field(ge=0.0, le=1.0)
     anti_hallucination_passed: bool
+
+    # 5 risk dimensions (liquidity, credit, solvency, market, operational)
+    risk_dimensions: dict = {}
+    # LLM-generated risk narrative (paragraphs + recommendations + headline)
+    risk_summary: dict = {}
+    # True when scoring thresholds were adjusted for investment fund context
+    fund_context_adjusted: bool = False
