@@ -18,9 +18,10 @@ const EXTRACTION_STEPS = [
 ] as const
 
 const ANALYZER_STEPS = [
-  { label: 'Loading historical reports & enriching accounts',       start: 0  },
-  { label: 'Computing ratios, NIIF 18 subtotals & anomaly flags',   start: 4  },
-  { label: 'LLM qualitative analysis & risk classification',        start: 10 },
+  { label: 'Loading historical reports & enriching accounts',         start: 0  },
+  { label: 'Computing ratios, materiality & anomaly flags',           start: 5  },
+  { label: 'LLM sub-agents: Movement · Causality · Thesis',          start: 15 },
+  { label: 'Executive narrative & portfolio synthesis',               start: 50 },
 ] as const
 
 function stepState(idx: number, starts: readonly number[], elapsed: number): 'pending' | 'active' | 'done' {
@@ -547,6 +548,23 @@ export default function AnalysisPage() {
   const filtered   = catFilter === 'all' ? accounts : accounts.filter(a => a.category === catFilter)
   const anomalyCount = analyzerData?.analysis_results.filter(r => r.anomaly_detected).length ?? 0
 
+  // AUM is shown by the hardcoded Patrimonio Neto card for funds; earnings_quality removed as non-informative.
+  const dashboardMetrics = (analyzerData?.executive_kpis?.dashboard_metrics ?? [])
+    .filter(m => m.key !== 'aum' && m.key !== 'earnings_quality')
+  const isFundWithNav = !!(analyzerData?.fund_analysis?.is_investment_fund &&
+    analyzerData.fund_analysis.nav_reconciliation?.closing_nav != null)
+  const row1ColCount = (isFundWithNav ? 2 : 1) + Math.min(dashboardMetrics.length, 3)
+  const row1GridCols =
+    row1ColCount <= 3 ? 'md:grid-cols-3' :
+    row1ColCount === 4 ? 'md:grid-cols-4' : 'md:grid-cols-5'
+  const metricIcon = (key: string) =>
+    key === 'aum_growth'    ? 'trending_up' :
+    key === 'net_flow'      ? 'swap_vert'   :
+    key === 'roe'           ? 'percent'     :
+    key === 'net_margin'    ? 'payments'    :
+    key === 'ebitda_margin' ? 'bar_chart'   :
+    key === 'concentration' ? 'hub'         : 'analytics'
+
   const statusColor = {
     pending:              'var(--color-warning-soft)',
     processing:           'var(--color-brand-accent)',
@@ -722,6 +740,17 @@ export default function AnalysisPage() {
               </div>
             )}
 
+            {/* Loading extracted data — extraction complete but report not yet in state */}
+            {jobStatus?.status === 'extraction_complete' && !report && (
+              <div className="bg-surface border border-border rounded p-8 flex items-center justify-center gap-4">
+                <span className="material-symbols-outlined text-[22px] animate-spin" style={{ color: 'var(--color-brand-accent)' }}>autorenew</span>
+                <div>
+                  <p className="text-body-sm font-body-sm text-on-surface font-semibold">Loading extracted accounts…</p>
+                  <p className="text-[11px] font-mono text-outline mt-0.5">Agent 1 complete — fetching results</p>
+                </div>
+              </div>
+            )}
+
             {/* Error state */}
             {jobStatus?.status === 'failed' && (
               <div className="bg-surface border border-risk-high/30 rounded p-6"
@@ -797,12 +826,12 @@ export default function AnalysisPage() {
             {analyzerData && (jobStatus?.status === 'analysis_complete' || jobStatus?.status === 'completed') && (
               <>
                 {/* ── Row 1: Financial health + smart KPI cards ── */}
-                <div className={`grid grid-cols-2 gap-3 ${analyzerData.fund_analysis?.is_investment_fund && analyzerData.fund_analysis.nav_reconciliation?.closing_nav != null ? 'md:grid-cols-5' : 'md:grid-cols-4'}`}>
+                <div className={`grid grid-cols-2 gap-3 ${row1GridCols}`}>
                   {/* AUM — investment funds only */}
-                  {analyzerData.fund_analysis?.is_investment_fund && analyzerData.fund_analysis.nav_reconciliation?.closing_nav != null && (
+                  {isFundWithNav && (
                     <MetricCard
                       label="AUM — Patrimonio Neto"
-                      value={`${analyzerData.fund_analysis.nav_reconciliation.closing_nav.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} MM`}
+                      value={`${analyzerData.fund_analysis!.nav_reconciliation!.closing_nav!.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} MM`}
                       color="var(--color-brand-accent)"
                       icon="account_balance_wallet"
                     />
@@ -815,38 +844,26 @@ export default function AnalysisPage() {
                     icon="monitor_heart"
                   />
                   {/* Smart KPI cards from executive_kpis.dashboard_metrics */}
-                  {(analyzerData.executive_kpis?.dashboard_metrics ?? []).slice(0, 3).map(m => (
+                  {dashboardMetrics.slice(0, 3).map(m => (
                     <MetricCard
                       key={m.key}
                       label={m.label}
                       value={m.value}
                       color={m.signal === 'positive' ? 'var(--color-success-low)' : m.signal === 'negative' ? 'var(--color-danger-soft)' : 'var(--color-warning-soft)'}
-                      icon={
-                        m.key === 'aum_growth'      ? 'trending_up'    :
-                        m.key === 'net_flow'         ? 'swap_vert'      :
-                        m.key === 'roe'              ? 'percent'        :
-                        m.key === 'net_margin'       ? 'payments'       :
-                        m.key === 'ebitda_margin'    ? 'bar_chart'      :
-                        m.key === 'earnings_quality' ? 'verified'       :
-                        m.key === 'concentration'    ? 'hub'            :
-                        m.key === 'aum'             ? 'account_balance_wallet': 'analytics'
-                      }
+                      icon={metricIcon(m.key)}
                     />
                   ))}
                 </div>
 
                 {/* ── Row 2: Secondary KPI cards + stat counters ── */}
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  {(analyzerData.executive_kpis?.dashboard_metrics ?? []).slice(3, 5).map(m => (
+                  {dashboardMetrics.slice(3, 5).map(m => (
                     <MetricCard
                       key={m.key}
                       label={m.label}
                       value={m.value}
                       color={m.signal === 'positive' ? 'var(--color-success-low)' : m.signal === 'negative' ? 'var(--color-danger-soft)' : 'var(--color-warning-soft)'}
-                      icon={
-                        m.key === 'concentration' ? 'hub' :
-                        m.key === 'aum'           ? 'account_balance_wallet' : 'analytics'
-                      }
+                      icon={metricIcon(m.key)}
                     />
                   ))}
                   <StatCounter label="High Materiality" value={analyzerData.high_materiality_accounts.length} unit="accounts" />
@@ -1001,11 +1018,6 @@ export default function AnalysisPage() {
                       </table>
                     </div>
                   </div>
-                )}
-
-                {/* ── Portfolio Concentration ── */}
-                {analyzerData.portfolio_concentration && (analyzerData.portfolio_concentration.top_accounts?.length ?? 0) > 1 && (
-                  <ConcentrationSection concentration={analyzerData.portfolio_concentration} />
                 )}
 
                 {/* ── Sheet-based Concentration (Activos / Instrumentos / Bancos) ── */}
@@ -1535,7 +1547,7 @@ function SheetConcentrationSection({ sc }: { sc: SheetConc }) {
           <div className="flex items-center gap-2">
             <span className="material-symbols-outlined text-[14px] text-outline">donut_small</span>
             <span className="text-[10px] font-mono text-on-surface-variant uppercase tracking-widest">
-              Concentración por hoja
+              Concentration / Sheet
             </span>
           </div>
         </div>

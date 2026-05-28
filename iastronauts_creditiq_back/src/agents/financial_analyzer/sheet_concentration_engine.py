@@ -91,7 +91,8 @@ _INVESTMENT_TYPE_TO_BUCKET: dict[str, str] = {
     "private_equity":"Instrumentos de Patrimonio",
     "trust_rights":  "Derechos Fiduciarios",
     "futures":       "Compromisos Futuros",
-    "fund":          _INSTRUMENT_OTHER,
+    # "fund" uses keyword fallback (see loop below); FIC participaciones in equity
+    # funds are typically classified as Instrumentos de Patrimonio in Colombian NIIF.
     "cash":          _INSTRUMENT_OTHER,
 }
 
@@ -118,6 +119,15 @@ def _classify_name(name: str, type_map: list[tuple[str, tuple[str, ...]]], defau
         if any(k in n for k in keywords):
             return label
     return default
+
+
+def _try_classify_name(name: str, type_map: list[tuple[str, tuple[str, ...]]]) -> str | None:
+    """Like _classify_name but returns None instead of a default when no keyword matches."""
+    n = _norm(name)
+    for label, keywords in type_map:
+        if any(k in n for k in keywords):
+            return label
+    return None
 
 
 # ── Output structures ─────────────────────────────────────────────────────────
@@ -206,6 +216,12 @@ def analyze_sheet_concentration(accounts: list[ExtractedAccount]) -> SheetConcen
         # Prefer investment_type from Agent 1 (more reliable than name keywords).
         if acc.investment_type and acc.investment_type in _INVESTMENT_TYPE_TO_BUCKET:
             inst_type = _INVESTMENT_TYPE_TO_BUCKET[acc.investment_type]
+        elif acc.investment_type == "fund":
+            # FIC participaciones: try keyword matching on account name first.
+            # Colombian equity funds are often classified as Instrumentos de Patrimonio
+            # in NIIF statements; default to that when no specific keyword matches.
+            keyword_match = _try_classify_name(acc.normalized_account_name, _INSTRUMENT_TYPE_MAP)
+            inst_type = keyword_match if keyword_match else "Instrumentos de Patrimonio"
         else:
             inst_type = _classify_name(
                 acc.normalized_account_name, _INSTRUMENT_TYPE_MAP, _INSTRUMENT_OTHER
