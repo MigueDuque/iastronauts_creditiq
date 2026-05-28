@@ -1,280 +1,119 @@
 # CreditIQ — Session Handoff Checkpoint
-**Date:** 2026-05-26  
-**Branch:** master  
-**Last job tested:** `018592e3-ea10-4908-b2f8-ec7e0fbc2baf`
+
+## Objective
+
+Improve the multi-agent financial analysis pipeline (CreditIQ) for the AI Innovation Challenge 2026 — BTG Pactual Colombia. The platform ingests Excel/PDF financial statements and produces NIIF-compliant reports using 5 sequential AWS Lambda agents.
 
 ---
 
-## Project Objective
+## Project Status
 
-**CreditIQ** is a multi-agent AI platform for automated financial analysis, built for the **AI Innovation Challenge 2026 — BTG Pactual Colombia**.
-
-It ingests financial statements (PDF/Excel/CSV) and produces:
-- NIIF note drafts
-- Variance analysis
-- Risk scoring
-- Executive summaries
-
-**Stack:** AWS SAM backend (Python 3.12, Lambda + Step Functions) + React 19 + Vite frontend.
-
-**Pipeline (5 agents):**
-```
-DocumentExtractor → FinancialAnalyzer → RiskScorer → ReportGenerator → RevisorInteligente
-```
-
----
-
-## Current Project Status
+**Backend:** AWS SAM serverless (Python 3.12) — `iastronauts_creditiq_back/`  
+**Frontend:** React 19 + Vite + TypeScript — `iastronauts_creditiq_front/`  
+**Local dev:** `uvicorn local_server:app --reload --port 8000` (set `LOCAL_DEV_BYPASS_SFN=true` in `.env`)
 
 | Agent | Status |
 |-------|--------|
-| 1 — DocumentExtractor | ✅ Implemented & working |
-| 2 — FinancialAnalyzer | ✅ Implemented — **BUG (see below)** |
-| 3 — RiskScorer | ⬜ Stub |
-| 4 — ReportGenerator | ⬜ Stub |
-| 5 — RevisorInteligente | ✅ Implemented |
-
-Local dev runs via `uvicorn local_server:app --reload --port 8000` with `LOCAL_DEV_BYPASS_SFN=true`.
+| 1 — DocumentExtractor | Implemented |
+| 2 — FinancialAnalyzer | Implemented |
+| 3 — RiskScorer | Stub |
+| 4 — ReportGenerator | Stub |
+| 5 — RevisorInteligente | Implemented |
 
 ---
 
-## What Was Done This Session
+## What We Worked On This Session
 
-### 1. Built the Macro Context Engine (new module)
+### Problem Identified
 
-**Location:** `iastronauts_creditiq_back/src/shared/macro_context/`
+Agent 1 extracts accounts from multi-sheet Excel files but was losing two critical pieces of information:
 
-**Files created:**
-| File | Purpose |
-|------|---------|
-| `__init__.py` | Public API: `from shared.macro_context import generate_macro_context` |
-| `engine.py` | Main orchestrator — fetches all 3 sources, classifies, builds output dict |
-| `tradingeconomics_client.py` | Colombian macro indicators (interest rate, inflation, GDP, unemployment). Requires `TRADINGECONOMICS_API_KEY` env var |
-| `gnews_client.py` | Top-headlines + targeted searches (ES + EN) for Colombian financial news. Requires `GNEWS_API_KEY` |
-| `yfinance_client.py` | 90-day market data for EC, CIB, GRUPOSURA.CL, GRUPOARGOS.CL, EEB.CL, GXG, COP=X, ^GSPC |
-| `macro_classifier.py` | Pure functions converting raw numbers → qualitative states (declining/stable/increasing, etc.) |
-| `signal_builder.py` | Builds 3–6 executive macro signals + market_assets_context entries |
-| `prompts/macro_context_prompt.txt` | LLM prompt for news relevance scoring |
+1. Which sheet each account came from — so Agent 2 had no way to distinguish a balance sheet summary line ("Instrumentos financieros = 39,521,260") from individual investment positions in the "Inversiones" detail sheet (Grupo Cibest, ISA, Ecopetrol, etc.) that sum to the same number.
 
-**Output schema** (returned as dict, stored in `AnalyzerOutput.macro_context`):
-```json
-{
-  "country": "Colombia",
-  "analysis_period": "2025-H1",
-  "macro_context": { "interest_rate_environment", "inflation_trend", "market_liquidity", "currency_environment", "economic_cycle" },
-  "market_context": { "equity_market_sentiment", "fixed_income_environment", "market_volatility", "investor_risk_appetite" },
-  "sector_context": [{ "sector", "trend" }],
-  "news_context": [{ "headline", "summary", "relevance" }],
-  "market_assets_context": [{ "ticker", "company", "trend", "market_signal" }],
-  "macro_signals": ["...executive signal strings..."],
-  "_data_availability": { "tradingeconomics", "gnews", "yfinance" }
-}
-```
+2. Whether a row is a total/subtotal — so `calculate_financial_totals()` was summing both the individual line items AND their "Total" row, causing double-counting in every ratio calculation (total_assets, total_liabilities, total_revenue, etc.).
 
-**Key design rules:**
-- Each data source fails silently (returns safe defaults) if API key is missing or call errors
-- No trading recommendations, no buy/sell signals, no fabricated values
-- `_data_availability` field shows which sources were live
-
-### 2. Integrated Macro Context into FinancialAnalyzer
-
-**Files modified:**
-- `src/agents/financial_analyzer/service.py` — added Step 14b: fetches macro context before LLM call (non-fatal if fails)
-- `src/agents/financial_analyzer/llm_reasoning.py` — added `macro_context` param to `run_llm_analysis` and `_build_user_prompt`; injects compact macro summary + top 3 news headlines into the LLM prompt; added constraint rule #7 (LLM must use macro as backdrop only, not invent values)
-- `src/shared/models/analyzer.py` — added `macro_context: dict = {}` field to `AnalyzerOutput` so it flows to downstream agents
-
-### 3. Fixed Analysis Bugs in Macro Context Clients
-
-After analysis of all 3 clients, these bugs were found and fixed:
-
-**GNews:**
-- Removed `country=co` from `/search` endpoint (was blocking Reuters/Bloomberg/FT international coverage of Colombia)
-- Added 4 English-language targeted queries (`_COLOMBIA_QUERIES_EN`) alongside the 6 Spanish ones
-
-**yfinance:**
-- Removed `ISA.CL` ticker (ISA was delisted after Ecopetrol acquisition in 2022)
-- Added `EEB.CL` (Empresa de Energía de Bogotá) as live infrastructure replacement
-
-**TradingEconomics:**
-- Removed unused `_COLOMBIA_INDICATORS` constant (dead code)
-- Fixed wrong fallback: `row.get("LatestValue") or row.get("LastUpdate")` — `LastUpdate` is a date string, not a number; removed it
-
-**engine.py:**
-- Removed unused `import os`
-
-### 4. Requirements & Documentation Sync
-
-- `requirements.txt` (root dev reference) — added `yfinance>=0.2.40` and `tradingeconomics==4.5.10` (was out of sync with `src/requirements.txt`)
-- `.env.example` — added `GNEWS_API_KEY` and `TRADINGECONOMICS_API_KEY` with explanatory comments
+The test file `test_files/BTG_P.ACCIONES_EEFF_2025-06-30.xlsx` has 18 sheets with this exact pattern — e.g., "Efectivo" detail sheet (3 banks + Total=262131) AND "Estado Situacion Financiera" also has Efectivo=262131. Without is_total, both the 3 bank lines AND the total get summed = 2x the real value.
 
 ---
 
-## Active Bug — FinancialAnalyzer LLM Failure
+## Files Changed
 
-### Symptom
-```
-llm_failed | job=018592e3-ea10-4908-b2f8-ec7e0fbc2baf error=RetryError[<Future at 0x2bfd89f3fd0 state=finished raised Exception>]
-```
+### 1. `src/shared/models/extractor.py`
+Added two fields to `ExtractedAccount`:
+- `source_sheet: str | None = None` — Excel sheet name where this row was found (None for PDF/CSV)
+- `is_total: bool = False` — True when this row is a sum/subtotal row; skip when re-summing categories
 
-The FinancialAnalyzer agent fails at the LLM qualitative reasoning step (Step 15). Tenacity retries 3 times, all fail.
+### 2. `src/agents/document_extractor/handler.py`
+- Inline fallback prompt (`_EXTRACTION_SYSTEM_PROMPT_FALLBACK`): Added two new instruction blocks teaching the LLM to read `=== Hoja: <name> ===` markers (already emitted by `extract_excel()`) and copy the sheet name into `source_sheet`; and to detect total rows by keywords and set `is_total: true`
+- `_build_accounts()`: Reads `source_sheet` and `is_total` from the LLM JSON response
 
-**Important behavior observed:** When the user does something in the GUI and reloads the job, it works — and the extraction JSON (`extractor_output.json`) IS in S3 correctly. So:
-- Agent 1 (DocumentExtractor) completed successfully
-- The extracted data is persisted in S3
-- The failure is specifically in Agent 2's LLM call
+### 3. `src/agents/financial_analyzer/ratio_engine.py`
+- `AccountVariation` dataclass gains `source_sheet` and `is_total` fields (propagated through all 13 engines)
+- `calculate_account_variation()` copies them from `ExtractedAccount`
+- `calculate_financial_totals()` now skips accounts where `is_total=True` at the top of the loop
 
-### Root Cause (diagnosed but not yet fixed)
+### 4. `src/shared/financial_math.py`
+Same `is_total` skip guard added to:
+- `calculate_financial_ratios()`
+- `classify_current_noncurrent()`
+- `determine_materiality_threshold()`
 
-The partial LLM output in the error log shows the JSON was cut off mid-string:
-```
-"evidence_sources": [
-  "Total   ← truncated here
-```
+### 5. `src/agents/system_pompts/01_prompt_agent_extractor.md`
+- `source_sheet` and `is_total` added to the accounts JSON schema
+- Full instruction blocks for both fields with concrete examples from BTG sheet names
+- Already uploaded to S3: `iastronauts-creditiq-us-east-1-dev/instructions/prompts/01_prompt_agent_extractor.md`
 
-This is a **`max_tokens` output limit exhaustion**. The `_invoke` function in `llm_reasoning.py` calls `llm.generate_json()` with **no `max_tokens` argument**, defaulting to `4096` in `LLMProvider`:
+---
 
-```python
-# llm_reasoning.py line 346-354
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
-def _invoke(system_prompt, user_prompt, llm, tenant_id, job_id) -> dict:
-    result = llm.generate_json(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        temperature=0.2,
-        tenant_id=tenant_id,
-        job_id=job_id,
-        # ← max_tokens NOT passed → defaults to 4096
-    )
-```
+## What Was Successful
 
-A large investment fund analysis with many accounts + fund_analysis + causal chains + earnings quality + concentration + macro context JSON easily exceeds 4096 output tokens → JSON truncated → parse fails → all 3 retries fail with same truncation → `RetryError`.
+- Identified the root cause of wrong ratio calculations (double-counting totals)
+- Added source_sheet and is_total cleanly at the model level — backward compatible (both default to None/False so existing data is unaffected)
+- The extract_excel() function already emitted sheet name markers, so the LLM has all the context it needs without any change to Excel parsing logic
+- AccountVariation now carries sheet/total metadata through the entire Agent 2 engine chain
+- S3 prompt uploaded; next run will use the updated prompt automatically
 
-### Fix Required
+---
 
-In `src/agents/financial_analyzer/llm_reasoning.py`, change `_invoke` to pass a higher `max_tokens`. The `LLMProvider` docstring says up to 16384 is supported for large JSON arrays:
+## What Was Not Tried / Next Steps
 
-```python
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
-def _invoke(system_prompt: str, user_prompt: str, llm: LLMProvider, tenant_id: str, job_id: str) -> dict:
-    result = llm.generate_json(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        temperature=0.2,
-        tenant_id=tenant_id,
-        job_id=job_id,
-        max_tokens=16384,   # ← ADD THIS
-    )
-    return result if isinstance(result, dict) else {}
-```
+1. End-to-end test — Run a full analysis with the BTG Excel file and verify that extracted accounts now have source_sheet populated and is_total=true on Total rows. Check that ratios no longer double-count.
 
-**Why 16384:** Investment fund analyses with 30-50 accounts, each with `possible_causes`, `executive_insight`, `evidence_sources`, plus the global `executive_narrative` block, routinely exceed 4096 tokens. 16384 is the max supported by the provider wrapper and matches what DocumentExtractor already uses for large extractions.
+2. Agent 2 LLM awareness of totals — The is_total flag stops double-counting in math, but the LLM sub-agents (movement, causality, thesis, narrative) receive a text digest. Consider flagging is_total accounts in the digest so the LLM treats them as section summaries, not independent accounts.
+
+3. Agent 2 cross-sheet deduplication — The same account can appear in both a detail sheet and the balance sheet summary. Both are currently kept in analysis_results (intentional), but this may confuse the LLM. Future improvement: mark the summary version as is_total=true so only detail versions drive narrative analysis.
+
+4. Implement Agent 3 (RiskScorer) — Currently a stub. Needs NIIF validation rules, materiality detection, hallucination checks.
+
+5. Implement Agent 4 (ReportGenerator) — Currently a stub. Needs LLM narrative generation for executive/board summaries and NIIF note drafts.
 
 ---
 
 ## Key Files Reference
 
-### Backend
-```
-iastronauts_creditiq_back/
-├── src/
-│   ├── agents/
-│   │   ├── financial_analyzer/
-│   │   │   ├── service.py          ← orchestrator (17 steps); Step 14b = macro fetch
-│   │   │   ├── llm_reasoning.py    ← _invoke (BUG: max_tokens=4096 default)
-│   │   │   ├── handler.py
-│   │   │   ├── ratio_engine.py
-│   │   │   ├── materiality_engine.py
-│   │   │   ├── trend_engine.py
-│   │   │   ├── anomaly_detector.py
-│   │   │   ├── variation_reliability.py
-│   │   │   ├── causality_engine.py
-│   │   │   ├── earnings_quality.py
-│   │   │   ├── concentration_engine.py
-│   │   │   ├── niif18_engine.py
-│   │   │   └── fund_engine.py
-│   │   └── document_extractor/handler.py
-│   └── shared/
-│       ├── macro_context/          ← NEW module (this session)
-│       │   ├── engine.py
-│       │   ├── gnews_client.py
-│       │   ├── yfinance_client.py
-│       │   ├── tradingeconomics_client.py
-│       │   ├── macro_classifier.py
-│       │   ├── signal_builder.py
-│       │   └── prompts/macro_context_prompt.txt
-│       ├── models/
-│       │   └── analyzer.py         ← added macro_context: dict = {} field
-│       ├── llm_provider.py
-│       ├── financial_math.py
-│       └── s3_report_store.py
-├── requirements.txt                ← synced (yfinance + tradingeconomics added)
-├── src/requirements.txt            ← canonical Lambda deps (source of truth)
-├── .env.example                    ← updated with GNEWS_API_KEY, TRADINGECONOMICS_API_KEY
-└── local_server.py
-```
-
-### Frontend
-```
-iastronauts_creditiq_front/src/
-├── pages/AnalysisPage.tsx
-├── pages/DashboardPage.tsx
-├── pages/JobResultPage.tsx
-└── components/
-    ├── UploadDialog.tsx
-    ├── AiReasoningPipeline.tsx
-    └── AppLayout.tsx
-```
+| Path | Purpose |
+|------|---------|
+| src/shared/models/extractor.py | ExtractedAccount model — source_sheet, is_total added here |
+| src/agents/document_extractor/handler.py | Agent 1 — extraction logic + inline fallback prompt |
+| src/agents/system_pompts/01_prompt_agent_extractor.md | Agent 1 S3 prompt (source of truth at runtime) |
+| src/agents/financial_analyzer/ratio_engine.py | Agent 2 math — calculate_financial_totals() is the key function |
+| src/agents/financial_analyzer/service.py | Agent 2 orchestration — calls all 13 engines in sequence |
+| src/shared/financial_math.py | Legacy math module — also patched with is_total guard |
+| local_server.py | FastAPI local dev wrapper |
+| test_files/BTG_P.ACCIONES_EEFF_2025-06-30.xlsx | Reference test file — 18 sheets, investment fund EEFF |
+| agents_outputs_test/financial_analyzer_response.json | Latest Agent 2 output for inspection |
 
 ---
 
-## Environment Variables
+## Environment
 
 ```
-# Core
 LLM_PROVIDER=anthropic_api
 ANTHROPIC_API_KEY=sk-ant-...
-AWS_REGION=us-east-1
-STAGE=dev
 MAIN_BUCKET=iastronauts-creditiq-us-east-1-dev
 LOCAL_DEV_BYPASS_SFN=true
-
-# Macro Context Engine (new — all optional, missing key = source silently skipped)
-GNEWS_API_KEY=...          ← user already has this key
-TRADINGECONOMICS_API_KEY=... ← needs to be set if TE is desired
-# yfinance needs no API key
+AWS_REGION=us-east-1
+STAGE=dev
 ```
 
----
-
-## Next Steps (Priority Order)
-
-1. **[CRITICAL] Fix FinancialAnalyzer `max_tokens` bug**
-   - File: `src/agents/financial_analyzer/llm_reasoning.py`, line ~347
-   - Change: add `max_tokens=16384` to the `_invoke` → `llm.generate_json()` call
-   - Test: rerun the failing job `018592e3-ea10-4908-b2f8-ec7e0fbc2baf` (or new job with same files)
-
-2. **Implement RiskScorer (Agent 3)**
-   - Currently a stub — passes through analyzer results with zero-value scoring fields
-   - Needs: NIIF rule validation, materiality detection, hallucination check, compliance flags
-
-3. **Implement ReportGenerator (Agent 4)**
-   - Currently a stub — saves to S3 but no LLM narrative
-   - Needs: LLM executive/board summary generation, NIIF note drafts, RAG from `instructions/template_reporte_final_eeff.md`
-
-4. **Validate Macro Context Engine end-to-end**
-   - After fixing the LLM bug, confirm `macro_context` field appears in S3 `analyzer_output.json`
-   - Confirm news headlines appear in the output (they should be in `macro_context.news_context`)
-   - Check `_data_availability` flags to see which sources returned data
-
-5. **Add `TRADINGECONOMICS_API_KEY` to `.env` if account available**
-   - Without it, TE client is silently disabled and all macro classifier functions fall back to `"unknown"` or heuristics
-
----
-
-## Notes for Next Session
-
-- The pipeline's 3-phase local flow: Upload → `/analyses` (Agent 1) → `/analyses/{id}/continue` (Agent 2) → `/analyses/{id}/continue` (Agents 3+4)
-- Status values: `pending | processing | extraction_complete | analysis_complete | completed | failed | cancelled`
-- Job state is cached in `localStorage` under `creditiq_analysis_id`, `creditiq_status`, `creditiq_report`
-- S3 bucket: `iastronauts-creditiq-us-east-1-dev`
-- The macro context engine is fully isolated — if any source fails, the analysis continues without it (non-fatal by design)
+Local server: uvicorn local_server:app --reload --port 8000 (run from iastronauts_creditiq_back/)

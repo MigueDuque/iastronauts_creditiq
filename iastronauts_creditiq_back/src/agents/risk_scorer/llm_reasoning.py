@@ -9,27 +9,56 @@ Output: 3-paragraph risk summary in Spanish + structured risk recommendations.
 
 from __future__ import annotations
 
-import json
 import logging
+import os
 from typing import Optional
 
 from shared.llm_provider import LLMProvider
+from shared.s3_instructions import load_text
 
 logger = logging.getLogger("risk_scorer.llm_reasoning")
 
-_RISK_SYSTEM_PROMPT = """Eres un analista de riesgo financiero senior especializado en entidades de inversión colectiva
-y empresas corporativas latinoamericanas. Tu función es redactar evaluaciones de riesgo ejecutivas,
-concisas y basadas en cifras concretas.
+_PROMPT_S3_KEY = "instructions/prompts/03_prompt_agent_risk-analyzer.md"
+_LOCAL_PROMPT_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "system_pompts",
+                 "03_prompt_agent_risk-analyzer.md")
+)
+_INLINE_FALLBACK = (
+    "Eres un analista de riesgo financiero senior especializado en fondos de inversión colectiva "
+    "y empresas corporativas latinoamericanas bajo NIIF. Redacta evaluaciones de riesgo ejecutivas "
+    "basadas exclusivamente en los datos pre-calculados recibidos. "
+    "Responde ÚNICAMENTE con JSON válido con los campos: "
+    "risk_narrative_paragraph1, risk_narrative_paragraph2, risk_narrative_paragraph3, "
+    "risk_recommendations (lista), risk_headline."
+)
 
-INSTRUCCIONES:
-1. Redacta exclusivamente en español.
-2. Usa los datos pre-calculados que se te proporcionan — NO realices aritmética ni inventes cifras.
-3. Estructura tu respuesta como JSON válido con exactamente los campos indicados.
-4. El tono debe ser profesional, directo y orientado a la junta directiva o inversionistas institucionales.
-5. Cada párrafo debe tener entre 3 y 5 oraciones. No uses viñetas dentro de los párrafos.
-6. Las recomendaciones deben ser acciones concretas, no declaraciones vagas.
-7. No repitas las mismas cifras en más de un párrafo.
-"""
+_prompt_cache: str | None = None
+
+
+def _get_system_prompt() -> str:
+    global _prompt_cache
+    if _prompt_cache is not None:
+        return _prompt_cache
+    # 1. Try S3
+    s3_text = load_text(_PROMPT_S3_KEY, fallback="")
+    if s3_text:
+        _prompt_cache = s3_text
+        logger.info("risk_prompt | source=s3 chars=%d", len(s3_text))
+        return _prompt_cache
+    # 2. Try local file (works in local dev / unit tests)
+    try:
+        with open(_LOCAL_PROMPT_PATH, encoding="utf-8") as f:
+            local_text = f.read()
+        if len(local_text) > 100:
+            _prompt_cache = local_text
+            logger.info("risk_prompt | source=local chars=%d", len(local_text))
+            return _prompt_cache
+    except OSError:
+        pass
+    # 3. Inline fallback — never blocks the pipeline
+    logger.warning("risk_prompt | source=inline_fallback")
+    _prompt_cache = _INLINE_FALLBACK
+    return _prompt_cache
 
 _RISK_USER_TEMPLATE = """
 Analiza el perfil de riesgo financiero de {company_name} para el período {period}.
@@ -131,7 +160,7 @@ def generate_risk_narrative(
 
     try:
         result = llm.generate_json(
-            system_prompt=_RISK_SYSTEM_PROMPT,
+            system_prompt=_get_system_prompt(),
             user_prompt=user_prompt,
             temperature=0.2,
             tenant_id=tenant_id,

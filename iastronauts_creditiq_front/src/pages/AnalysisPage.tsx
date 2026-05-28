@@ -210,6 +210,22 @@ interface AnalyzerOutput {
   }
   high_materiality_accounts: string[]
   niif_notes_required: string[]
+  sheet_concentration?: {
+    asset_total: number
+    asset_breakdown: Array<{ name: string; value: number; pct: number }>
+    asset_available: boolean
+    instrument_total: number
+    instrument_breakdown: Array<{
+      instrument_type: string
+      total: number
+      pct: number
+      emisores: Array<{ name: string; value: number; pct: number }>
+    }>
+    instrument_available: boolean
+    bank_total: number
+    bank_breakdown: Array<{ name: string; value: number; pct: number }>
+    bank_available: boolean
+  }
   financial_ratios: {
     totals: {
       total_assets: number
@@ -813,7 +829,7 @@ export default function AnalysisPage() {
                         m.key === 'ebitda_margin'    ? 'bar_chart'      :
                         m.key === 'earnings_quality' ? 'verified'       :
                         m.key === 'concentration'    ? 'hub'            :
-                        m.key === 'current_ratio'    ? 'account_balance': 'analytics'
+                        m.key === 'aum'             ? 'account_balance_wallet': 'analytics'
                       }
                     />
                   ))}
@@ -829,7 +845,7 @@ export default function AnalysisPage() {
                       color={m.signal === 'positive' ? 'var(--color-success-low)' : m.signal === 'negative' ? 'var(--color-danger-soft)' : 'var(--color-warning-soft)'}
                       icon={
                         m.key === 'concentration' ? 'hub' :
-                        m.key === 'current_ratio' ? 'account_balance' : 'analytics'
+                        m.key === 'aum'           ? 'account_balance_wallet' : 'analytics'
                       }
                     />
                   ))}
@@ -990,6 +1006,15 @@ export default function AnalysisPage() {
                 {/* ── Portfolio Concentration ── */}
                 {analyzerData.portfolio_concentration && (analyzerData.portfolio_concentration.top_accounts?.length ?? 0) > 1 && (
                   <ConcentrationSection concentration={analyzerData.portfolio_concentration} />
+                )}
+
+                {/* ── Sheet-based Concentration (Activos / Instrumentos / Bancos) ── */}
+                {analyzerData.sheet_concentration && (
+                  analyzerData.sheet_concentration.asset_available ||
+                  analyzerData.sheet_concentration.instrument_available ||
+                  analyzerData.sheet_concentration.bank_available
+                ) && (
+                  <SheetConcentrationSection sc={analyzerData.sheet_concentration} />
                 )}
 
                 {/* ── NIIF 18 compliance flags ── */}
@@ -1459,6 +1484,137 @@ function ConcentrationSection({ concentration }: {
               </div>
             )
           })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+type SheetConc = NonNullable<AnalyzerOutput['sheet_concentration']>
+
+function SheetConcentrationSection({ sc }: { sc: SheetConc }) {
+  const tabs = [
+    { key: 'asset',      label: 'Activos',      icon: 'account_balance',  available: sc.asset_available },
+    { key: 'instrument', label: 'Instrumentos',  icon: 'candlestick_chart', available: sc.instrument_available },
+    { key: 'bank',       label: 'Bancos',        icon: 'corporate_fare',   available: sc.bank_available },
+  ].filter(t => t.available)
+
+  const [active, setActive] = useState(tabs[0]?.key ?? 'asset')
+
+  if (tabs.length === 0) return null
+
+  const barColor = 'var(--color-brand-accent)'
+
+  function BarRow({ name, value, pct, maxPct, indent = false }: {
+    name: string; value: number; pct: number; maxPct: number; indent?: boolean
+  }) {
+    return (
+      <div className={`flex items-center gap-3 py-2 px-5 border-b border-border last:border-b-0 ${indent ? 'pl-10' : ''}`}>
+        {indent && (
+          <span className="text-[10px] font-mono text-outline shrink-0">└─</span>
+        )}
+        <span className="text-[12px] text-on-surface flex-1 min-w-0 truncate" title={name}>{name}</span>
+        <div className="w-24 h-1.5 bg-surface-container rounded overflow-hidden shrink-0">
+          <div className="h-full rounded" style={{ width: `${(pct / maxPct) * 100}%`, background: barColor, opacity: 0.65 }} />
+        </div>
+        <span className="text-[11px] font-mono w-10 text-right shrink-0" style={{ color: barColor }}>
+          {pct.toFixed(1)}%
+        </span>
+        <span className="text-[10px] font-mono text-outline w-32 text-right shrink-0">
+          {value.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} MM
+        </span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="bg-surface border border-border rounded overflow-hidden">
+      {/* Header + tabs */}
+      <div className="border-b border-border bg-surface-container-low">
+        <div className="px-5 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[14px] text-outline">donut_small</span>
+            <span className="text-[10px] font-mono text-on-surface-variant uppercase tracking-widest">
+              Concentración por hoja
+            </span>
+          </div>
+        </div>
+        <div className="flex border-t border-border">
+          {tabs.map(t => (
+            <button
+              key={t.key}
+              onClick={() => setActive(t.key)}
+              className={`flex items-center gap-1.5 px-4 py-2.5 text-[11px] font-mono transition-colors border-r border-border
+                ${active === t.key ? 'text-on-surface bg-surface' : 'text-outline hover:text-on-surface-variant'}`}
+            >
+              <span className="material-symbols-outlined text-[12px]">{t.icon}</span>
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Asset view */}
+      {active === 'asset' && sc.asset_available && (
+        <div>
+          <div className="px-5 py-2 border-b border-border flex items-center justify-between">
+            <span className="text-[10px] font-mono text-outline">Activos del Balance General</span>
+            <span className="text-[10px] font-mono text-outline">
+              Total: {sc.asset_total.toLocaleString('en-US', { maximumFractionDigits: 0 })} MM
+            </span>
+          </div>
+          {sc.asset_breakdown.map(r => (
+            <BarRow key={r.name} name={r.name} value={r.value} pct={r.pct}
+              maxPct={sc.asset_breakdown[0]?.pct || 1} />
+          ))}
+        </div>
+      )}
+
+      {/* Instrument view */}
+      {active === 'instrument' && sc.instrument_available && (
+        <div>
+          <div className="px-5 py-2 border-b border-border flex items-center justify-between">
+            <span className="text-[10px] font-mono text-outline">Tipos de instrumento · Emisores</span>
+            <span className="text-[10px] font-mono text-outline">
+              Total: {sc.instrument_total.toLocaleString('en-US', { maximumFractionDigits: 0 })} MM
+            </span>
+          </div>
+          {sc.instrument_breakdown.map(ib => (
+            <div key={ib.instrument_type}>
+              {/* Type header row */}
+              <div className="flex items-center gap-3 px-5 py-2 border-b border-border bg-surface-container-low/50">
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded shrink-0"
+                      style={{ color: barColor, background: `${barColor}18`, border: `1px solid ${barColor}30` }}>
+                  {ib.pct.toFixed(1)}%
+                </span>
+                <span className="text-[12px] font-semibold text-on-surface flex-1">{ib.instrument_type}</span>
+                <span className="text-[10px] font-mono text-outline">
+                  {ib.total.toLocaleString('en-US', { maximumFractionDigits: 0 })} MM
+                </span>
+              </div>
+              {/* Emisor rows */}
+              {ib.emisores.map(e => (
+                <BarRow key={e.name} name={e.name} value={e.value} pct={e.pct}
+                  maxPct={ib.emisores[0]?.pct || 1} indent />
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Bank view */}
+      {active === 'bank' && sc.bank_available && (
+        <div>
+          <div className="px-5 py-2 border-b border-border flex items-center justify-between">
+            <span className="text-[10px] font-mono text-outline">Efectivo por entidad bancaria</span>
+            <span className="text-[10px] font-mono text-outline">
+              Total: {sc.bank_total.toLocaleString('en-US', { maximumFractionDigits: 0 })} MM
+            </span>
+          </div>
+          {sc.bank_breakdown.map(r => (
+            <BarRow key={r.name} name={r.name} value={r.value} pct={r.pct}
+              maxPct={sc.bank_breakdown[0]?.pct || 1} />
+          ))}
         </div>
       )}
     </div>

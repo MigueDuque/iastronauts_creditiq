@@ -106,3 +106,7 @@ class AnalyzerOutput(BaseModel):
     earnings_sustainability: str = ""
     # Deterministic cross-statement diagnostic signals from financial_diagnostics_engine
     financial_diagnostics: dict = {}
+
+    # ── Sheet-based Concentration (Activos / Instrumentos / Bancos) ──────────
+    # Populated from source_sheet metadata; empty dict when source lacks sheet data
+    sheet_concentration: dict = {}
