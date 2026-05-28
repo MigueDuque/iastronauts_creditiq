@@ -33,7 +33,22 @@ def calculate_executive_kpis(
     total_assets  = float(totals.get("total_assets",  0) or 0)
     total_revenue = float(totals.get("total_revenue", 0) or 0)
 
-    roe_pct = round((net_income / total_equity) * 100, 2) if total_equity > 0 else 0.0
+    # For investment funds: use investment_return / closing_nav so ROE matches
+    # "Utilidad del período / Total activo neto de inversionistas" from the balance sheet.
+    # The generic formula (net_income / total_equity) is wrong for funds because:
+    #   - net_income is computed from P&L accounts, not the balance-sheet "Utilidad del período"
+    #   - total_equity excludes "utilidad del período" to prevent double-counting in corporate
+    #     statements, which causes the denominator to be understated for funds.
+    _nav_rec = (fund_analysis or {}).get("nav_reconciliation") or {}
+    _invest_return = _nav_rec.get("investment_return")
+    _closing_nav   = _nav_rec.get("closing_nav")
+    _is_fund = bool(fund_analysis and fund_analysis.get("is_investment_fund"))
+
+    if _is_fund and _invest_return is not None and _closing_nav and float(_closing_nav) > 0:
+        roe_pct = round(float(_invest_return) / float(_closing_nav) * 100, 2)
+    else:
+        roe_pct = round((net_income / total_equity) * 100, 2) if total_equity > 0 else 0.0
+
     roa_pct = round((net_income / total_assets) * 100, 2) if total_assets > 0 else 0.0
 
     resultado_operativo = subtotals.get("resultado_operativo")
@@ -84,7 +99,7 @@ def calculate_executive_kpis(
     if fund_analysis and fund_analysis.get("is_investment_fund"):
         kpis["fund"] = _build_fund_kpis(fund_analysis)
 
-    kpis["dashboard_metrics"] = _build_dashboard_metrics(kpis, fund_analysis)
+    kpis["dashboard_metrics"] = _build_dashboard_metrics(kpis, fund_analysis, total_assets)
     return kpis
 
 
@@ -130,7 +145,7 @@ def _signal_inv(value: float, low_good: float, high_bad: float) -> str:
     return "neutral"
 
 
-def _build_dashboard_metrics(kpis: dict, fund_analysis: dict | None) -> list[dict]:
+def _build_dashboard_metrics(kpis: dict, fund_analysis: dict | None, total_assets: float = 0.0) -> list[dict]:
     """
     Build ordered list of ≤6 dashboard KPI cards for UI display.
     Each card has: key, label, value (formatted string), signal ('positive'|'neutral'|'negative').
@@ -204,13 +219,18 @@ def _build_dashboard_metrics(kpis: dict, fund_analysis: dict | None) -> list[dic
         "signal": _signal_inv(top1, 20.0, 40.0),
     })
 
-    # 5. Liquidity ratio
-    curr_ratio = float(kpis.get("liquidity", {}).get("razon_corriente", 0) or 0)
+    # 5. AUM — for funds use closing NAV; for others use total assets
+    nav = (fund_analysis or {}).get("nav_reconciliation") or {}
+    closing_nav = nav.get("closing_nav")
+    if is_fund and closing_nav is not None:
+        aum_val = float(closing_nav)
+    else:
+        aum_val = total_assets
     cards.append({
-        "key":    "current_ratio",
-        "label":  "Razón Corriente",
-        "value":  f"{curr_ratio:.2f}x",
-        "signal": _signal(curr_ratio, 1.5, 1.0),
+        "key":    "aum",
+        "label":  "AUM",
+        "value":  f"{aum_val:,.0f} MM",
+        "signal": "positive" if aum_val > 0 else "neutral",
     })
 
     return cards[:6]

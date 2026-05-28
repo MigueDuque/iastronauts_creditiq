@@ -171,7 +171,9 @@ Devuelve ÚNICAMENTE un JSON con esta estructura:
       "category": "assets" | "liabilities" | "equity" | "revenue" | "expense" | "other",
       "current_value": número en COP MM,
       "previous_value": número en COP MM o null,
-      "confidence_score": 0.0 a 1.0
+      "confidence_score": 0.0 a 1.0,
+      "source_sheet": "nombre de la hoja Excel o null si es PDF/CSV",
+      "is_total": true | false
     }
   ]
 }
@@ -179,6 +181,39 @@ Devuelve ÚNICAMENTE un JSON con esta estructura:
 fund_metadata debe incluirse siempre. Si el documento NO es un fondo de inversión, devuelve
 todos sus campos como null. Si SÍ es un fondo, extrae los datos de la primera página (carátula,
 encabezado o sección de información general del fondo).
+
+═══════════════════════════════════════════════════════
+CAMPO source_sheet (OBLIGATORIO para Excel)
+═══════════════════════════════════════════════════════
+
+Cada vez que el texto incluya un marcador "=== Hoja: <nombre> ===" antes de una tabla,
+TODOS los registros extraídos de esa tabla deben llevar:
+  "source_sheet": "<nombre exacto de la hoja>"
+
+Para documentos PDF o CSV donde no hay marcador de hoja, usar:
+  "source_sheet": null
+
+═══════════════════════════════════════════════════════
+CAMPO is_total — IDENTIFICACIÓN DE FILAS RESUMEN (CRÍTICO)
+═══════════════════════════════════════════════════════
+
+Marcar "is_total": true cuando la fila del documento es una fila de SUMA o SUBTOTAL —
+es decir, cuando su valor es la suma de otras filas de la misma tabla o sección.
+
+Señales típicas de que una fila ES un total (is_total: true):
+  - El raw_account_name empieza o contiene: "Total", "TOTAL", "Subtotal", "SUBTOTAL",
+    "Suma", "Total activos", "Total pasivos", "Total patrimonio", "Total activo neto",
+    "Efectivo neto", "Total instrumentos", "Total activos financieros".
+  - Es la última fila de una sección y su valor coincide con la suma de las filas anteriores.
+  - En hojas de detalle (ej. Inversiones, Efectivo, Cuentas por Pagar), la fila "Total"
+    al final de la tabla.
+
+Marcar "is_total": false para todas las demás filas (líneas individuales de cuenta,
+partidas de inversión específicas, gastos individuales, etc.).
+
+IMPORTANTE: Extraer TANTO las filas de detalle COMO las filas de total cuando sean
+materiales — ambas son útiles para análisis. El campo is_total permite al Agente 2
+evitar doble conteo al calcular sumas por categoría.
 
 ═══════════════════════════════════════════════════════
 REGLAS DE SELECCIÓN DE COLUMNAS (CRÍTICO)
@@ -325,6 +360,9 @@ def _build_accounts(raw_items: list[dict], source_file: str) -> tuple[list[Extra
             previous_value = _coerce_zero_previous_to_null(
                 category, normalized_name, current_value, prev_float
             )
+            raw_sheet = item.get("source_sheet")
+            raw_inv_type = item.get("investment_type")
+            raw_issuer = item.get("issuer_name")
             accounts.append(ExtractedAccount(
                 account_id=f"act-{i+1:03d}",   # re-indexed globally after merge
                 raw_account_name=str(item.get("raw_account_name", "")),
@@ -335,6 +373,10 @@ def _build_accounts(raw_items: list[dict], source_file: str) -> tuple[list[Extra
                 currency="COP",
                 confidence_score=min(1.0, max(0.0, float(item.get("confidence_score", 0.5)))),
                 source_file=source_file,
+                source_sheet=str(raw_sheet) if raw_sheet else None,
+                is_total=bool(item.get("is_total", False)),
+                investment_type=str(raw_inv_type) if raw_inv_type else None,
+                issuer_name=str(raw_issuer) if raw_issuer else None,
             ))
         except (TypeError, ValueError) as e:
             warnings.append(f"Cuenta {i + 1} de '{source_file}' omitida — error de parseo: {e}")

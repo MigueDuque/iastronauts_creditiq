@@ -18,9 +18,10 @@ const EXTRACTION_STEPS = [
 ] as const
 
 const ANALYZER_STEPS = [
-  { label: 'Loading historical reports & enriching accounts',       start: 0  },
-  { label: 'Computing ratios, NIIF 18 subtotals & anomaly flags',   start: 4  },
-  { label: 'LLM qualitative analysis & risk classification',        start: 10 },
+  { label: 'Loading historical reports & enriching accounts',         start: 0  },
+  { label: 'Computing ratios, materiality & anomaly flags',           start: 5  },
+  { label: 'LLM sub-agents: Movement · Causality · Thesis',          start: 15 },
+  { label: 'Executive narrative & portfolio synthesis',               start: 50 },
 ] as const
 
 function stepState(idx: number, starts: readonly number[], elapsed: number): 'pending' | 'active' | 'done' {
@@ -192,6 +193,22 @@ interface AnalyzerOutput {
   }
   high_materiality_accounts: string[]
   niif_notes_required: string[]
+  sheet_concentration?: {
+    asset_total: number
+    asset_breakdown: Array<{ name: string; value: number; pct: number }>
+    asset_available: boolean
+    instrument_total: number
+    instrument_breakdown: Array<{
+      instrument_type: string
+      total: number
+      pct: number
+      emisores: Array<{ name: string; value: number; pct: number }>
+    }>
+    instrument_available: boolean
+    bank_total: number
+    bank_breakdown: Array<{ name: string; value: number; pct: number }>
+    bank_available: boolean
+  }
   financial_ratios: {
     totals: {
       total_assets: number
@@ -479,6 +496,23 @@ export default function AnalysisPage() {
   const filtered   = catFilter === 'all' ? accounts : accounts.filter(a => a.category === catFilter)
   const anomalyCount = analyzerData?.analysis_results.filter(r => r.anomaly_detected).length ?? 0
 
+  // AUM is shown by the hardcoded Patrimonio Neto card for funds; earnings_quality removed as non-informative.
+  const dashboardMetrics = (analyzerData?.executive_kpis?.dashboard_metrics ?? [])
+    .filter(m => m.key !== 'aum' && m.key !== 'earnings_quality')
+  const isFundWithNav = !!(analyzerData?.fund_analysis?.is_investment_fund &&
+    analyzerData.fund_analysis.nav_reconciliation?.closing_nav != null)
+  const row1ColCount = (isFundWithNav ? 2 : 1) + Math.min(dashboardMetrics.length, 3)
+  const row1GridCols =
+    row1ColCount <= 3 ? 'md:grid-cols-3' :
+    row1ColCount === 4 ? 'md:grid-cols-4' : 'md:grid-cols-5'
+  const metricIcon = (key: string) =>
+    key === 'aum_growth'    ? 'trending_up' :
+    key === 'net_flow'      ? 'swap_vert'   :
+    key === 'roe'           ? 'percent'     :
+    key === 'net_margin'    ? 'payments'    :
+    key === 'ebitda_margin' ? 'bar_chart'   :
+    key === 'concentration' ? 'hub'         : 'analytics'
+
   const statusColor = {
     pending:              '#FFB020',
     processing:           '#56CCF2',
@@ -654,6 +688,17 @@ export default function AnalysisPage() {
               </div>
             )}
 
+            {/* Loading extracted data — extraction complete but report not yet in state */}
+            {jobStatus?.status === 'extraction_complete' && !report && (
+              <div className="bg-surface border border-border rounded p-8 flex items-center justify-center gap-4">
+                <span className="material-symbols-outlined text-[22px] animate-spin" style={{ color: 'var(--color-brand-accent)' }}>autorenew</span>
+                <div>
+                  <p className="text-body-sm font-body-sm text-on-surface font-semibold">Loading extracted accounts…</p>
+                  <p className="text-[11px] font-mono text-outline mt-0.5">Agent 1 complete — fetching results</p>
+                </div>
+              </div>
+            )}
+
             {/* Error state */}
             {jobStatus?.status === 'failed' && (
               <div className="bg-surface border border-risk-high/30 rounded p-6"
@@ -729,13 +774,18 @@ export default function AnalysisPage() {
             {analyzerData && (jobStatus?.status === 'analysis_complete' || jobStatus?.status === 'completed') && (
               <>
                 {/* ── Row 1: Financial health + smart KPI cards ── */}
-                <div className={`grid grid-cols-2 gap-3 ${analyzerData.fund_analysis?.is_investment_fund && analyzerData.fund_analysis.nav_reconciliation?.closing_nav != null ? 'md:grid-cols-5' : 'md:grid-cols-4'}`}>
+                <div className={`grid grid-cols-2 gap-3 ${row1GridCols}`}>
                   {/* AUM — investment funds only */}
-                  {analyzerData.fund_analysis?.is_investment_fund && analyzerData.fund_analysis.nav_reconciliation?.closing_nav != null && (
+                  {isFundWithNav && (
                     <MetricCard
                       label="AUM — Patrimonio Neto"
+<<<<<<< HEAD
                       value={`${analyzerData.fund_analysis.nav_reconciliation.closing_nav.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} MM`}
                       color="#2F80FF"
+=======
+                      value={`${analyzerData.fund_analysis!.nav_reconciliation!.closing_nav!.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} MM`}
+                      color="var(--color-brand-accent)"
+>>>>>>> d2ecef1a25da8d6722b5f9d735c648c320fd88bc
                       icon="account_balance_wallet"
                     />
                   )}
@@ -747,11 +797,12 @@ export default function AnalysisPage() {
                     icon="monitor_heart"
                   />
                   {/* Smart KPI cards from executive_kpis.dashboard_metrics */}
-                  {(analyzerData.executive_kpis?.dashboard_metrics ?? []).slice(0, 3).map(m => (
+                  {dashboardMetrics.slice(0, 3).map(m => (
                     <MetricCard
                       key={m.key}
                       label={m.label}
                       value={m.value}
+<<<<<<< HEAD
                       color={m.signal === 'positive' ? '#56F2C1' : m.signal === 'negative' ? '#FF4D6D' : '#FFB020'}
                       icon={
                         m.key === 'aum_growth'      ? 'trending_up'    :
@@ -763,22 +814,31 @@ export default function AnalysisPage() {
                         m.key === 'concentration'    ? 'hub'            :
                         m.key === 'current_ratio'    ? 'account_balance': 'analytics'
                       }
+=======
+                      color={m.signal === 'positive' ? 'var(--color-success-low)' : m.signal === 'negative' ? 'var(--color-danger-soft)' : 'var(--color-warning-soft)'}
+                      icon={metricIcon(m.key)}
+>>>>>>> d2ecef1a25da8d6722b5f9d735c648c320fd88bc
                     />
                   ))}
                 </div>
 
                 {/* ── Row 2: Secondary KPI cards + stat counters ── */}
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  {(analyzerData.executive_kpis?.dashboard_metrics ?? []).slice(3, 5).map(m => (
+                  {dashboardMetrics.slice(3, 5).map(m => (
                     <MetricCard
                       key={m.key}
                       label={m.label}
                       value={m.value}
+<<<<<<< HEAD
                       color={m.signal === 'positive' ? '#56F2C1' : m.signal === 'negative' ? '#FF4D6D' : '#FFB020'}
                       icon={
                         m.key === 'concentration' ? 'hub' :
                         m.key === 'current_ratio' ? 'account_balance' : 'analytics'
                       }
+=======
+                      color={m.signal === 'positive' ? 'var(--color-success-low)' : m.signal === 'negative' ? 'var(--color-danger-soft)' : 'var(--color-warning-soft)'}
+                      icon={metricIcon(m.key)}
+>>>>>>> d2ecef1a25da8d6722b5f9d735c648c320fd88bc
                     />
                   ))}
                   <StatCounter label="High Materiality" value={analyzerData.high_materiality_accounts.length} unit="accounts" />
@@ -935,9 +995,13 @@ export default function AnalysisPage() {
                   </div>
                 )}
 
-                {/* ── Portfolio Concentration ── */}
-                {analyzerData.portfolio_concentration && (analyzerData.portfolio_concentration.top_accounts?.length ?? 0) > 1 && (
-                  <ConcentrationSection concentration={analyzerData.portfolio_concentration} />
+                {/* ── Sheet-based Concentration (Activos / Instrumentos / Bancos) ── */}
+                {analyzerData.sheet_concentration && (
+                  analyzerData.sheet_concentration.asset_available ||
+                  analyzerData.sheet_concentration.instrument_available ||
+                  analyzerData.sheet_concentration.bank_available
+                ) && (
+                  <SheetConcentrationSection sc={analyzerData.sheet_concentration} />
                 )}
 
                 {/* ── NIIF 18 compliance flags ── */}
@@ -1388,6 +1452,137 @@ function ConcentrationSection({ concentration }: {
               </div>
             )
           })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+type SheetConc = NonNullable<AnalyzerOutput['sheet_concentration']>
+
+function SheetConcentrationSection({ sc }: { sc: SheetConc }) {
+  const tabs = [
+    { key: 'asset',      label: 'Activos',      icon: 'account_balance',  available: sc.asset_available },
+    { key: 'instrument', label: 'Instrumentos',  icon: 'candlestick_chart', available: sc.instrument_available },
+    { key: 'bank',       label: 'Bancos',        icon: 'corporate_fare',   available: sc.bank_available },
+  ].filter(t => t.available)
+
+  const [active, setActive] = useState(tabs[0]?.key ?? 'asset')
+
+  if (tabs.length === 0) return null
+
+  const barColor = 'var(--color-brand-accent)'
+
+  function BarRow({ name, value, pct, maxPct, indent = false }: {
+    name: string; value: number; pct: number; maxPct: number; indent?: boolean
+  }) {
+    return (
+      <div className={`flex items-center gap-3 py-2 px-5 border-b border-border last:border-b-0 ${indent ? 'pl-10' : ''}`}>
+        {indent && (
+          <span className="text-[10px] font-mono text-outline shrink-0">└─</span>
+        )}
+        <span className="text-[12px] text-on-surface flex-1 min-w-0 truncate" title={name}>{name}</span>
+        <div className="w-24 h-1.5 bg-surface-container rounded overflow-hidden shrink-0">
+          <div className="h-full rounded" style={{ width: `${(pct / maxPct) * 100}%`, background: barColor, opacity: 0.65 }} />
+        </div>
+        <span className="text-[11px] font-mono w-10 text-right shrink-0" style={{ color: barColor }}>
+          {pct.toFixed(1)}%
+        </span>
+        <span className="text-[10px] font-mono text-outline w-32 text-right shrink-0">
+          {value.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} MM
+        </span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="bg-surface border border-border rounded overflow-hidden">
+      {/* Header + tabs */}
+      <div className="border-b border-border bg-surface-container-low">
+        <div className="px-5 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[14px] text-outline">donut_small</span>
+            <span className="text-[10px] font-mono text-on-surface-variant uppercase tracking-widest">
+              Concentration / Sheet
+            </span>
+          </div>
+        </div>
+        <div className="flex border-t border-border">
+          {tabs.map(t => (
+            <button
+              key={t.key}
+              onClick={() => setActive(t.key)}
+              className={`flex items-center gap-1.5 px-4 py-2.5 text-[11px] font-mono transition-colors border-r border-border
+                ${active === t.key ? 'text-on-surface bg-surface' : 'text-outline hover:text-on-surface-variant'}`}
+            >
+              <span className="material-symbols-outlined text-[12px]">{t.icon}</span>
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Asset view */}
+      {active === 'asset' && sc.asset_available && (
+        <div>
+          <div className="px-5 py-2 border-b border-border flex items-center justify-between">
+            <span className="text-[10px] font-mono text-outline">Activos del Balance General</span>
+            <span className="text-[10px] font-mono text-outline">
+              Total: {sc.asset_total.toLocaleString('en-US', { maximumFractionDigits: 0 })} MM
+            </span>
+          </div>
+          {sc.asset_breakdown.map(r => (
+            <BarRow key={r.name} name={r.name} value={r.value} pct={r.pct}
+              maxPct={sc.asset_breakdown[0]?.pct || 1} />
+          ))}
+        </div>
+      )}
+
+      {/* Instrument view */}
+      {active === 'instrument' && sc.instrument_available && (
+        <div>
+          <div className="px-5 py-2 border-b border-border flex items-center justify-between">
+            <span className="text-[10px] font-mono text-outline">Tipos de instrumento · Emisores</span>
+            <span className="text-[10px] font-mono text-outline">
+              Total: {sc.instrument_total.toLocaleString('en-US', { maximumFractionDigits: 0 })} MM
+            </span>
+          </div>
+          {sc.instrument_breakdown.map(ib => (
+            <div key={ib.instrument_type}>
+              {/* Type header row */}
+              <div className="flex items-center gap-3 px-5 py-2 border-b border-border bg-surface-container-low/50">
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded shrink-0"
+                      style={{ color: barColor, background: `${barColor}18`, border: `1px solid ${barColor}30` }}>
+                  {ib.pct.toFixed(1)}%
+                </span>
+                <span className="text-[12px] font-semibold text-on-surface flex-1">{ib.instrument_type}</span>
+                <span className="text-[10px] font-mono text-outline">
+                  {ib.total.toLocaleString('en-US', { maximumFractionDigits: 0 })} MM
+                </span>
+              </div>
+              {/* Emisor rows */}
+              {ib.emisores.map(e => (
+                <BarRow key={e.name} name={e.name} value={e.value} pct={e.pct}
+                  maxPct={ib.emisores[0]?.pct || 1} indent />
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Bank view */}
+      {active === 'bank' && sc.bank_available && (
+        <div>
+          <div className="px-5 py-2 border-b border-border flex items-center justify-between">
+            <span className="text-[10px] font-mono text-outline">Efectivo por entidad bancaria</span>
+            <span className="text-[10px] font-mono text-outline">
+              Total: {sc.bank_total.toLocaleString('en-US', { maximumFractionDigits: 0 })} MM
+            </span>
+          </div>
+          {sc.bank_breakdown.map(r => (
+            <BarRow key={r.name} name={r.name} value={r.value} pct={r.pct}
+              maxPct={sc.bank_breakdown[0]?.pct || 1} />
+          ))}
         </div>
       )}
     </div>

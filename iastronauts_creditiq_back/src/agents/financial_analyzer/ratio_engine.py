@@ -62,6 +62,8 @@ class AccountVariation:
     has_previous_value: bool
     absolute_variation: float   # current − previous, COP MM
     variation_pct: float        # percentage change; 0.0 if no prior period
+    source_sheet: str | None = None  # Excel sheet name (None for PDF/CSV)
+    is_total: bool = False           # True when this row is a sum/subtotal row
 
 
 @dataclass
@@ -144,6 +146,8 @@ def calculate_account_variation(account: ExtractedAccount) -> AccountVariation:
         has_previous_value=has_prev,
         absolute_variation=round(abs_var, 3),
         variation_pct=round(pct_var, 2),
+        source_sheet=account.source_sheet,
+        is_total=account.is_total,
     )
 
 
@@ -154,10 +158,16 @@ def _matches(name: str, keywords: tuple) -> bool:
 
 
 def calculate_financial_totals(accounts: List[ExtractedAccount]) -> FinancialTotals:
-    """Aggregate all accounts into a FinancialTotals summary."""
+    """Aggregate all accounts into a FinancialTotals summary.
+
+    is_total=True rows are skipped to prevent double-counting: their value is
+    already the sum of the detail rows in the same sheet/section.
+    """
     t = FinancialTotals()
 
     for acc in accounts:
+        if acc.is_total:
+            continue  # skip sum/subtotal rows — their value is already captured by detail rows
         cat = acc.category.lower()
         name = acc.normalized_account_name.lower()
         val = float(acc.current_value)

@@ -163,6 +163,8 @@ def _is_individual_position(acc: ExtractedAccount) -> bool:
     True when the account represents a single named holding (not a subtotal/total/category line).
     Used to populate the portfolio positions list.
     """
+    if acc.is_total:
+        return False  # structural total/subtotal rows always excluded
     if acc.category not in ("assets", "other"):
         return False
     name = acc.normalized_account_name.lower()
@@ -244,7 +246,12 @@ def _compute_nav_reconciliation(
         name = acc.normalized_account_name.lower()
         val = acc.current_value
         if _hit(name, _CLOSING_NAV_KW):
-            closing_nav = val  # prefer explicit total over calculated sum
+            # For closing NAV we prefer the is_total=True row (the authoritative sum);
+            # fall back to a detail row only if no total row was found yet.
+            if acc.is_total or closing_nav == fallback_closing_nav:
+                closing_nav = val
+        elif acc.is_total:
+            continue  # skip all other total/subtotal rows to prevent double-counting
         elif _hit(name, _OPENING_NAV_KW):
             opening_nav = val
         elif _hit(name, _CONTRIBUTIONS_KW):

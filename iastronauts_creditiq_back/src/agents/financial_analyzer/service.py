@@ -80,6 +80,9 @@ from .niif18_engine import (
 )
 from .fund_engine import FundAnalysis, analyze_fund, fund_analysis_to_dict
 from .kpi_engine import calculate_executive_kpis
+from .sheet_concentration_engine import (
+    SheetConcentrationResult, analyze_sheet_concentration, sheet_concentration_to_dict
+)
 from .synthesis_engine import ExecutiveSynthesis, synthesize as synthesize_portfolio, synthesis_to_dict
 from .financial_diagnostics_engine import DiagnosticsResult, run_diagnostics, diagnostics_to_dict
 from shared.progress_store import emit as _emit_step
@@ -301,6 +304,17 @@ class FinancialAnalyzerService:
                 "fund_chains_merged | job=%s fund_chains=%d total_chains=%d",
                 payload.job_id, len(fund_chains), len(causal_chains),
             )
+
+        # ── Step 12b2: Sheet-based concentration (Activos / Instrumentos / Bancos) ──
+        sheet_conc: SheetConcentrationResult = analyze_sheet_concentration(enriched_accounts)
+        sheet_conc_dict = sheet_concentration_to_dict(sheet_conc)
+        logger.info(
+            "sheet_concentration | job=%s asset=%s instrument=%s bank=%s",
+            payload.job_id,
+            "available" if sheet_conc.asset_available else "unavailable",
+            "available" if sheet_conc.instrument_available else "unavailable",
+            "available" if sheet_conc.bank_available else "unavailable",
+        )
 
         # ── Step 12c: Executive Synthesis ────────────────────────────────────
         _emit_step(payload.job_id, "Building executive synthesis")
@@ -529,6 +543,7 @@ class FinancialAnalyzerService:
             cross_statement_signals=llm_result.cross_statement_signals,
             earnings_sustainability=llm_result.earnings_sustainability,
             financial_diagnostics=diagnostics_dict,
+            sheet_concentration=sheet_conc_dict,
         )
 
         self._save_to_s3(result)
