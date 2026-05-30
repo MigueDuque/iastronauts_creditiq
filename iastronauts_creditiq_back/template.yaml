@@ -22,19 +22,27 @@ Parameters:
     NoEcho: true
     Default: ""
 
+Conditions:
+  # Only provision the Anthropic secret + grant access when a key is supplied at
+  # deploy time. Dev/bedrock deployments that pass no key skip it cleanly.
+  HasAnthropicKey: !Not [!Equals [!Ref AnthropicApiKey, ""]]
+
 Globals:
   Function:
     Runtime: python3.12
     Timeout: 30
     MemorySize: 256
-    Architectures: [x86_64]
+    Architectures: [arm64]
+    Tracing: Active
     Environment:
       Variables:
         STAGE: !Ref Stage
         MAIN_BUCKET: !Ref MainBucket
         WORKFLOW_ARN: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:creditiq-analysis-workflow-${Stage}"
         LLM_PROVIDER: !Ref LlmProvider
-        ANTHROPIC_API_KEY: !Ref AnthropicApiKey
+        # API key is resolved from Secrets Manager in production (see AnthropicApiKeySecret).
+        # Local dev still reads ANTHROPIC_API_KEY directly from .env.
+        ANTHROPIC_API_KEY_SECRET_ARN: !If [HasAnthropicKey, !Ref AnthropicApiKeySecret, !Ref "AWS::NoValue"]
         GNEWS_API_KEY: !Ref GnewsApiKey
         AWS_ACCOUNT_ID: !Ref AWS::AccountId
   HttpApi:
@@ -56,6 +64,16 @@ Globals:
 # ─────────────────────────────────────────────
 Resources:
 
+  # Anthropic API key stored in Secrets Manager instead of plaintext Lambda env vars.
+  # Created only when a key is passed at deploy time (see HasAnthropicKey condition).
+  AnthropicApiKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: HasAnthropicKey
+    Properties:
+      Name: !Sub "creditiq-anthropic-api-key-${Stage}"
+      Description: Anthropic API key for CreditIQ LLM calls
+      SecretString: !Ref AnthropicApiKey
+
   # Único bucket con 3 prefijos: uploads/, reports/, rag/
   MainBucket:
     Type: AWS::S3::Bucket
@@ -74,6 +92,12 @@ Resources:
             Prefix: uploads/
             Status: Enabled
             ExpirationInDays: 7
+          # Artefactos intermedios por job (status/extractor/analyzer/…): expirar a 30 días.
+          # reports/ NO tiene regla — es el entregable y se conserva indefinidamente.
+          - Id: expire-job-artifacts
+            Prefix: jobs/
+            Status: Enabled
+            ExpirationInDays: 30
 
   # Bucket para el frontend (CloudFront OAC)
   FrontendBucket:
@@ -180,6 +204,29 @@ Resources:
               - Effect: Allow
                 Action: states:SendTaskSuccess
                 Resource: "*"
+              # agent_runner re-runs a single agent outside Step Functions by invoking
+              # its Lambda directly; continue_analysis falls back to agent_runner.
+              # Self ARN built via !Sub (not !GetAtt) to avoid a Role↔Function cycle.
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt AnalyzerFunction.Arn
+                  - !GetAtt RiskScorerFunction.Arn
+                  - !GetAtt ReportGeneratorFunction.Arn
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:creditiq-agent-runner-${Stage}"
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingTargets
+                Resource: "*"
+              - !If
+                - HasAnthropicKey
+                - Effect: Allow
+                  Action: secretsmanager:GetSecretValue
+                  Resource: !Ref AnthropicApiKeySecret
+                - !Ref "AWS::NoValue"
 
   # Rol para Lambdas de agentes (Step Functions)
   AgentLambdaRole:
@@ -210,6 +257,8 @@ Resources:
                 Resource: !GetAtt MainBucket.Arn
               - Effect: Allow
                 Action:
+                  - textract:StartDocumentTextDetection
+                  - textract:GetDocumentTextDetection
                   - textract:StartDocumentAnalysis
                   - textract:GetDocumentAnalysis
                   - textract:AnalyzeDocument
@@ -219,6 +268,19 @@ Resources:
                   - bedrock:InvokeModel
                   - bedrock:InvokeModelWithResponseStream
                 Resource: "*"
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingTargets
+                Resource: "*"
+              - !If
+                - HasAnthropicKey
+                - Effect: Allow
+                  Action: secretsmanager:GetSecretValue
+                  Resource: !Ref AnthropicApiKeySecret
+                - !Ref "AWS::NoValue"
 
   WorkflowLogGroup:
     Type: AWS::Logs::LogGroup
@@ -262,6 +324,13 @@ Resources:
                   - logs:PutResourcePolicy
                   - logs:DescribeResourcePolicies
                   - logs:DescribeLogGroups
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingTargets
                 Resource: "*"
 
 # ─────────────────────────────────────────────
@@ -307,6 +376,23 @@ Resources:
             Path: /analyses
             Method: POST
 
+  # GET /jobs  → lista de jobs en S3 (picker "Load previous job" del frontend)
+  ListJobsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "creditiq-list-jobs-${Stage}"
+      CodeUri: src/
+      Handler: api.list_jobs.handler.lambda_handler
+      Role: !GetAtt ApiLambdaRole.Arn
+      Timeout: 30
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /jobs
+            Method: GET
+
   # GET /analyses/{id}  → estado del análisis (polling)
   AnalysisStatusFunction:
     Type: AWS::Serverless::Function
@@ -332,12 +418,49 @@ Resources:
       Handler: api.continue_analysis.handler.lambda_handler
       Role: !GetAtt ApiLambdaRole.Arn
       Timeout: 30
+      Environment:
+        Variables:
+          RUNNER_FUNCTION_NAME: !Ref AgentRunnerFunction
       Events:
         ApiEvent:
           Type: HttpApi
           Properties:
             ApiId: !Ref CreditIQApi
             Path: /analyses/{analysis_id}/continue
+            Method: POST
+
+  # POST /analyses/{id}/reanalyze  y  /reanalyze-scorer
+  # → re-ejecuta un solo agente (2 o 3) fuera de Step Functions. Espejo de los
+  #   runners de local_server.py. Invoca el Lambda del agente directamente y
+  #   registra el estado en status.json con source="reanalyze".
+  AgentRunnerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "creditiq-agent-runner-${Stage}"
+      CodeUri: src/
+      Handler: api.agent_runner.handler.lambda_handler
+      Role: !GetAtt ApiLambdaRole.Arn
+      # Must exceed the longest agent timeout (Analyzer = 300s) because the worker
+      # invocation waits synchronously for the agent Lambda to finish.
+      Timeout: 360
+      MemorySize: 256
+      Environment:
+        Variables:
+          ANALYZER_FUNCTION_NAME: !Ref AnalyzerFunction
+          RISK_SCORER_FUNCTION_NAME: !Ref RiskScorerFunction
+          REPORT_GENERATOR_FUNCTION_NAME: !Ref ReportGeneratorFunction
+      Events:
+        ReanalyzeEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /analyses/{analysis_id}/reanalyze
+            Method: POST
+        ReanalyzeScorerEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /analyses/{analysis_id}/reanalyze-scorer
             Method: POST
 
   # GET /analyses/{id}/report  → URL del reporte generado
@@ -354,6 +477,37 @@ Resources:
           Properties:
             ApiId: !Ref CreditIQApi
             Path: /analyses/{analysis_id}/report
+            Method: GET
+
+  # GET /analyses/{id}/extractor · /analyzer · /scorer
+  # → artefactos crudos de Agente 1 / Agente 2 / Agente 3 (vistas por agente del
+  #   frontend). /analyzer evita sobrecargar /report, que sirve la URL del reporte.
+  JobArtifactFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "creditiq-job-artifact-${Stage}"
+      CodeUri: src/
+      Handler: api.job_artifact.handler.lambda_handler
+      Role: !GetAtt ApiLambdaRole.Arn
+      Timeout: 30
+      Events:
+        ExtractorEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /analyses/{analysis_id}/extractor
+            Method: GET
+        AnalyzerEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /analyses/{analysis_id}/analyzer
+            Method: GET
+        ScorerEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /analyses/{analysis_id}/scorer
             Method: GET
 
   # DELETE /analyses/{id}  → cancela la ejecución de Step Functions y marca el job como cancelado
@@ -390,8 +544,14 @@ Resources:
         PauseFunctionArn: !GetAtt PauseFunction.Arn
       Role: !GetAtt WorkflowRole.Arn
       Type: STANDARD
+      Tracing:
+        Enabled: true
       Logging:
-        Level: ERROR
+        # Log every state transition for debuggability. IncludeExecutionData stays
+        # false on purpose: execution payloads carry tenant financial data we do not
+        # want dumped into CloudWatch. The execution history (console/API) still has
+        # full data for authorized debugging.
+        Level: ALL
         IncludeExecutionData: false
         Destinations:
           - CloudWatchLogsLogGroup:

@@ -26,8 +26,9 @@ from fastapi.responses import JSONResponse
 app = FastAPI(title="CreditIQ Local Dev")
 
 # Job IDs that the user has requested to cancel.
-# Background threads check this before doing significant work.
 _cancelled_jobs: set[str] = set()
+# Job IDs with an actively-running background thread.
+_running_jobs: set[str] = set()
 
 app.add_middleware(
     CORSMiddleware,
@@ -84,13 +85,76 @@ async def create_analysis(request: Request):
 @app.get("/analyses/{analysis_id}")
 async def get_status(analysis_id: str, request: Request):
     from api.analysis_status.handler import lambda_handler
-    return _resp(lambda_handler(_event(request, None, {"analysis_id": analysis_id}), None))
+    result = lambda_handler(_event(request, None, {"analysis_id": analysis_id}), None)
+
+    body = result.get("body", "{}")
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except Exception:
+            body = {"message": body}
+
+    # Correct stale 'processing'/'pending' when no thread is running for this job.
+    # Happens when the server was restarted mid-run: status.json still says 'processing'
+    # but artifacts from a prior run exist in S3.
+    current_status = body.get("status", "") if isinstance(body, dict) else ""
+    if current_status in ("processing", "pending", "unknown") and analysis_id not in _running_jobs:
+        bucket = os.environ.get("MAIN_BUCKET", "")
+        if bucket:
+            # exists() resolves the job's real date folder, so this works for jobs
+            # created on a previous day (not just today).
+            from shared.job_store import exists, EXTRACTOR, FINANCIAL_ANALYZER, RISK_SCORER
+
+            if exists(analysis_id, RISK_SCORER):
+                body["status"] = "scoring_complete"
+            elif exists(analysis_id, FINANCIAL_ANALYZER):
+                body["status"] = "analysis_complete"
+            elif exists(analysis_id, EXTRACTOR):
+                body["status"] = "extraction_complete"
+
+    return JSONResponse(content=body, status_code=result.get("statusCode", 200))
 
 
 @app.get("/analyses/{analysis_id}/report")
 async def get_report(analysis_id: str, request: Request):
     from api.report_url.handler import lambda_handler
     return _resp(lambda_handler(_event(request, None, {"analysis_id": analysis_id}), None))
+
+
+@app.get("/analyses/{analysis_id}/extractor")
+async def get_extractor(analysis_id: str):
+    """Return the raw DocumentExtractor output JSON for Agent 1 results view."""
+    from shared.job_store import load as job_load, EXTRACTOR
+    try:
+        data = job_load(analysis_id, EXTRACTOR)
+        return JSONResponse(content=data)
+    except Exception:
+        return JSONResponse(content={}, status_code=404)
+
+
+@app.get("/analyses/{analysis_id}/analyzer")
+async def get_analyzer(analysis_id: str):
+    """Return the raw FinancialAnalyzer output JSON for the Agent 2 results view.
+
+    Dedicated endpoint so the frontend stops reading Agent 2 data off /report
+    (which is overloaded to also serve the final report's presigned URL)."""
+    from shared.job_store import load as job_load, FINANCIAL_ANALYZER
+    try:
+        data = job_load(analysis_id, FINANCIAL_ANALYZER)
+        return JSONResponse(content=data)
+    except Exception:
+        return JSONResponse(content={}, status_code=404)
+
+
+@app.get("/analyses/{analysis_id}/scorer")
+async def get_scorer(analysis_id: str):
+    """Return the raw RiskScorer output JSON for Agent 3 results dashboard."""
+    from shared.job_store import load as job_load, RISK_SCORER
+    try:
+        data = job_load(analysis_id, RISK_SCORER)
+        return JSONResponse(content=data)
+    except Exception:
+        return JSONResponse(content={}, status_code=404)
 
 
 # ── Progress helpers ───────────────────────────────────────────────────────────
@@ -126,6 +190,7 @@ def _run_agent2(job_id: str) -> None:
 
     if job_id in _cancelled_jobs:
         return
+    _running_jobs.add(job_id)
 
     agent1_step = _extractor_summary(job_id)
     done1 = {1: agent1_step}
@@ -163,15 +228,18 @@ def _run_agent2(job_id: str) -> None:
         import traceback
         traceback.print_exc()
         _save_status(job_id, "failed", str(exc))
+    finally:
+        _running_jobs.discard(job_id)
 
 
-def _run_agents3_4(job_id: str) -> None:
-    """Run RiskScorer + ReportGenerator (Agents 3-4) through to completed."""
-    from shared.job_store import load as job_load, save as job_save, FINANCIAL_ANALYZER, REPORT_GENERATOR
+def _run_agent3(job_id: str) -> None:
+    """Run RiskScorer (Agent 3) and pause at scoring_complete."""
+    from shared.job_store import load as job_load, FINANCIAL_ANALYZER
     from shared.progress_store import build_progress
 
     if job_id in _cancelled_jobs:
         return
+    _running_jobs.add(job_id)
 
     agent1_step = _extractor_summary(job_id)
     done_12 = {1: agent1_step, 2: "Analysis complete"}
@@ -188,12 +256,42 @@ def _run_agents3_4(job_id: str) -> None:
         from agents.risk_scorer.handler import lambda_handler as scorer
         if job_id in _cancelled_jobs:
             return
-        payload = scorer(payload, None)
+        scorer(payload, None)  # saves risk_scorer_response.json internally
 
+        if job_id not in _cancelled_jobs:
+            _save_status(job_id, "scoring_complete", progress=build_progress(
+                running_agent=None, current_step=None,
+                done_agents=[1, 2, 3], done_steps={**done_12, 3: "Risk scored"},
+            ))
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        _save_status(job_id, "failed", str(exc))
+    finally:
+        _running_jobs.discard(job_id)
+
+
+def _run_agent4(job_id: str) -> None:
+    """Run ReportGenerator (Agent 4) through to completed."""
+    from shared.job_store import load as job_load, save as job_save, RISK_SCORER, REPORT_GENERATOR
+    from shared.progress_store import build_progress
+
+    if job_id in _cancelled_jobs:
+        return
+    _running_jobs.add(job_id)
+
+    agent1_step = _extractor_summary(job_id)
+    done_123 = {1: agent1_step, 2: "Analysis complete", 3: "Risk scored"}
+
+    try:
         _save_status(job_id, "processing", progress=build_progress(
             running_agent=4, current_step="Generating report narrative",
-            done_agents=[1, 2, 3], done_steps={**done_12, 3: "Risk validated"},
+            done_agents=[1, 2, 3], done_steps=done_123,
         ))
+        if job_id in _cancelled_jobs:
+            return
+
+        payload = job_load(job_id, RISK_SCORER)
         from agents.report_generator.handler import lambda_handler as report_gen
         if job_id in _cancelled_jobs:
             return
@@ -204,12 +302,14 @@ def _run_agents3_4(job_id: str) -> None:
             _save_status(job_id, "completed", progress=build_progress(
                 running_agent=None, current_step=None,
                 done_agents=[1, 2, 3, 4],
-                done_steps={**done_12, 3: "Risk validated", 4: "Report generated"},
+                done_steps={**done_123, 4: "Report generated"},
             ))
     except Exception as exc:
         import traceback
         traceback.print_exc()
         _save_status(job_id, "failed", str(exc))
+    finally:
+        _running_jobs.discard(job_id)
 
 
 # ── Job listing ────────────────────────────────────────────────────────────────
@@ -224,39 +324,57 @@ async def list_jobs():
     if not bucket:
         return JSONResponse(content={"jobs": []})
 
-    from shared.job_store import job_key
-
-    status_keys: list[str] = []
+    # Single paginated listing — collect all keys under jobs/
+    all_keys: set[str] = set()
     paginator = s3.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix="jobs/"):
         for obj in page.get("Contents", []):
-            key: str = obj["Key"]
-            if key.endswith("/status.json"):
-                status_keys.append(key)
+            all_keys.add(obj["Key"])
+
+    # Discover jobs from status.json files  (jobs/{date}/{job_id}/status.json)
+    job_dates: dict[str, str] = {}
+    for key in all_keys:
+        parts = key.split("/")
+        if len(parts) == 4 and parts[3] == "status.json":
+            job_dates[parts[2]] = parts[1]  # job_id → date_folder
 
     jobs: list[dict] = []
-    for key in status_keys:
-        # key shape: jobs/YYYY-MM-DD/job_id/status.json
-        parts = key.split("/")
-        if len(parts) != 4:
-            continue
-        date_folder, job_id = parts[1], parts[2]
+    for job_id, date_folder in job_dates.items():
+        base = f"jobs/{date_folder}/{job_id}"
+        has_extractor = f"{base}/extractor_response.json"          in all_keys
+        has_analyzer  = f"{base}/financial_analyzer_response.json" in all_keys
+        has_scorer    = f"{base}/risk_scorer_response.json"        in all_keys
+        has_report    = f"{base}/report_generator_response.json"   in all_keys
 
+        # Read status.json for exact disposition (failed / cancelled / completed)
+        status = "unknown"
         try:
-            obj = s3.get_object(Bucket=bucket, Key=key)
+            obj = s3.get_object(Bucket=bucket, Key=f"{base}/status.json")
             status = json.loads(obj["Body"].read()).get("status", "unknown")
         except Exception:
-            status = "unknown"
+            pass
+
+        # If status is ambiguous, derive from artifact presence
+        if status in ("unknown", "processing", "pending"):
+            if has_report:
+                status = "completed"
+            elif has_scorer:
+                status = "scoring_complete"
+            elif has_analyzer:
+                status = "analysis_complete"
+            elif has_extractor:
+                status = "extraction_complete"
 
         company_name: str | None = None
         periods: list[str] = []
-        try:
-            ext_obj = s3.get_object(Bucket=bucket, Key=job_key(job_id, "extractor_response"))
-            ext = json.loads(ext_obj["Body"].read())
-            company_name = ext.get("company_name")
-            periods = ext.get("periods", [])
-        except Exception:
-            pass
+        if has_extractor:
+            try:
+                ext_obj = s3.get_object(Bucket=bucket, Key=f"{base}/extractor_response.json")
+                ext = json.loads(ext_obj["Body"].read())
+                company_name = ext.get("company_name")
+                periods = ext.get("periods", [])
+            except Exception:
+                pass
 
         jobs.append({
             "job_id": job_id,
@@ -287,12 +405,22 @@ async def reanalyze(analysis_id: str):
     return JSONResponse(content={"analysis_id": analysis_id, "status": "processing"}, status_code=202)
 
 
+@app.post("/analyses/{analysis_id}/reanalyze-scorer")
+async def reanalyze_scorer(analysis_id: str):
+    """Force-run Agent 3 (RiskScorer) regardless of current pipeline status."""
+    _cancelled_jobs.discard(analysis_id)
+    thread = threading.Thread(target=_run_agent3, args=(analysis_id,), daemon=True)
+    thread.start()
+    return JSONResponse(content={"analysis_id": analysis_id, "status": "processing"}, status_code=202)
+
+
 @app.post("/analyses/{analysis_id}/continue")
 async def continue_analysis(analysis_id: str):
     """
     Smart continue: reads current status from S3 and routes to the right stage.
       extraction_complete  → run Agent 2 → analysis_complete
-      analysis_complete    → run Agents 3-4 → completed
+      analysis_complete    → run Agent 3 → scoring_complete
+      scoring_complete     → run Agent 4 → completed
     """
     from shared.job_store import load as job_load, STATUS
     try:
@@ -300,7 +428,11 @@ async def continue_analysis(analysis_id: str):
     except Exception:
         current_status = ""
 
-    fn = _run_agents3_4 if current_status == "analysis_complete" else _run_agent2
+    fn = (
+        _run_agent4 if current_status == "scoring_complete" else
+        _run_agent3 if current_status == "analysis_complete" else
+        _run_agent2
+    )
     thread = threading.Thread(target=fn, args=(analysis_id,), daemon=True)
     thread.start()
     return JSONResponse(content={"analysis_id": analysis_id, "status": "processing"}, status_code=202)

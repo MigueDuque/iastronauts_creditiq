@@ -37,53 +37,20 @@ def _download(s3_key: str, s3_client) -> bytes:
 # PDF → Textract async
 # ---------------------------------------------------------------------------
 
-def _cell_text(cell: dict, block_map: dict) -> str:
-    words = []
-    for rel in cell.get("Relationships", []):
-        if rel["Type"] == "CHILD":
-            for bid in rel["Ids"]:
-                blk = block_map.get(bid)
-                if blk and blk["BlockType"] == "WORD":
-                    words.append(blk.get("Text", ""))
-    return " ".join(words)
-
-
-def _blocks_to_table_text(blocks: list[dict]) -> str:
-    """Converts Textract TABLE blocks into a tab-separated text representation."""
-    block_map = {b["Id"]: b for b in blocks}
-    tables: list[str] = []
-
-    for block in blocks:
-        if block["BlockType"] != "TABLE":
-            continue
-        cells: dict[tuple[int, int], str] = {}
-        for rel in block.get("Relationships", []):
-            if rel["Type"] == "CHILD":
-                for cid in rel["Ids"]:
-                    cell = block_map.get(cid)
-                    if cell and cell["BlockType"] == "CELL":
-                        cells[(cell["RowIndex"], cell["ColumnIndex"])] = _cell_text(cell, block_map)
-
-        if not cells:
-            continue
-        max_row = max(r for r, _ in cells)
-        max_col = max(c for _, c in cells)
-        rows = [
-            "\t".join(cells.get((r, c), "") for c in range(1, max_col + 1))
-            for r in range(1, max_row + 1)
-        ]
-        tables.append("\n".join(rows))
-
-    return "\n\n---\n\n".join(tables)
+def _lines_to_text(blocks: list[dict]) -> str:
+    """Join Textract LINE blocks into newline-separated narrative text."""
+    return "\n".join(
+        b.get("Text", "") for b in blocks if b.get("BlockType") == "LINE"
+    )
 
 
 def _poll_textract(job_id: str, textract_client, lambda_context) -> list[dict]:
-    """Polls until the async Textract job finishes; returns all blocks."""
+    """Polls until the async Textract text-detection job finishes; returns all blocks."""
     for attempt in range(_TEXTRACT_POLL_MAX_ATTEMPTS):
         if lambda_context and lambda_context.get_remaining_time_in_millis() < 30_000:
             raise TimeoutError("Lambda running out of time before Textract completion")
 
-        result = textract_client.get_document_analysis(JobId=job_id)
+        result = textract_client.get_document_text_detection(JobId=job_id)
         status = result["JobStatus"]
 
         if status == "FAILED":
@@ -93,7 +60,7 @@ def _poll_textract(job_id: str, textract_client, lambda_context) -> list[dict]:
             blocks = list(result.get("Blocks", []))
             next_token = result.get("NextToken")
             while next_token:
-                page = textract_client.get_document_analysis(JobId=job_id, NextToken=next_token)
+                page = textract_client.get_document_text_detection(JobId=job_id, NextToken=next_token)
                 blocks.extend(page.get("Blocks", []))
                 next_token = page.get("NextToken")
             return blocks
@@ -104,15 +71,22 @@ def _poll_textract(job_id: str, textract_client, lambda_context) -> list[dict]:
 
 
 def extract_pdf(s3_key: str, textract_client, lambda_context) -> str:
-    response = textract_client.start_document_analysis(
+    """
+    Extract narrative text from the rendición PDF via Textract DetectDocumentText.
+
+    The PDF is consumed only as narrative context (account figures come from the
+    Excel), so we use the cheap text-detection API ($1.50/1k pages) instead of
+    table analysis ($15/1k pages) — and read LINE blocks to capture the prose,
+    which the previous TABLES-only path discarded entirely.
+    """
+    response = textract_client.start_document_text_detection(
         DocumentLocation={"S3Object": {"Bucket": BUCKET, "Name": s3_key}},
-        FeatureTypes=["TABLES"],
     )
     job_id = response["JobId"]
-    logger.info("textract_start | job=%s key=%s", job_id, s3_key)
+    logger.info("textract_start | job=%s key=%s mode=text_detection", job_id, s3_key)
     blocks = _poll_textract(job_id, textract_client, lambda_context)
     logger.info("textract_done  | job=%s blocks=%d", job_id, len(blocks))
-    return _blocks_to_table_text(blocks)
+    return _lines_to_text(blocks)
 
 # ---------------------------------------------------------------------------
 # Excel / CSV → pandas
@@ -406,7 +380,10 @@ def lambda_handler(event: dict, context) -> dict:
 
     s3_client = boto3.client("s3")
     textract_client = boto3.client("textract")
-    llm = LLMProvider()
+    # Extraction is mechanical JSON normalization — use the cheaper model when
+    # LLM_MODEL_EXTRACTOR is set (e.g. claude-haiku-4-5-20251001) instead of paying
+    # Sonnet rates. Falls back to the global default when the env var is unset.
+    llm = LLMProvider(model=os.getenv("LLM_MODEL_EXTRACTOR"))
 
     business_ctx_str = (
         f"Empresa: {payload.business_context.company_name or 'No especificada'}\n"

@@ -17,6 +17,7 @@ from dataclasses import asdict
 
 from shared.llm_provider import LLMProvider
 from shared.models import AnalyzerOutput, ScorerOutput, RiskLevel
+from shared.job_store import save as job_save, RISK_SCORER
 
 from .liquidity_engine import score_liquidity
 from .credit_engine import score_credit
@@ -195,4 +196,9 @@ def lambda_handler(event: dict, context) -> dict:
     )
 
     logger.info("RiskScorer complete: overall_risk=%s", result.overall_risk_score.value)
-    return result.model_dump(mode="json")
+    output = result.model_dump(mode="json")
+    try:
+        job_save(result.job_id, RISK_SCORER, output)
+    except Exception as exc:
+        logger.error("Failed to persist scorer output to S3: %s", exc)
+    return output

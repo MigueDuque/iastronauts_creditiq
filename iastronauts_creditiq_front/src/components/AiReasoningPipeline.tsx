@@ -1,4 +1,4 @@
-type Status = 'pending' | 'processing' | 'extraction_complete' | 'analysis_complete' | 'completed' | 'failed' | null
+type Status = 'pending' | 'processing' | 'extraction_complete' | 'analysis_complete' | 'scoring_complete' | 'completed' | 'failed' | 'cancelled' | null
 
 interface AgentProgressEntry {
   index: number
@@ -15,7 +15,7 @@ interface PipelineProgress {
   agents: AgentProgressEntry[]
 }
 
-type Phase = 'agent1' | 'agent2' | 'final' | null
+type Phase = 'agent1' | 'agent2' | 'agent3' | 'agent4' | null
 
 interface Props {
   status: Status
@@ -28,20 +28,21 @@ interface Props {
 const STATIC_STEPS = [
   { label: 'Agent 1', title: 'Document Ingestion & OCR',  detail: 'Textract PDF · pandas Excel' },
   { label: 'Agent 2', title: 'Financial Analysis & NIIF', detail: 'Account classification · variance' },
-  { label: 'Agent 3', title: 'Risk Scoring',              detail: 'Materiality · anomaly detection' },
+  { label: 'Agent 3', title: 'Risk Scoring',              detail: 'Liquidity · credit · solvency · market' },
   { label: 'Agent 4', title: 'Report Generation',         detail: 'LLM narrative · NIIF notes draft' },
 ]
 
 function derivedState(index: number, status: Status, phase?: Phase): 'done' | 'active' | 'pending' | 'failed' {
   if (status === 'failed')              return index === 0 ? 'failed' : 'pending'
   if (status === 'completed')           return 'done'
-  // Terminal wait states: agents that have run are done; nothing is shown as active
-  // (the "continue" banner in the main canvas tells the user what to do next)
+  // Terminal wait states: agents that have run are done; nothing shown as active
+  if (status === 'scoring_complete')    return index <= 2 ? 'done' : 'pending'
   if (status === 'analysis_complete')   return index <= 1 ? 'done' : 'pending'
   if (status === 'extraction_complete') return index === 0 ? 'done' : 'pending'
   if (status === 'processing') {
     if (phase === 'agent2') return index < 1 ? 'done' : index === 1 ? 'active' : 'pending'
-    if (phase === 'final')   return index < 2 ? 'done' : index === 2 ? 'active' : 'pending'
+    if (phase === 'agent3') return index < 2 ? 'done' : index === 2 ? 'active' : 'pending'
+    if (phase === 'agent4') return index < 3 ? 'done' : index === 3 ? 'active' : 'pending'
     // agent1 / null: Agent 1 is running
     return index === 0 ? 'active' : 'pending'
   }
@@ -54,6 +55,10 @@ function derivedStep(index: number, status: Status): string | null {
     const labels = ['Accounts extracted', 'Analysis complete', 'Risk scored', 'Report generated']
     return labels[index] ?? null
   }
+  if (status === 'scoring_complete' && index <= 2) {
+    const labels = ['Accounts extracted', 'Analysis complete', 'Risk scored']
+    return labels[index] ?? null
+  }
   if (status === 'analysis_complete' && index <= 1)
     return index === 0 ? 'Accounts extracted' : 'Analysis complete'
   if (status === 'extraction_complete' && index === 0) return 'Accounts extracted'
@@ -64,6 +69,7 @@ export default function AiReasoningPipeline({ status, jobId, progress, phase }: 
   const statusLabel =
     status === 'completed'           ? { text: 'COMPLETED', cls: 'text-success border-success bg-surface' } :
     status === 'failed'              ? { text: 'FAILED',    cls: 'text-risk-high border-risk-high bg-surface' } :
+    status === 'scoring_complete'    ? { text: 'SCORED',    cls: 'text-primary border-primary bg-surface' } :
     status === 'analysis_complete'   ? { text: 'ANALYZED',  cls: 'text-risk-medium border-risk-medium bg-surface' } :
     status === 'extraction_complete' ? { text: 'REVIEW',    cls: 'text-risk-medium border-risk-medium bg-surface' } :
     status === 'processing'          ? { text: 'RUNNING',   cls: 'text-primary border-primary bg-surface' } :
@@ -88,7 +94,7 @@ export default function AiReasoningPipeline({ status, jobId, progress, phase }: 
 
   return (
     <aside className="w-full md:w-[300px] flex-shrink-0 flex flex-col gap-4">
-      <div className="surface surface-container-low border border-border rounded p-4 h-full glass-panel ai-glow">
+      <div className="bg-surface-container border border-border rounded p-4 h-full ai-glow">
 
         {/* Header */}
         <div className="flex items-center justify-between mb-5 pb-4 border-b border-border">

@@ -61,6 +61,24 @@ def lambda_handler(event: dict, context) -> dict:
         if not analysis_id:
             return _response(400, {"error": "analysis_id es requerido"})
 
+        # Manual re-run override: when a job is re-run via /reanalyze (outside Step
+        # Functions), status.json carries source="reanalyze". The SFN execution is
+        # already terminal and would otherwise report "completed", so trust S3 here.
+        try:
+            s3_data = job_load(analysis_id, STATUS)
+            if s3_data.get("source") == "reanalyze":
+                payload = {
+                    "analysis_id": analysis_id,
+                    "status": s3_data.get("status", "processing"),
+                }
+                if s3_data.get("progress"):
+                    payload["progress"] = s3_data["progress"]
+                if s3_data.get("error"):
+                    payload["error"] = s3_data["error"]
+                return _response(200, payload)
+        except ClientError:
+            pass
+
         execution = _sfn_client().describe_execution(executionArn=_execution_arn(analysis_id))
 
         sfn_status = execution["status"]
