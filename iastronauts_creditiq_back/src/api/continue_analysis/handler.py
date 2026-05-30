@@ -1,8 +1,12 @@
 """
 POST /analyses/{analysis_id}/continue
 
-Reads the task token saved by PauseFunction and calls SendTaskSuccess,
-resuming the Step Functions execution from where it was paused.
+Resumes the pipeline from its pause point. Two paths:
+  • SFN path — a task token saved by PauseFunction is present: call SendTaskSuccess
+    to resume the Step Functions execution where it paused.
+  • Manual path — no task token (the job was re-run via /reanalyze outside Step
+    Functions, so the SFN execution already finished): fall back to invoking the
+    agent_runner Lambda for the next agent, mirroring local_server's smart routing.
 """
 import json
 import logging
@@ -18,12 +22,38 @@ logger.setLevel(logging.INFO)
 
 BUCKET = os.environ["MAIN_BUCKET"]
 
+# current pipeline status → which agent to run next when driving the job manually.
+_NEXT_AGENT_FOR_STATUS = {
+    "extraction_complete": 2,
+    "analysis_complete":   3,
+    "scoring_complete":    4,
+}
+
 
 def _sfn_client():
     kwargs = {}
     if url := os.environ.get("SFN_ENDPOINT_URL"):
         kwargs["endpoint_url"] = url
     return boto3.client("stepfunctions", **kwargs)
+
+
+def _continue_via_runner(analysis_id: str, current_status: str) -> dict:
+    """Manual fallback: async-invoke agent_runner for the next agent."""
+    agent = _NEXT_AGENT_FOR_STATUS.get(current_status)
+    if not agent:
+        return _response(409, {
+            "error": f"Estado '{current_status}' no es un punto de continuación válido",
+            "status": current_status,
+        })
+    # Mark processing up front so the first status poll doesn't see the stale state.
+    job_save(analysis_id, STATUS, {"status": "processing", "source": "reanalyze"})
+    boto3.client("lambda").invoke(
+        FunctionName=os.environ["RUNNER_FUNCTION_NAME"],
+        InvocationType="Event",
+        Payload=json.dumps({"analysis_id": analysis_id, "agent": agent}).encode("utf-8"),
+    )
+    logger.info("continued (manual) | job=%s from=%s agent=%d", analysis_id, current_status, agent)
+    return _response(202, {"analysis_id": analysis_id, "status": "processing"})
 
 
 def lambda_handler(event: dict, context) -> dict:
@@ -41,11 +71,10 @@ def lambda_handler(event: dict, context) -> dict:
         task_token = status_data.get("task_token")
         current_status = status_data.get("status", "")
 
+        # No SFN token → the job is being driven manually (post-reanalyze).
+        # Continue by directly invoking the next agent via agent_runner.
         if not task_token:
-            return _response(409, {
-                "error": "El pipeline no está pausado o ya fue reanudado",
-                "status": current_status,
-            })
+            return _continue_via_runner(analysis_id, current_status)
 
         # Load the output of the last completed agent to pass as SFN state input
         if current_status == "extraction_complete":

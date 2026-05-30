@@ -35,12 +35,12 @@ interface ExtractorOutput {
 }
 
 const CATEGORY_COLOR: Record<string, string> = {
-  assets:      'var(--color-primary)',
-  liabilities: 'var(--color-danger-soft)',
-  equity:      'var(--color-success-low)',
-  revenue:     'var(--color-warning-soft)',
-  expense:     'var(--color-danger-soft)',
-  other:       'var(--color-on-surface-muted-strong)',
+  assets:      '#2F80FF',
+  liabilities: '#FF4D6D',
+  equity:      '#56F2C1',
+  revenue:     '#FFB020',
+  expense:     '#FF4D6D',
+  other:       '#94A3B8',
 }
 
 export default function JobResultPage() {
@@ -91,10 +91,10 @@ export default function JobResultPage() {
   const filtered  = catFilter === 'all' ? accounts : accounts.filter(a => a.category === catFilter)
 
   const statusColor = {
-    pending:    'var(--color-on-surface-variant)',
-    processing: 'var(--color-primary)',
-    completed:  'var(--color-success)',
-    failed:     'var(--color-danger)',
+    pending:    '#94A3B8',
+    processing: '#56CCF2',
+    completed:  '#56F2C1',
+    failed:     '#FF4D6D',
   }[status?.status ?? 'pending']
 
   const statusIcon = {
@@ -109,12 +109,12 @@ export default function JobResultPage() {
 
       {/* ── Header ─────────────────────────────────────────────── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
-        <Link to="/" style={{ color: 'var(--color-on-surface-variant)', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 4, fontSize: 13, fontFamily: 'JetBrains Mono' }}>
+        <Link to="/" style={{ color: '#94A3B8', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 4, fontSize: 13, fontFamily: 'JetBrains Mono' }}>
           <span className="material-symbols-outlined" style={{ fontSize: 16 }}>arrow_back</span>
           Dashboard
         </Link>
-        <span style={{ color: 'var(--color-border)' }}>/</span>
-        <span style={{ fontFamily: 'JetBrains Mono', fontSize: 13, color: 'var(--color-on-surface-variant)' }}>Agent 1 Output</span>
+        <span style={{ color: 'rgba(47, 128, 255, 0.25)' }}>/</span>
+        <span style={{ fontFamily: 'JetBrains Mono', fontSize: 13, color: '#94A3B8' }}>Agent 1 Output</span>
       </div>
 
       {/* ── Status card ────────────────────────────────────────── */}
@@ -142,8 +142,8 @@ export default function JobResultPage() {
           <div style={{ display: 'flex', gap: 24 }}>
             <Kpi label="STATUS"    value={(status?.status ?? '—').toUpperCase()} color={statusColor} />
             <Kpi label="ELAPSED"   value={`${elapsed}s`}                         color={'var(--color-on-surface-variant)'} />
-            {report && <Kpi label="ACCOUNTS" value={String(report.accounts.length)} color={'var(--color-primary)'} />}
-            {report && <Kpi label="CONFIDENCE" value={`${(report.extraction_confidence * 100).toFixed(1)}%`} color={'var(--color-success)'} />}
+            {report && <Kpi label="ACCOUNTS" value={String(report.accounts.length)} color={'#2F80FF'} />}
+            {report && <Kpi label="CONFIDENCE" value={`${(report.extraction_confidence * 100).toFixed(1)}%`} color={'#56F2C1'} />}
           </div>
         </div>
 
@@ -167,8 +167,8 @@ export default function JobResultPage() {
 
       {/* ── Processing state ───────────────────────────────────── */}
       {(status?.status === 'pending' || status?.status === 'processing') && (
-        <div style={{ background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: 12, padding: 32, textAlign: 'center' }}>
-          <div style={{ fontFamily: 'JetBrains Mono', fontSize: 11, color: 'var(--color-on-surface-variant)', letterSpacing: '0.08em', marginBottom: 16 }}>
+        <div style={{ background: '#0B1023', border: '1px solid rgba(47, 128, 255, 0.16)', borderRadius: 12, padding: 32, textAlign: 'center' }}>
+          <div style={{ fontFamily: 'JetBrains Mono', fontSize: 11, color: '#94A3B8', letterSpacing: '0.08em', marginBottom: 16 }}>
             {status?.status === 'pending' ? 'QUEUED — STARTING...' : 'RUNNING EXTRACTION PIPELINE'}
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 400, margin: '0 auto', textAlign: 'left' }}>
@@ -179,14 +179,14 @@ export default function JobResultPage() {
               { label: 'Claude Haiku → NIIF normalization', done: false },
             ].map((s, i) => (
               <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <span className="material-symbols-outlined" style={{ fontSize: 16, color: s.done ? 'var(--color-success)' : 'var(--color-on-surface-variant)' }}>
+                <span className="material-symbols-outlined" style={{ fontSize: 16, color: s.done ? '#56F2C1' : '#94A3B8' }}>
                   {s.done ? 'check_circle' : 'radio_button_unchecked'}
                 </span>
-                <span style={{ fontFamily: 'Inter', fontSize: 13, color: s.done ? 'var(--color-on-surface)' : 'var(--color-on-surface-variant)' }}>{s.label}</span>
+                <span style={{ fontFamily: 'Inter', fontSize: 13, color: s.done ? '#F5F7FA' : '#94A3B8' }}>{s.label}</span>
               </div>
             ))}
           </div>
-          <div style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: 'var(--color-on-surface-muted-strong)', marginTop: 24 }}>
+          <div style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: '#94A3B8', marginTop: 24 }}>
             Polling every 2s · Textract PDF jobs take 30–120s
           </div>
         </div>
@@ -194,9 +194,9 @@ export default function JobResultPage() {
 
       {/* ── Error ──────────────────────────────────────────────── */}
       {status?.status === 'failed' && (
-        <div style={{ background: 'rgba(255,77,109,0.06)', border: '1px solid rgba(255,77,109,0.12)', borderRadius: 12, padding: 24 }}>
-          <div style={{ fontFamily: 'JetBrains Mono', fontSize: 11, color: 'var(--color-danger)', marginBottom: 8 }}>EXTRACTION FAILED</div>
-          <pre style={{ fontFamily: 'JetBrains Mono', fontSize: 12, color: 'var(--color-danger)', whiteSpace: 'pre-wrap', margin: 0 }}>
+        <div style={{ background: 'rgba(255, 77, 109, 0.08)', border: '1px solid rgba(255, 77, 109, 0.20)', borderRadius: 12, padding: 24 }}>
+          <div style={{ fontFamily: 'JetBrains Mono', fontSize: 11, color: '#FF4D6D', marginBottom: 8 }}>EXTRACTION FAILED</div>
+          <pre style={{ fontFamily: 'JetBrains Mono', fontSize: 12, color: '#FF4D6D', whiteSpace: 'pre-wrap', margin: 0 }}>
             {status.error}
           </pre>
         </div>
@@ -204,7 +204,7 @@ export default function JobResultPage() {
 
       {/* ── Accounts table ─────────────────────────────────────── */}
       {report && report.accounts.length > 0 && (
-        <div style={{ background: 'var(--color-surface-card)', border: '1px solid var(--color-border)', borderRadius: 12, overflow: 'hidden' }}>
+        <div style={{ background: '#0B1023', border: '1px solid rgba(47, 128, 255, 0.16)', borderRadius: 12, overflow: 'hidden' }}>
           {/* table header */}
           <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--color-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
             <div style={{ fontFamily: 'Inter', fontSize: 15, fontWeight: 600, color: 'var(--color-on-surface)' }}>
@@ -219,9 +219,9 @@ export default function JobResultPage() {
                   style={{
                     padding: '3px 10px',
                     borderRadius: 6,
-                    border: `1px solid ${catFilter === cat ? (CATEGORY_COLOR[cat] ?? 'var(--color-brand-accent)') : 'var(--color-border)'}`,
-                    background: catFilter === cat ? `${CATEGORY_COLOR[cat] ?? 'var(--color-brand-accent)'}18` : 'transparent',
-                    color: catFilter === cat ? (CATEGORY_COLOR[cat] ?? 'var(--color-brand-accent)') : 'var(--color-on-surface-muted-strong)',
+                    border: `1px solid ${catFilter === cat ? (CATEGORY_COLOR[cat] ?? '#2F80FF') : 'var(--color-border)'}`,
+                    background: catFilter === cat ? `${CATEGORY_COLOR[cat] ?? '#2F80FF'}18` : 'transparent',
+                    color: catFilter === cat ? (CATEGORY_COLOR[cat] ?? '#2F80FF') : '#94A3B8',
                     fontFamily: 'JetBrains Mono',
                     fontSize: 10,
                     cursor: 'pointer',
@@ -239,9 +239,9 @@ export default function JobResultPage() {
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
-                <tr style={{ background: '#0c0e16' }}>
+                <tr style={{ background: '#03040e' }}>
                   {['ID', 'Category', 'Normalized Account Name', 'Subcategory', 'Current (MM)', 'Prior (MM)', 'Δ%', 'Conf', 'Source'].map(h => (
-                    <th key={h} style={{ padding: '10px 14px', textAlign: h === 'Current (MM)' || h === 'Prior (MM)' || h === 'Δ%' || h === 'Conf' ? 'right' : 'left', fontFamily: 'JetBrains Mono', fontSize: 10, color: 'var(--color-on-surface-variant)', letterSpacing: '0.05em', fontWeight: 500, whiteSpace: 'nowrap', borderBottom: '1px solid var(--color-border)' }}>
+                    <th key={h} style={{ padding: '10px 14px', textAlign: h === 'Current (MM)' || h === 'Prior (MM)' || h === 'Δ%' || h === 'Conf' ? 'right' : 'left', fontFamily: 'JetBrains Mono', fontSize: 10, color: '#94A3B8', letterSpacing: '0.05em', fontWeight: 500, whiteSpace: 'nowrap', borderBottom: '1px solid rgba(47, 128, 255, 0.14)' }}>
                       {h}
                     </th>
                   ))}
@@ -252,27 +252,27 @@ export default function JobResultPage() {
                   const delta = a.previous_value != null && a.previous_value !== 0
                     ? ((a.current_value - a.previous_value) / Math.abs(a.previous_value)) * 100
                     : null
-                  const catColor = CATEGORY_COLOR[a.category] ?? 'var(--color-on-surface-muted-strong)'
+                  const catColor = CATEGORY_COLOR[a.category] ?? '#94A3B8'
                   return (
-                      <tr key={a.account_id} style={{ background: i % 2 === 0 ? 'transparent' : 'rgba(12,14,22,0.25)', borderBottom: '1px solid rgba(48,54,61,0.14)' }}>
-                        <td style={{ padding: '9px 14px', fontFamily: 'JetBrains Mono', fontSize: 11, color: 'var(--color-on-surface-variant)', whiteSpace: 'nowrap' }}>{a.account_id}</td>
+                      <tr key={a.account_id} style={{ background: i % 2 === 0 ? 'transparent' : '#03040e40', borderBottom: '1px solid rgba(47, 128, 255, 0.08)' }}>
+                        <td style={{ padding: '9px 14px', fontFamily: 'JetBrains Mono', fontSize: 11, color: '#94A3B8', whiteSpace: 'nowrap' }}>{a.account_id}</td>
                       <td style={{ padding: '9px 14px', whiteSpace: 'nowrap' }}>
                         <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: catColor, background: `${catColor}18`, border: `1px solid ${catColor}30`, padding: '2px 7px', borderRadius: 4 }}>
                           {a.category}
                         </span>
                       </td>
-                      <td style={{ padding: '9px 14px', fontFamily: 'Inter', fontSize: 13, color: 'var(--color-on-surface)', minWidth: 240 }}>{a.normalized_account_name}</td>
-                      <td style={{ padding: '9px 14px', fontFamily: 'Inter', fontSize: 11, color: 'var(--color-on-surface-variant)' }}>{a.subcategory}</td>
-                      <td style={{ padding: '9px 14px', fontFamily: 'JetBrains Mono', fontSize: 12, color: 'var(--color-on-surface)', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                      <td style={{ padding: '9px 14px', fontFamily: 'Inter', fontSize: 13, color: '#F5F7FA', minWidth: 240 }}>{a.normalized_account_name}</td>
+                      <td style={{ padding: '9px 14px', fontFamily: 'Inter', fontSize: 11, color: '#94A3B8' }}>{a.subcategory}</td>
+                      <td style={{ padding: '9px 14px', fontFamily: 'JetBrains Mono', fontSize: 12, color: '#F5F7FA', textAlign: 'right', whiteSpace: 'nowrap' }}>
                         {a.current_value.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
                       </td>
                       <td style={{ padding: '9px 14px', fontFamily: 'JetBrains Mono', fontSize: 12, color: 'var(--color-on-surface-muted-strong)', textAlign: 'right', whiteSpace: 'nowrap' }}>
                         {a.previous_value != null ? a.previous_value.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : '—'}
                       </td>
-                      <td style={{ padding: '9px 14px', fontFamily: 'JetBrains Mono', fontSize: 11, textAlign: 'right', whiteSpace: 'nowrap', color: delta == null ? 'var(--color-on-surface-variant)' : delta > 0 ? 'var(--color-success)' : 'var(--color-danger)' }}>
+                      <td style={{ padding: '9px 14px', fontFamily: 'JetBrains Mono', fontSize: 11, textAlign: 'right', whiteSpace: 'nowrap', color: delta == null ? '#94A3B8' : delta > 0 ? '#56F2C1' : '#FF4D6D' }}>
                         {delta != null ? `${delta > 0 ? '+' : ''}${delta.toFixed(1)}%` : '—'}
                       </td>
-                      <td style={{ padding: '9px 14px', fontFamily: 'JetBrains Mono', fontSize: 11, textAlign: 'right', color: a.confidence_score >= 0.8 ? 'var(--color-success)' : a.confidence_score >= 0.5 ? 'var(--color-warning)' : 'var(--color-danger)' }}>
+                      <td style={{ padding: '9px 14px', fontFamily: 'JetBrains Mono', fontSize: 11, textAlign: 'right', color: a.confidence_score >= 0.8 ? '#56F2C1' : a.confidence_score >= 0.5 ? '#FFB020' : '#FF4D6D' }}>
                         {(a.confidence_score * 100).toFixed(0)}%
                       </td>
                       <td style={{ padding: '9px 14px', fontFamily: 'JetBrains Mono', fontSize: 10, color: 'var(--color-on-surface-muted-strong)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={a.source_file}>
@@ -289,12 +289,12 @@ export default function JobResultPage() {
 
       {/* ── Warnings ───────────────────────────────────────────── */}
       {report && report.extraction_warnings.length > 0 && (
-        <div style={{ marginTop: 16, background: 'rgba(255,176,32,0.06)', border: '1px solid rgba(255,176,32,0.12)', borderRadius: 12, padding: '16px 20px' }}>
-          <div style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: 'var(--color-warning)', letterSpacing: '0.08em', marginBottom: 8 }}>
+        <div style={{ marginTop: 16, background: 'rgba(255, 176, 32, 0.08)', border: '1px solid rgba(255, 176, 32, 0.20)', borderRadius: 12, padding: '16px 20px' }}>
+          <div style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: '#FFB020', letterSpacing: '0.08em', marginBottom: 8 }}>
             EXTRACTION WARNINGS ({report.extraction_warnings.length})
           </div>
           {report.extraction_warnings.map((w, i) => (
-            <div key={i} style={{ fontFamily: 'Inter', fontSize: 12, color: 'var(--color-warning)', marginBottom: 4 }}>· {w}</div>
+            <div key={i} style={{ fontFamily: 'Inter', fontSize: 12, color: '#FFB020', marginBottom: 4 }}>· {w}</div>
           ))}
         </div>
       )}
@@ -309,7 +309,7 @@ export default function JobResultPage() {
 function Kpi({ label, value, color }: { label: string; value: string; color: string }) {
   return (
     <div style={{ textAlign: 'right' }}>
-      <div style={{ fontFamily: 'JetBrains Mono', fontSize: 9, color: 'var(--color-on-surface-muted-strong)', letterSpacing: '0.08em', marginBottom: 2 }}>{label}</div>
+      <div style={{ fontFamily: 'JetBrains Mono', fontSize: 9, color: '#94A3B8', letterSpacing: '0.08em', marginBottom: 2 }}>{label}</div>
       <div style={{ fontFamily: 'JetBrains Mono', fontSize: 16, fontWeight: 700, color }}>{value}</div>
     </div>
   )

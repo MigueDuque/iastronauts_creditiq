@@ -410,10 +410,13 @@ class FinancialAnalyzerService:
             reporting_period = getattr(payload.business_context, "reporting_period", None) or ""
             analysis_period = reporting_period or None
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+                # llm_provider=None → macro news ranking uses the deterministic
+                # keyword heuristic instead of an LLM call. The heuristic is
+                # adequate for news relevance and saves one round-trip per job.
                 _fut = _pool.submit(
                     generate_macro_context,
                     analysis_period=analysis_period,
-                    llm_provider=self._llm,
+                    llm_provider=None,
                 )
                 try:
                     macro_ctx = _fut.result(timeout=_MACRO_TIMEOUT)

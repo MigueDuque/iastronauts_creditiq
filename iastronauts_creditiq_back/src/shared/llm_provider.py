@@ -16,6 +16,83 @@ _TENANT_BOUNDARY_TEMPLATE = (
     "=== END BOUNDARY ===\n\n"
 )
 
+# Human-readable names for the supported output languages.
+_LANGUAGE_NAMES = {
+    "es": "Spanish (español)",
+    "en": "English",
+    "pt": "Portuguese (português)",
+}
+
+# Injected into every system prompt so the *prose* presented to the client is
+# localized, while the machine-readable contract (JSON keys, enums, IDs) stays in
+# English exactly as the prompts specify — those values are validated downstream.
+_LANGUAGE_DIRECTIVE_TEMPLATE = (
+    "\n\n=== OUTPUT LANGUAGE ===\n"
+    "Write every human-readable, narrative or explanatory string VALUE in {language}: "
+    "summaries, insights, findings, recommendations, headlines, theses, warnings and any prose "
+    "intended for the end client.\n"
+    "Do NOT translate the machine-readable contract. Keep ALL of the following exactly as "
+    "specified, in English/code form: JSON keys and field names; enum values such as "
+    "LOW / MEDIUM / HIGH, STABLE / GROWING / DECLINING / CRITICAL, markdown / pdf; status codes; "
+    "account IDs; currency codes; and numeric values.\n"
+    "Only the prose shown to the client is translated — the data structure remains unchanged.\n"
+    "=== END OUTPUT LANGUAGE ===\n"
+)
+
+
+# Resolved once per warm container — avoids a Secrets Manager round-trip on every
+# LLMProvider instantiation (one per agent invocation).
+_cached_anthropic_key: Optional[str] = None
+
+
+def _resolve_anthropic_key() -> str:
+    """
+    Resolve the Anthropic API key.
+
+    Priority:
+      1. ANTHROPIC_API_KEY env var       ← local dev (.env) / explicit override
+      2. ANTHROPIC_API_KEY_SECRET_ARN    ← production (Secrets Manager)
+
+    Cached for the container lifetime. Raises ValueError if neither source yields
+    a key. WHY: keeping the key out of plaintext Lambda env vars (readable via the
+    console / lambda:GetFunctionConfiguration) is a baseline requirement for a
+    financial product.
+    """
+    global _cached_anthropic_key
+    if _cached_anthropic_key:
+        return _cached_anthropic_key
+
+    env_key = os.getenv("ANTHROPIC_API_KEY")
+    if env_key:
+        _cached_anthropic_key = env_key
+        return env_key
+
+    secret_arn = os.getenv("ANTHROPIC_API_KEY_SECRET_ARN")
+    if secret_arn:
+        import boto3
+        try:
+            sm = boto3.client("secretsmanager")
+            secret = sm.get_secret_value(SecretId=secret_arn).get("SecretString", "")
+        except Exception as exc:
+            raise ValueError(
+                f"No se pudo obtener la API key desde Secrets Manager ({secret_arn}): {exc}"
+            ) from exc
+        # Support both a raw-string secret and a JSON {"ANTHROPIC_API_KEY": "..."} secret.
+        key = secret
+        try:
+            parsed = json.loads(secret)
+            if isinstance(parsed, dict):
+                key = parsed.get("ANTHROPIC_API_KEY") or parsed.get("api_key") or ""
+        except (json.JSONDecodeError, TypeError):
+            pass
+        if key:
+            _cached_anthropic_key = key
+            return key
+
+    raise ValueError(
+        "ANTHROPIC_API_KEY no está configurada (ni env var ni Secrets Manager)"
+    )
+
 
 class LLMProvider:
     """
@@ -24,17 +101,21 @@ class LLMProvider:
     - API Directa de Anthropic (usando ANTHROPIC_API_KEY)
     - AWS Bedrock (usando roles de IAM y boto3)
     """
-    def __init__(self):
+    def __init__(self, model: Optional[str] = None):
         self.provider = os.getenv("LLM_PROVIDER", "anthropic_api").lower()
-        self.model = os.getenv("LLM_MODEL", "claude-sonnet-4-6")
-        
+        # Per-agent override: callers can pass model=... (e.g. a cheaper model for
+        # the mechanical extraction agent) to avoid paying premium rates on every
+        # call. Falls back to the global LLM_MODEL env when not specified.
+        self.model = model or os.getenv("LLM_MODEL", "claude-sonnet-4-6")
+        # Language for client-facing prose. Defaults to Spanish (es) — the clients
+        # are Spanish-speaking even though the data contract stays in English.
+        self.report_language = os.getenv("REPORT_LANGUAGE", "es").lower()
+
         logger.info(f"Inicializando LLMProvider con proveedor: {self.provider}")
 
         if self.provider == "anthropic_api":
             import anthropic
-            api_key = os.getenv("ANTHROPIC_API_KEY")
-            if not api_key:
-                raise ValueError("ANTHROPIC_API_KEY no está configurada")
+            api_key = _resolve_anthropic_key()
             self.client = anthropic.Anthropic(api_key=api_key)
             
         elif self.provider == "bedrock":
@@ -52,8 +133,9 @@ class LLMProvider:
                 
             self.client = boto3.client(**client_kwargs)
             
-            # Bedrock usa un formato de modelo distinto. Usamos 'us.' para Cross-Region Inference Profiles
-            self.model = os.getenv("BEDROCK_MODEL", "us.anthropic.claude-sonnet-4-5-20251001")
+            # Bedrock usa un formato de modelo distinto. Usamos 'us.' para Cross-Region Inference Profiles.
+            # Un model explícito (override por agente) tiene prioridad sobre BEDROCK_MODEL.
+            self.model = model or os.getenv("BEDROCK_MODEL", "us.anthropic.claude-sonnet-4-5-20251001")
         else:
             raise ValueError(f"Proveedor LLM no soportado: {self.provider}")
 
@@ -79,6 +161,17 @@ class LLMProvider:
         )
         return system_prompt + boundary
 
+    def _inject_language(self, system_prompt: str) -> str:
+        """
+        Append the output-language directive so client-facing prose is localized
+        while the JSON contract (keys, enums, IDs) stays in English. English is a
+        no-op since the prompts are already authored in English.
+        """
+        if self.report_language == "en":
+            return system_prompt
+        language = _LANGUAGE_NAMES.get(self.report_language, _LANGUAGE_NAMES["es"])
+        return system_prompt + _LANGUAGE_DIRECTIVE_TEMPLATE.format(language=language)
+
     def generate_text(
         self,
         system_prompt: str,
@@ -97,9 +190,11 @@ class LLMProvider:
         for extraction calls that return large JSON arrays).
         """
         scoped_system = self._inject_tenant_boundary(system_prompt, tenant_id, job_id)
+        scoped_system = self._inject_language(scoped_system)
         logger.info(
-            "llm_call | provider=%s model=%s tenant=%s job=%s max_tokens=%d",
-            self.provider, self.model, tenant_id or "anon", job_id or "N/A", max_tokens,
+            "llm_call | provider=%s model=%s tenant=%s job=%s lang=%s max_tokens=%d",
+            self.provider, self.model, tenant_id or "anon", job_id or "N/A",
+            self.report_language, max_tokens,
         )
         if self.provider == "anthropic_api":
             response = self.client.messages.create(
