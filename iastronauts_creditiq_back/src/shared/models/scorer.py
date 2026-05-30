@@ -44,7 +44,11 @@ class ScorerOutput(BaseModel):
 
     # 5 risk dimensions (liquidity, credit, solvency, market, operational)
     risk_dimensions: dict = {}
-    # LLM-generated risk narrative (paragraphs + recommendations + headline)
+    # 3 report-facing risk categories (credito, mercado, financiero) built from the
+    # 5 dimensions; each carries level/score/key_findings/risk_drivers/metrics.
+    risk_categories: dict = {}
+    # LLM-generated risk narrative (paragraphs + recommendations + headline +
+    # per-category narratives under "category_narratives")
     risk_summary: dict = {}
     # True when scoring thresholds were adjusted for investment fund context
     fund_context_adjusted: bool = False

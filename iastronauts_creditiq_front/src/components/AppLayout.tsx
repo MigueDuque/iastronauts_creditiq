@@ -28,7 +28,11 @@ export default function AppLayout() {
             minWidth: 0,
           }}
         >
-          <Outlet />
+          {/* Cap + center content so it stays aligned on wide screens / projectors
+              instead of stretching tables edge-to-edge. */}
+          <Box sx={{ width: '100%', maxWidth: 1440, mx: 'auto' }}>
+            <Outlet />
+          </Box>
         </Box>
       </Box>
 

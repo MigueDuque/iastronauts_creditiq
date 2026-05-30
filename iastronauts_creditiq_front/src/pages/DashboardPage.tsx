@@ -7,7 +7,7 @@ export default function DashboardPage() {
     <div className="p-margin-mobile md:p-margin-desktop space-y-gutter">
 
       {/* ── Page header ─────────────────────────────────────────────── */}
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-4">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-4 animate-fade-in">
         <div>
           <span className="text-primary font-label-md text-label-md uppercase tracking-widest mb-1 block">
             Welcome, IAstronauts
@@ -33,7 +33,7 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 md:grid-cols-12 gap-gutter">
 
         {/* AI Executive Summary — 8 cols */}
-        <div className="md:col-span-8 glass-panel rounded-xl p-6 ai-gradient-border relative overflow-hidden group">
+        <div className="md:col-span-8 glass-panel floating-card animate-fade-in stagger-1 rounded-xl p-6 ai-gradient-border relative overflow-hidden group">
           {/* Decorative brand icon */}
           <img
             src={`${ICONS}/icono.png`}
@@ -76,7 +76,7 @@ export default function DashboardPage() {
         </div>
 
         {/* Enterprise Risk Score — 4 cols */}
-        <div className="md:col-span-4 bg-surface border border-border rounded-xl p-6 flex flex-col items-center justify-center relative">
+        <div className="md:col-span-4 bg-surface border border-border floating-card animate-fade-in stagger-2 rounded-xl p-6 flex flex-col items-center justify-center relative">
           <h3 className="text-label-md font-label-md text-outline absolute top-4 left-4 uppercase">Enterprise Risk Score</h3>
           <button className="absolute top-4 right-4 text-outline hover:text-on-surface transition-colors">
             <span className="material-symbols-outlined text-[18px]">more_vert</span>
@@ -109,7 +109,7 @@ export default function DashboardPage() {
         </div>
 
         {/* Recent Analyses — 8 cols */}
-        <div className="md:col-span-8 bg-surface border border-border rounded-xl overflow-hidden">
+        <div className="md:col-span-8 bg-surface border border-border floating-card animate-fade-in stagger-3 rounded-xl overflow-hidden">
           <div className="p-4 border-b border-border flex justify-between items-center bg-surface-container-low">
             <h3 className="text-body-md font-body-md font-semibold text-on-surface">Recent Analyses</h3>
             <Link to="/analysis" className="text-label-sm font-label-sm text-primary hover:text-primary/80 transition-colors flex items-center gap-1">
@@ -152,7 +152,7 @@ export default function DashboardPage() {
         </div>
 
         {/* Financial Health — 4 cols */}
-        <div className="md:col-span-4 bg-surface border border-border rounded-xl p-6">
+        <div className="md:col-span-4 bg-surface border border-border floating-card animate-fade-in stagger-4 rounded-xl p-6">
           <h3 className="text-label-md font-label-md text-outline uppercase mb-4">Financial Health Indicators</h3>
           <div className="flex flex-col gap-4">
             {[

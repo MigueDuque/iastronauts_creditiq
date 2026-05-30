@@ -92,16 +92,18 @@ export default function AiReasoningPipeline({ status, jobId, progress, phase }: 
           step:  derivedStep(i, status),
         }))
 
+  const anyActive = steps.some(s => s.state === 'active')
+
   return (
     <aside className="w-full md:w-[300px] flex-shrink-0 flex flex-col gap-4">
-      <div className="bg-surface-container border border-border rounded p-4 h-full ai-glow">
+      <div className="bg-surface-container border border-border rounded-xl p-4 h-full ai-glow">
 
         {/* Header */}
         <div className="flex items-center justify-between mb-5 pb-4 border-b border-border">
           <h2 className="text-label-md font-label-md text-primary uppercase tracking-wider">AI Pipeline</h2>
           <div className="flex items-center gap-2">
             {status && status !== null && (
-              <span className={`text-[9px] font-mono px-2 py-0.5 rounded border ${statusLabel.cls}`}>
+              <span className={`text-[9px] font-mono px-2 py-0.5 rounded border ${statusLabel.cls} ${status === 'processing' || status === 'pending' ? 'animate-breathe' : ''}`}>
                 {statusLabel.text}
               </span>
             )}
@@ -119,7 +121,11 @@ export default function AiReasoningPipeline({ status, jobId, progress, phase }: 
 
         {/* Steps */}
         <div className="relative">
-          <div className="absolute left-3 top-2 bottom-2 w-[1px] bg-border" />
+          {/* Connector rail — a pulse of light travels down it while a step runs */}
+          <div className="absolute left-3 top-2 bottom-2 w-[2px] overflow-hidden rounded-full">
+            <div className="absolute inset-0 bg-border" />
+            {anyActive && <div className="rail-flow" />}
+          </div>
           <div className="flex flex-col gap-5 relative z-10">
             {steps.map((step, i) => {
               const s = step.state
@@ -159,8 +165,8 @@ export default function AiReasoningPipeline({ status, jobId, progress, phase }: 
 
                     {/* Real-time sub-step from progress */}
                     {s === 'active' && (
-                      <div className="mt-2 bg-surface p-2 rounded border border-border text-[10px] font-mono text-secondary-fixed leading-relaxed">
-                        <span className="animate-pulse">▊</span>{' '}
+                      <div className="mt-2 bg-surface p-2 rounded-md border border-border text-[10px] font-mono text-secondary-fixed leading-relaxed">
+                        <span className="animate-caret">▊</span>{' '}
                         {step.step ?? 'Running…'}
                       </div>
                     )}

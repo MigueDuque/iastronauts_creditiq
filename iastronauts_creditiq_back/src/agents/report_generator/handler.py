@@ -38,6 +38,8 @@ def lambda_handler(event: dict, context) -> dict:
         analysis_results=payload.analysis_results,
         niif_note_drafts=[],
         markdown_report_url="",
+        risk_categories=payload.risk_categories,
+        risk_summary=payload.risk_summary,
     )
 
     s3_key = save_report(result, bucket)

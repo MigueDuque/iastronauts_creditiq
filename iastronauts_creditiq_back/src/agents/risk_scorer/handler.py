@@ -24,7 +24,7 @@ from .credit_engine import score_credit
 from .solvency_engine import score_solvency
 from .market_risk_engine import score_market_risk
 from .operational_engine import score_operational
-from .composite_scorer import compute_composite
+from .composite_scorer import compute_composite, build_risk_categories
 from .llm_reasoning import generate_risk_narrative
 
 logger = logging.getLogger("risk_scorer")
@@ -49,6 +49,7 @@ def lambda_handler(event: dict, context) -> dict:
 
     analysis_list = [a.model_dump() for a in payload.analysis_results]
     is_fund = _is_investment_fund(payload)
+    sheet_concentration = payload.sheet_concentration or {}
 
     # ─── 1. Run 5 deterministic risk engines ──────────────────────────────────
     liquidity = score_liquidity(
@@ -64,6 +65,7 @@ def lambda_handler(event: dict, context) -> dict:
         analysis_results=analysis_list,
         fund_analysis=payload.fund_analysis,
         is_investment_fund=is_fund,
+        sheet_concentration=sheet_concentration,
     )
 
     solvency = score_solvency(
@@ -78,6 +80,8 @@ def lambda_handler(event: dict, context) -> dict:
         fund_analysis=payload.fund_analysis,
         analysis_results=analysis_list,
         is_investment_fund=is_fund,
+        sheet_concentration=sheet_concentration,
+        currency=payload.currency,
     )
 
     operational = score_operational(
@@ -110,6 +114,15 @@ def lambda_handler(event: dict, context) -> dict:
         composite.requires_human_review,
     )
 
+    # ─── 2b. Report-facing risk categories (Crédito / Mercado / Financiero) ────
+    risk_categories = build_risk_categories(
+        liquidity=liquidity,
+        credit=credit,
+        solvency=solvency,
+        market=market,
+        operational=operational,
+    )
+
     # ─── 3. LLM risk narrative ─────────────────────────────────────────────────
     all_drivers = (
         liquidity.risk_drivers
@@ -140,6 +153,7 @@ def lambda_handler(event: dict, context) -> dict:
             dimension_levels=composite.dimension_levels,
             dimension_findings=dimension_findings,
             all_risk_drivers=all_drivers,
+            risk_categories=risk_categories,
             tenant_id=payload.tenant_id,
             job_id=payload.job_id,
             llm=llm,
@@ -191,6 +205,7 @@ def lambda_handler(event: dict, context) -> dict:
         analysis_confidence=composite.analysis_confidence,
         anti_hallucination_passed=composite.anti_hallucination_passed,
         risk_dimensions=risk_dimensions,
+        risk_categories=risk_categories,
         risk_summary=risk_summary,
         fund_context_adjusted=is_fund,
     )

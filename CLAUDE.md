@@ -113,8 +113,8 @@ Methods: `generate_text(...)` → `str`, `generate_json(...)` → `dict`. Both i
 |---|-------|------|--------|
 | 1 | DocumentExtractor | `src/agents/document_extractor/handler.py` | ✅ Textract (PDF), pandas/openpyxl (Excel/CSV), LLM normalization. Populates `source_sheet`, `is_total`, `investment_type`, `issuer_name`. |
 | 2 | FinancialAnalyzer | `src/agents/financial_analyzer/handler.py` | ✅ 14-engine deterministic + 4-sub-agent LLM ("Math First, Synthesis Second, LLM Third") |
-| 3 | RiskScorer | `src/agents/risk_scorer/handler.py` | ✅ 5 deterministic risk engines + composite scorer + LLM narrative. Fund-aware weights. |
-| 4 | ReportGenerator | `src/agents/report_generator/handler.py` | ⬜ Stub — saves to S3, fetches historical reports. TODO: LLM narrative + NIIF note drafts. |
+| 3 | RiskScorer | `src/agents/risk_scorer/handler.py` | ✅ 5 deterministic engines (liquidity, credit, solvency, market, operational) + composite + LLM narrative. Fund-aware weights. Credit engine scores **counterparty/custodian** concentration (`bank_breakdown`); market engine scores **interest-rate** (fixed-income via `instrument_breakdown`) + **FX** exposure. Output regrouped into 3 report-facing categories: `risk_categories` = **Riesgo de Crédito / Mercado / Financiero** (financiero = liquidity+solvency). |
+| 4 | ReportGenerator | `src/agents/report_generator/handler.py` | ⬜ Stub for narrative/NIIF — but now **renders the risk section** (`_render_risk_section` in `s3_report_store.py`) from `risk_categories` + `risk_summary`. TODO: LLM executive narrative + NIIF note drafts. |
 | 5 | RevisorInteligente | `src/agents/revisor_inteligente/handler.py` | ✅ 6-category validation (structural, math, cross-ref, business logic, consistency, narrative LLM). ERROR=−10, WARNING=−3. |
 
 **Adding a new agent**: create `handler.py`, add `AWS::Serverless::Function` in `template.yaml`, add `Task` state in `analysis_workflow.json`, add Lambda ARN to `WorkflowRole`.

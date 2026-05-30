@@ -5,7 +5,7 @@ Measures credit and default risk.
 
 For investment funds:
   - Issuer concentration: exposure to any single issuer defaulting
-  - Counterparty (custodian bank) risk
+  - Counterparty (custodian bank) risk — derived from sheet_concentration.bank_breakdown
   - Accounts receivable aging
 
 For operating companies:
@@ -17,6 +17,7 @@ Scoring (0–100, higher = less risk):
   Component 1 — Collection days / issuer concentration:  max 40 pts
   Component 2 — Receivables % of assets:                 max 30 pts
   Component 3 — Receivables trend / related-party risk:  max 30 pts
+  Counterparty/custodian concentration:                  up to −15 pts deduction
 """
 
 from __future__ import annotations
@@ -36,6 +37,9 @@ class CreditRiskResult:
     top_issuer_name: str | None             # fund-specific
     top_issuer_pct_portfolio: float | None  # fund-specific; pct of investment portfolio
     related_party_exposure: bool
+    top_custodian_name: str | None = None       # counterparty: bank holding most of the cash
+    top_custodian_pct: float | None = None      # % of total cash at the top custodian bank
+    num_custodians: int | None = None           # number of distinct custodian banks
     key_findings: List[str] = field(default_factory=list)
     risk_drivers: List[str] = field(default_factory=list)
     is_fund_adjusted: bool = False
@@ -54,6 +58,7 @@ def score_credit(
     analysis_results: list,
     fund_analysis: dict,
     is_investment_fund: bool,
+    sheet_concentration: dict | None = None,
 ) -> CreditRiskResult:
     ratios = financial_ratios.get("ratios", {})
     totals = financial_ratios.get("totals", {})
@@ -170,7 +175,28 @@ def score_credit(
     if not related_party:
         pts_trend += 10
 
-    score = pts_dias + pts_ar + pts_trend
+    # ─── Counterparty / custodian concentration (from sheet_concentration) ─────
+    # Cash held at a single custodian bank is a counterparty-default exposure.
+    top_custodian_name: str | None = None
+    top_custodian_pct: float | None = None
+    num_custodians: int | None = None
+    custodian_deduction = 0
+
+    bank_breakdown = (sheet_concentration or {}).get("bank_breakdown") or []
+    if (sheet_concentration or {}).get("bank_available") and bank_breakdown:
+        num_custodians = len(bank_breakdown)
+        top_bank = bank_breakdown[0]
+        top_custodian_name = top_bank.get("name")
+        top_custodian_pct = top_bank.get("pct")
+        if top_custodian_pct is not None:
+            if top_custodian_pct >= 90.0:
+                custodian_deduction = 15
+            elif top_custodian_pct >= 70.0:
+                custodian_deduction = 10
+            elif top_custodian_pct >= 50.0:
+                custodian_deduction = 5
+
+    score = max(0, pts_dias + pts_ar + pts_trend - custodian_deduction)
 
     # ─── Build narrative findings ──────────────────────────────────────────────
     findings: List[str] = []
@@ -202,6 +228,22 @@ def score_credit(
         findings.append("Partes relacionadas detectadas en el análisis de cuentas — riesgo de operaciones vinculadas (NIC 24).")
         drivers.append("Operaciones con partes relacionadas identificadas")
 
+    if top_custodian_pct is not None:
+        if top_custodian_pct >= 90.0:
+            findings.append(
+                f"Riesgo de contraparte crítico: {top_custodian_pct:.1f}% del efectivo está depositado en un único custodio ({top_custodian_name})."
+            )
+            drivers.append(f"Efectivo concentrado >90% en un solo custodio ({top_custodian_name})")
+        elif top_custodian_pct >= 70.0:
+            findings.append(
+                f"Concentración elevada de contraparte: {top_custodian_pct:.1f}% del efectivo en {top_custodian_name}."
+            )
+            drivers.append(f"Efectivo concentrado >70% en un solo custodio ({top_custodian_name})")
+        elif num_custodians and num_custodians >= 3 and top_custodian_pct < 50.0:
+            findings.append(
+                f"Riesgo de contraparte diversificado: efectivo distribuido en {num_custodians} custodios (mayor: {top_custodian_pct:.1f}%)."
+            )
+
     return CreditRiskResult(
         level=_level_from_score(score),
         score=score,
@@ -210,6 +252,9 @@ def score_credit(
         top_issuer_name=top_issuer_name,
         top_issuer_pct_portfolio=top_issuer_pct,
         related_party_exposure=related_party,
+        top_custodian_name=top_custodian_name,
+        top_custodian_pct=top_custodian_pct,
+        num_custodians=num_custodians,
         key_findings=findings,
         risk_drivers=drivers,
         is_fund_adjusted=is_investment_fund,

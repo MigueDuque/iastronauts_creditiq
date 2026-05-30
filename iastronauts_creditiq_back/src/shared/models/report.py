@@ -32,3 +32,9 @@ class FinalReportOutput(BaseModel):
     niif_note_drafts: list[NiifNoteDraft]
     markdown_report_url: str
     pdf_report_url: str | None = None
+
+    # ── Risk section (propagated from ScorerOutput) ──────────────────────────
+    # 3 report-facing categories: credito, mercado, financiero
+    risk_categories: dict = {}
+    # LLM risk narrative: paragraphs + category_narratives + recommendations + headline
+    risk_summary: dict = {}

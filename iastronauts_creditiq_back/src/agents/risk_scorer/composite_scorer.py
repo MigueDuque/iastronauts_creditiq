@@ -51,6 +51,101 @@ def _level_from_score(score: int) -> RiskLevel:
     return RiskLevel.HIGH
 
 
+_LEVEL_RANK = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+
+
+def _worst_level(*levels: str) -> str:
+    """Returns the most severe risk level among the inputs."""
+    return max(levels, key=lambda lvl: _LEVEL_RANK.get(lvl, 0))
+
+
+def build_risk_categories(
+    liquidity: LiquidityRiskResult,
+    credit: CreditRiskResult,
+    solvency: SolvencyRiskResult,
+    market: MarketRiskResult,
+    operational: OperationalRiskResult,
+) -> Dict[str, Any]:
+    """
+    Regroups the 5 deterministic engines into the 3 report-facing risk
+    categories the executive report renders:
+
+      - "credito"    (Riesgo de Crédito)    ← credit engine (issuer, receivables, counterparty)
+      - "mercado"    (Riesgo de Mercado)    ← market engine (fair value, concentration, rate, FX)
+      - "financiero" (Riesgo Financiero)    ← liquidity + solvency (funding structure)
+
+    Operational/profitability is intentionally excluded — it is a business-risk
+    signal, not a financial-risk category, and feeds the executive summary.
+    """
+    # Riesgo Financiero = liquidity (dominant) + solvency, with a ceiling rule.
+    fin_score = round(liquidity.score * 0.6 + solvency.score * 0.4)
+    fin_level = _worst_level(liquidity.level.value, solvency.level.value)
+    # Reconcile arithmetic level with the ceiling: never softer than the worst component.
+    fin_level = _worst_level(fin_level, _level_from_score(fin_score).value)
+
+    return {
+        "credito": {
+            "label": "Riesgo de Crédito",
+            "level": credit.level.value,
+            "score": credit.score,
+            "key_findings": credit.key_findings,
+            "risk_drivers": credit.risk_drivers,
+            "metrics": {
+                "dias_cartera": credit.dias_cartera,
+                "cuentas_cobrar_pct_activos": credit.cuentas_cobrar_pct_activos,
+                "top_issuer_name": credit.top_issuer_name,
+                "top_issuer_pct_portfolio": credit.top_issuer_pct_portfolio,
+                "top_custodian_name": credit.top_custodian_name,
+                "top_custodian_pct": credit.top_custodian_pct,
+                "num_custodians": credit.num_custodians,
+                "related_party_exposure": credit.related_party_exposure,
+            },
+        },
+        "mercado": {
+            "label": "Riesgo de Mercado",
+            "level": market.level.value,
+            "score": market.score,
+            "key_findings": market.key_findings,
+            "risk_drivers": market.risk_drivers,
+            "metrics": {
+                "fair_value_income_pct": market.fair_value_income_pct,
+                "equity_exposure_pct": market.equity_exposure_pct,
+                "hhi": market.hhi,
+                "effective_positions": market.effective_positions,
+                "top_issuer_pct": market.top_issuer_pct,
+                "top3_concentration_pct": market.top3_concentration_pct,
+                "fixed_income_pct": market.fixed_income_pct,
+                "interest_rate_sensitivity": market.interest_rate_sensitivity,
+                "fx_exposure_pct": market.fx_exposure_pct,
+                "reporting_currency": market.reporting_currency,
+            },
+        },
+        "financiero": {
+            "label": "Riesgo Financiero",
+            "level": fin_level,
+            "score": fin_score,
+            "key_findings": liquidity.key_findings + solvency.key_findings,
+            "risk_drivers": liquidity.risk_drivers + solvency.risk_drivers,
+            "components": {
+                "liquidez": {
+                    "level": liquidity.level.value,
+                    "score": liquidity.score,
+                    "razon_corriente": liquidity.razon_corriente,
+                    "cash_pct_assets": liquidity.cash_pct_assets,
+                    "net_redemption_pressure_pct": liquidity.net_redemption_pressure_pct,
+                },
+                "solvencia": {
+                    "level": solvency.level.value,
+                    "score": solvency.score,
+                    "endeudamiento_global": solvency.endeudamiento_global,
+                    "deuda_patrimonio": solvency.deuda_patrimonio,
+                    "equity_ratio": solvency.equity_ratio,
+                },
+            },
+        },
+    }
+
+
 def _run_anti_hallucination_checks(analysis_results: list, financial_ratios: dict) -> tuple[int, list[str]]:
     """
     Checks the FinancialAnalyzer output quality.

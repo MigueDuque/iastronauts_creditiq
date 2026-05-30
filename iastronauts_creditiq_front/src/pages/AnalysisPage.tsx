@@ -615,10 +615,6 @@ export default function AnalysisPage() {
     .filter(m => m.key !== 'aum' && m.key !== 'earnings_quality')
   const isFundWithNav = !!(analyzerData?.fund_analysis?.is_investment_fund &&
     analyzerData.fund_analysis.nav_reconciliation?.closing_nav != null)
-  const row1ColCount = (isFundWithNav ? 2 : 1) + Math.min(dashboardMetrics.length, 3)
-  const row1GridCols =
-    row1ColCount <= 3 ? 'md:grid-cols-3' :
-    row1ColCount === 4 ? 'md:grid-cols-4' : 'md:grid-cols-5'
   const metricIcon = (key: string) =>
     key === 'aum_growth' ? 'trending_up' : key === 'net_flow' ? 'swap_vert' :
     key === 'roe' ? 'percent' : key === 'net_margin' ? 'payments' :
@@ -647,11 +643,11 @@ export default function AnalysisPage() {
       />
 
       {/* Right: Main canvas */}
-      <div className="flex-1 flex flex-col gap-4 overflow-hidden min-w-0">
+      <div className="flex-1 flex flex-col gap-4 overflow-hidden min-w-0 animate-fade-in">
 
         {/* No active job */}
         {!jobId && (
-          <div className="bg-surface border border-border rounded flex flex-col items-center justify-center gap-6 py-20 text-center">
+          <div className="bg-surface border border-border rounded-lg flex flex-col items-center justify-center gap-6 py-20 text-center">
             <span className="material-symbols-outlined text-outline text-[48px]">analytics</span>
             <div>
               <p className="text-body-md font-body-md text-on-surface mb-1">No active analysis</p>
@@ -670,7 +666,7 @@ export default function AnalysisPage() {
         {jobId && (
           <>
             {/* ── Status bar ── */}
-            <div className="bg-surface border border-border rounded px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
+            <div className="bg-surface border border-border rounded-lg px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-3">
                 <span
                   className="material-symbols-outlined text-[22px]"
@@ -725,7 +721,7 @@ export default function AnalysisPage() {
 
             {/* ── Background running banner ── */}
             {isProcessing && runningView && runningView !== activeView && (
-              <div className="bg-surface border border-border rounded px-4 py-2.5 flex items-center gap-3"
+              <div className="bg-surface border border-border rounded-lg px-4 py-2.5 flex items-center gap-3"
                    style={{ borderColor: 'rgba(86,204,242,0.3)', background: 'rgba(86,204,242,0.04)' }}>
                 <span className="material-symbols-outlined text-[15px] animate-spin" style={{ color: '#56CCF2' }}>autorenew</span>
                 <span className="text-[11px] font-mono text-outline flex-1">
@@ -751,6 +747,9 @@ export default function AnalysisPage() {
                 </pre>
               </div>
             )}
+
+            {/* Agent views — keyed so switching tabs replays the fade-in */}
+            <div key={activeView} className="flex flex-col gap-4 animate-fade-in">
 
             {/* ══ AGENT 1 VIEW ════════════════════════════════════════════ */}
             {activeView === 'agent1' && (() => {
@@ -829,33 +828,26 @@ export default function AnalysisPage() {
 
                   {(vs === 'done' || vs === 'waiting') && analyzerData && (
                     <>
-                      {/* Row 1: Health + KPIs */}
-                      <div className={`grid grid-cols-2 gap-3 ${row1GridCols}`}>
+                      {/* Dashboard KPIs — every tile on a single row */}
+                      <div className="flex gap-3">
                         {isFundWithNav && (
-                          <MetricCard
+                          <StatTile
                             label="AUM — Patrimonio Neto"
-                            value={`${analyzerData.fund_analysis!.nav_reconciliation!.closing_nav!.toLocaleString('en-US', { maximumFractionDigits: 0 })} MM`}
+                            value={`${analyzerData.fund_analysis!.nav_reconciliation!.closing_nav!.toLocaleString('en-US', { maximumFractionDigits: 0 })}`}
+                            sub="COP MM"
                             color="var(--color-brand-accent)"
                             icon="account_balance_wallet"
                           />
                         )}
-                        <MetricCard label="Financial Health" value={analyzerData.overall_financial_health} color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#2F80FF'} icon="monitor_heart" />
-                        {dashboardMetrics.slice(0, 3).map(m => (
-                          <MetricCard key={m.key} label={m.label} value={m.value}
+                        <StatTile wide label="Financial Health" value={analyzerData.overall_financial_health.replace(/_/g, ' ')} color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#2F80FF'} icon="monitor_heart" />
+                        {dashboardMetrics.slice(0, 5).map(m => (
+                          <StatTile key={m.key} label={m.label} value={m.value}
+                            signal={m.signal}
                             color={m.signal === 'positive' ? 'var(--color-success-low)' : m.signal === 'negative' ? 'var(--color-danger-soft)' : 'var(--color-warning-soft)'}
                             icon={metricIcon(m.key)} />
                         ))}
-                      </div>
-
-                      {/* Row 2 */}
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                        {dashboardMetrics.slice(3, 5).map(m => (
-                          <MetricCard key={m.key} label={m.label} value={m.value}
-                            color={m.signal === 'positive' ? 'var(--color-success-low)' : m.signal === 'negative' ? 'var(--color-danger-soft)' : 'var(--color-warning-soft)'}
-                            icon={metricIcon(m.key)} />
-                        ))}
-                        <StatCounter label="High Materiality" value={analyzerData.high_materiality_accounts.length} unit="accounts" />
-                        <StatCounter label="Anomalies" value={anomalyCount} unit="detected" color={anomalyCount > 0 ? '#FFB020' : '#56F2C1'} />
+                        <StatTile label="High Materiality" value={analyzerData.high_materiality_accounts.length} sub="accounts" big color="#56CCF2" icon="priority_high" />
+                        <StatTile label="Anomalies" value={anomalyCount} sub="detected" big color={anomalyCount > 0 ? '#FFB020' : '#56F2C1'} icon={anomalyCount > 0 ? 'warning' : 'check_circle'} />
                       </div>
 
                       {/* Tier 1 signals */}
@@ -882,7 +874,7 @@ export default function AnalysisPage() {
 
                       {/* Portfolio thesis */}
                       {analyzerData.portfolio_thesis && (
-                        <div className="bg-surface border border-border rounded p-5">
+                        <div className="bg-surface border border-border rounded-lg p-5">
                           <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
                             <span className="material-symbols-outlined text-[14px]">strategy</span>Portfolio Thesis
                           </div>
@@ -895,7 +887,7 @@ export default function AnalysisPage() {
                         ? <NarrativeLayers layers={analyzerData.narrative_layers} />
                         : analyzerData.executive_narrative
                         ? (
-                          <div className="bg-surface border border-border rounded p-5">
+                          <div className="bg-surface border border-border rounded-lg p-5">
                             <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
                               <span className="material-symbols-outlined text-[14px]">description</span>Executive Narrative
                             </div>
@@ -905,7 +897,7 @@ export default function AnalysisPage() {
 
                       {/* Tier 2 findings */}
                       {(analyzerData.insight_tiers?.tier2_material ?? []).length > 0 && (
-                        <div className="bg-surface border border-border rounded overflow-hidden">
+                        <div className="bg-surface border border-border rounded-lg overflow-hidden">
                           <div className="px-5 py-3 border-b border-border bg-surface-container-low flex items-center gap-2">
                             <span className="material-symbols-outlined text-[14px] text-outline">insights</span>
                             <span className="text-[10px] font-mono text-on-surface-variant uppercase tracking-widest">Material Account Findings</span>
@@ -926,7 +918,7 @@ export default function AnalysisPage() {
 
                       {/* Top accounts table */}
                       {analyzerData.analysis_results.length > 0 && (
-                        <div className="bg-surface border border-border rounded overflow-hidden">
+                        <div className="bg-surface border border-border rounded-lg overflow-hidden">
                           <div className="p-4 border-b border-border bg-surface-container-low flex items-center justify-between">
                             <h3 className="text-body-md font-body-md font-semibold text-on-surface">Top Accounts — Variation & Risk</h3>
                             <span className="text-[10px] font-mono text-outline">sorted by |Δ%|</span>
@@ -965,7 +957,7 @@ export default function AnalysisPage() {
 
                       {/* NIIF 18 */}
                       {(analyzerData.financial_ratios.niif18?.compliance?.flags?.length ?? 0) > 0 && (
-                        <div className="bg-surface border border-border rounded p-4">
+                        <div className="bg-surface border border-border rounded-lg p-4">
                           <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
                             <span className="material-symbols-outlined text-[14px]">policy</span>NIIF 18 Compliance Flags
                           </div>
@@ -1040,7 +1032,7 @@ export default function AnalysisPage() {
                           color={scorerData.validation_score >= 75 ? '#56F2C1' : scorerData.validation_score >= 50 ? '#FFB020' : '#FF4D6D'} icon="verified" />
                         <MetricCard label="Confidence" value={`${(scorerData.analysis_confidence * 100).toFixed(0)}%`}
                           color={scorerData.analysis_confidence >= 0.8 ? '#56F2C1' : scorerData.analysis_confidence >= 0.6 ? '#FFB020' : '#FF4D6D'} icon="query_stats" />
-                        <div className="bg-surface border border-border rounded p-4 flex flex-col gap-2">
+                        <div className="bg-surface border border-border rounded-lg p-4 flex flex-col gap-2">
                           <span className="text-label-sm font-label-sm text-on-surface-variant uppercase text-[10px]">Flags</span>
                           <span className={`text-[11px] font-mono ${scorerData.anti_hallucination_passed ? 'text-[#56F2C1]' : 'text-[#FF4D6D]'}`}>
                             {scorerData.anti_hallucination_passed ? '✓ Anti-hallucination' : '✗ Anti-hallucination'}
@@ -1053,7 +1045,7 @@ export default function AnalysisPage() {
                       </div>
 
                       {/* Risk dimension grid */}
-                      <div className="bg-surface border border-border rounded overflow-hidden">
+                      <div className="bg-surface border border-border rounded-lg overflow-hidden">
                         <div className="px-5 py-3 border-b border-border bg-surface-container-low flex items-center gap-2">
                           <span className="material-symbols-outlined text-[14px] text-outline">assessment</span>
                           <span className="text-[10px] font-mono text-on-surface-variant uppercase tracking-widest">Risk Dimensions</span>
@@ -1094,7 +1086,7 @@ export default function AnalysisPage() {
 
                       {/* LLM narrative */}
                       {scorerData.risk_summary?.risk_headline && (
-                        <div className="bg-surface border border-border rounded p-5">
+                        <div className="bg-surface border border-border rounded-lg p-5">
                           <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
                             <span className="material-symbols-outlined text-[14px]">shield</span>Risk Assessment
                           </div>
@@ -1116,7 +1108,7 @@ export default function AnalysisPage() {
 
                       {/* Issues */}
                       {scorerData.issues_found.length > 0 && (
-                        <div className="bg-surface border border-border rounded p-4">
+                        <div className="bg-surface border border-border rounded-lg p-4">
                           <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
                             <span className="material-symbols-outlined text-[14px]" style={{ color: '#FFB020' }}>warning</span>
                             Issues Found ({scorerData.issues_found.length})
@@ -1127,7 +1119,7 @@ export default function AnalysisPage() {
 
                       {/* Compliance flags */}
                       {scorerData.compliance_flags.length > 0 && (
-                        <div className="bg-surface border border-border rounded p-4">
+                        <div className="bg-surface border border-border rounded-lg p-4">
                           <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
                             <span className="material-symbols-outlined text-[14px]">policy</span>
                             Compliance Flags ({scorerData.compliance_flags.length})
@@ -1219,13 +1211,11 @@ export default function AnalysisPage() {
                 </>
               )
             })()}
+
+            </div>{/* /agent views */}
           </>
         )}
       </div>
-
-      <style>{`
-        @keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
-      `}</style>
 
       {/* Restart dialog */}
       {showRestartDialog && (
@@ -1423,7 +1413,7 @@ function ViewTabBar({ activeView, onSelectView, report, analyzerData, scorerData
   ]
 
   return (
-    <div className="grid grid-cols-4 bg-surface border border-border rounded overflow-hidden">
+    <div className="grid grid-cols-4 bg-surface border border-border rounded-lg overflow-hidden">
       {tabs.map(tab => {
         const isActive = activeView === tab.key
         const hasNew = newData?.has(tab.key) && !tab.running
@@ -1477,30 +1467,45 @@ function ViewTabBar({ activeView, onSelectView, report, analyzerData, scorerData
   )
 }
 
+// Branded "AI is thinking" orb — breathing glow + spinning accent arc.
+function AiOrb() {
+  return (
+    <div className="relative flex h-16 w-16 items-center justify-center">
+      <span aria-hidden className="absolute inset-0 rounded-full blur-xl animate-breathe"
+        style={{ background: 'radial-gradient(circle, rgba(86,204,242,0.55), transparent 70%)' }} />
+      <span aria-hidden className="absolute inset-0 rounded-full border-2 border-transparent animate-spin"
+        style={{ borderTopColor: '#56CCF2', borderRightColor: 'rgba(86,242,193,0.5)', animationDuration: '1.1s' }} />
+      <span className="material-symbols-outlined text-[28px] animate-breathe" style={{ color: '#56CCF2' }}>neurology</span>
+    </div>
+  )
+}
+
 function StepSpinner({ label, elapsed, steps, hint }: {
   label: string; elapsed: number
   steps: readonly { label: string; start: number }[]
   hint: string
 }) {
   return (
-    <div className="bg-surface border border-border rounded p-8 flex flex-col items-center gap-6">
+    <div className="card-vivid border border-border rounded-xl p-8 flex flex-col items-center gap-6 ai-glow">
+      <AiOrb />
       <div className="text-center">
-        <p className="text-label-sm font-label-sm text-outline uppercase tracking-widest mb-1">{label}</p>
-        <p className="text-[11px] font-mono text-outline">{elapsed}s elapsed</p>
+        <p className="text-label-md font-label-md text-on-surface uppercase tracking-widest mb-1">{label}</p>
+        <p className="text-[11px] font-mono text-outline">{elapsed}s elapsed · live</p>
       </div>
+      <div className="w-full max-w-sm progress-track" />
       <div className="flex flex-col gap-5 w-full max-w-sm relative">
         <div className="absolute left-[11px] top-3 bottom-3 w-px bg-border" />
         {steps.map((step, i) => {
           const starts = steps.map(s => s.start) as number[]
           const s = stepState(i, starts, elapsed)
           return (
-            <div key={i} className={`flex items-start gap-4 relative z-10 transition-opacity duration-500 ${s === 'pending' ? 'opacity-35' : ''}`}>
+            <div key={i} className={`flex items-start gap-4 relative z-10 transition-all duration-500 ${s === 'pending' ? 'opacity-35' : ''}`}>
               {s === 'done' && <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 bg-surface border border-[#56F2C1]"><span className="material-symbols-outlined text-[13px]" style={{ color: '#56F2C1' }}>check</span></div>}
-              {s === 'active' && <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 border border-primary bg-primary-container shadow-[0_0_8px_rgba(46,98,255,0.35)]"><div className="w-2 h-2 rounded-full bg-on-primary-container animate-pulse" /></div>}
+              {s === 'active' && <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 border border-primary bg-primary-container shadow-[0_0_12px_rgba(47,128,255,0.55)]"><div className="w-2 h-2 rounded-full bg-on-primary-container animate-pulse" /></div>}
               {s === 'pending' && <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 bg-surface border border-border"><div className="w-1.5 h-1.5 rounded-full bg-outline" /></div>}
-              <div className="pt-0.5">
+              <div className="pt-0.5 flex-1 min-w-0">
                 <p className={`text-body-sm font-body-sm ${s === 'active' ? 'text-on-surface font-semibold' : s === 'done' ? 'text-[#56F2C1]' : 'text-outline'}`}>{step.label}</p>
-                {s === 'active' && <p className="text-[10px] font-mono text-outline mt-1 animate-pulse">Running…</p>}
+                {s === 'active' && <div className="mt-2 max-w-[220px] progress-track" />}
                 {s === 'done'   && <p className="text-[10px] font-mono mt-1" style={{ color: '#56F2C1' }}>✓ Complete</p>}
               </div>
             </div>
@@ -1516,17 +1521,14 @@ function PulseSpinner({ label, elapsed, message, hint }: {
   label: string; elapsed: number; message: string; hint: string
 }) {
   return (
-    <div className="bg-surface border border-border rounded p-8 flex flex-col items-center gap-6">
+    <div className="card-vivid border border-border rounded-xl p-8 flex flex-col items-center gap-6 ai-glow">
+      <AiOrb />
       <div className="text-center">
-        <p className="text-label-sm font-label-sm text-outline uppercase tracking-widest mb-1">{label}</p>
-        <p className="text-[11px] font-mono text-outline">{elapsed}s elapsed</p>
+        <p className="text-label-md font-label-md text-on-surface uppercase tracking-widest mb-1">{label}</p>
+        <p className="text-[11px] font-mono text-outline">{elapsed}s elapsed · live</p>
       </div>
-      <div className="flex items-center gap-4">
-        <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 border border-primary bg-primary-container shadow-[0_0_8px_rgba(46,98,255,0.35)]">
-          <div className="w-2 h-2 rounded-full bg-on-primary-container animate-pulse" />
-        </div>
-        <p className="text-body-sm font-body-sm text-on-surface font-semibold animate-pulse">{message}</p>
-      </div>
+      <div className="w-full max-w-sm progress-track" />
+      <p className="text-body-sm font-body-sm text-on-surface font-semibold animate-breathe">{message}</p>
       <p className="text-[10px] font-mono text-outline">{hint}</p>
     </div>
   )
@@ -1552,7 +1554,7 @@ function ContinueBanner({ color, icon, title, subtitle, children }: {
 
 function LockedView({ icon, message, hint }: { icon: string; message: string; hint: string }) {
   return (
-    <div className="bg-surface border border-border rounded p-12 flex flex-col items-center gap-3 text-center">
+    <div className="bg-surface border border-border rounded-lg p-12 flex flex-col items-center gap-3 text-center">
       <span className="material-symbols-outlined text-outline text-[40px]">{icon}</span>
       <p className="text-body-sm font-body-sm text-on-surface-variant font-semibold">{message}</p>
       <p className="text-[11px] font-mono text-outline">{hint}</p>
@@ -1612,7 +1614,7 @@ function Kpi({ label, value, color }: { label: string; value: string; color: str
 function MetricCard({ label, value, color, icon }: { label: string; value: string; color: string; icon: string }) {
   // Compact two-line card: label + icon on line 1, value on line 2.
   return (
-    <div className="bg-surface border border-border rounded px-3 py-2">
+    <div className="bg-surface border border-border floating-card rounded px-3 py-2">
       <div className="flex items-center justify-between gap-2">
         <span className="text-label-sm font-label-sm text-on-surface-variant uppercase text-[9px] truncate">{label}</span>
         <span className="material-symbols-outlined text-[13px] text-outline shrink-0">{icon}</span>
@@ -1622,12 +1624,68 @@ function MetricCard({ label, value, color, icon }: { label: string; value: strin
   )
 }
 
-function StatCounter({ label, value, unit, color = '#e2e1ee' }: { label: string; value: number; unit: string; color?: string }) {
+// Tall, narrow "intel tile" for the headline KPIs after Agent 2.
+// Portrait layout: icon chip on top → hero value in the middle → label at the
+// foot, with a signal-colored accent bar + corner glow. `color` may be a hex or
+// a CSS var; tints are derived with color-mix so both work.
+function StatTile({ label, value, color, icon, sub, big, signal, wide }: {
+  label: string
+  value: string | number
+  color: string
+  icon: string
+  sub?: string
+  big?: boolean
+  signal?: 'positive' | 'neutral' | 'negative'
+  wide?: boolean
+}) {
+  const tint = (pct: number) => `color-mix(in srgb, ${color} ${pct}%, transparent)`
+  const trend = signal === 'positive' ? 'trending_up' : signal === 'negative' ? 'trending_down' : null
   return (
-    <div className="bg-surface border border-border rounded p-3 text-center">
-      <div className="text-[10px] font-mono text-outline uppercase mb-1 tracking-wide">{label}</div>
-      <div className="text-[22px] font-mono font-bold" style={{ color }}>{value}</div>
-      <div className="text-[9px] font-mono text-outline">{unit}</div>
+    <div
+      // `flex-1 min-w-0` lets every tile share one row without wrapping; `wide`
+      // grants ~1.8× the horizontal share for long text (e.g. Financial Health).
+      className={`floating-card group relative flex min-w-0 flex-col justify-between overflow-hidden rounded-xl border bg-surface p-4 min-h-[152px] ${wide ? 'flex-[1.5]' : 'flex-1'}`}
+      style={{ borderColor: tint(26) }}
+    >
+      {/* top accent line */}
+      <span className="pointer-events-none absolute inset-x-0 top-0 h-[3px]"
+        style={{ background: `linear-gradient(90deg, ${color}, transparent 88%)` }} />
+      {/* corner glow — intensifies on hover */}
+      <span aria-hidden
+        className="pointer-events-none absolute -right-10 -top-10 h-28 w-28 rounded-full opacity-50 blur-2xl transition-opacity duration-300 group-hover:opacity-100"
+        style={{ background: tint(22) }} />
+
+      {/* header: icon chip + optional trend */}
+      <div className="relative flex items-start justify-between">
+        <span className="flex h-9 w-9 items-center justify-center rounded-lg"
+          style={{ background: tint(13), border: `1px solid ${tint(30)}` }}>
+          <span className="material-symbols-outlined text-[19px]" style={{ color }}>{icon}</span>
+        </span>
+        {trend && (
+          <span className="material-symbols-outlined text-[16px] opacity-80" style={{ color }}>{trend}</span>
+        )}
+      </div>
+
+      {/* hero value */}
+      <div className="relative mt-2">
+        <div
+          className="font-bold leading-[1.04] break-words"
+          style={{
+            color,
+            fontFamily: "'Space Grotesk', 'Geist', sans-serif",
+            fontSize: big ? 'clamp(30px, 4.4vw, 40px)' : 'clamp(19px, 2.5vw, 27px)',
+          }}
+          title={String(value)}
+        >
+          {value}
+        </div>
+        {sub && <div className="mt-0.5 text-[10px] font-mono uppercase tracking-wide text-on-surface-variant">{sub}</div>}
+      </div>
+
+      {/* foot label */}
+      <div className="relative mt-2">
+        <span className="block text-[9px] font-mono uppercase leading-tight tracking-[0.12em] text-on-surface-variant">{label}</span>
+      </div>
     </div>
   )
 }
@@ -1642,7 +1700,7 @@ function NarrativeLayers({ layers }: { layers: { executive?: string; tactical?: 
   const current = tabs.find(t => t.key === active)
   if (tabs.length === 0) return null
   return (
-    <div className="bg-surface border border-border rounded overflow-hidden">
+    <div className="bg-surface border border-border rounded-lg overflow-hidden">
       <div className="flex border-b border-border bg-surface-container-low">
         <span className="flex items-center gap-1 px-4 py-3 text-[10px] font-mono text-outline uppercase tracking-widest border-r border-border">
           <span className="material-symbols-outlined text-[13px]">layers</span>Narrative
@@ -1686,7 +1744,7 @@ function SheetConcentrationSection({ sc }: { sc: SheetConc }) {
   }
 
   return (
-    <div className="bg-surface border border-border rounded overflow-hidden">
+    <div className="bg-surface border border-border rounded-lg overflow-hidden">
       <div className="border-b border-border bg-surface-container-low">
         <div className="px-5 py-3 flex items-center gap-2">
           <span className="material-symbols-outlined text-[14px] text-outline">donut_small</span>
@@ -1792,7 +1850,7 @@ function AccountsTable({ report, filtered, accounts, categories, catFilter, setC
   const pageSafe = Math.min(page, totalPages)
   const pageRows = filtered.slice((pageSafe - 1) * ACCOUNTS_PAGE_SIZE, pageSafe * ACCOUNTS_PAGE_SIZE)
   return (
-    <div className="bg-surface border border-border rounded overflow-hidden">
+    <div className="bg-surface border border-border rounded-lg overflow-hidden">
       <div className="p-4 border-b border-border flex flex-wrap items-center justify-between gap-3 bg-surface-container-low">
         <div>
           <h3 className="text-body-md font-body-md font-semibold text-on-surface">Extracted Accounts</h3>

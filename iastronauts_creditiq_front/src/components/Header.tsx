@@ -15,7 +15,9 @@ export default function Header({ onMenuToggle }: HeaderProps) {
         position: 'sticky',
         top: 0,
         zIndex: 1200,
-        backgroundColor: '#050816',
+        backgroundColor: 'rgba(5, 8, 22, 0.72)',
+        backdropFilter: 'blur(14px)',
+        WebkitBackdropFilter: 'blur(14px)',
         borderBottom: '1px solid rgba(47, 128, 255, 0.16)',
         boxShadow: '0 0 30px rgba(47, 128, 255, 0.08)',
       }}

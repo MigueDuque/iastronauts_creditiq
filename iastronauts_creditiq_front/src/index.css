@@ -76,6 +76,69 @@
   /* Data */
   --color-data-indigo: #56CCF2;
 
+  /* Semantic status — used by .risk-* classes and signal-driven metric cards */
+  --color-success: #56F2C1;        /* Mint AI Green */
+  --color-success-low: #34c79a;    /* dimmer mint for dense data */
+  --color-warning: #FFB020;        /* Warning Orange */
+  --color-warning-soft: #ffc04d;   /* lighter orange for fills/arcs */
+  --color-danger: #FF4D6D;         /* Critical Red */
+  --color-danger-soft: #ff6b85;    /* softer red for fills */
+
+  /* Brand accent — Cyan Glow, used for fund/AUM + concentration bars */
+  --color-brand-accent: #56CCF2;
+
+  /* Extra surfaces / muted text referenced across pages */
+  --color-surface-deep: #050816;   /* page backdrop behind the app shell */
+  --color-surface-muted: #18203f;  /* gauge tracks, inert bar backgrounds */
+  --color-on-surface-muted: #94A3B8;
+  --color-on-surface-muted-strong: #b0bad0;
+
+  /* ── Typography scale ───────────────────────────────────────────────
+     Each text-* token carries its own line-height / weight / tracking so a
+     single utility (e.g. `text-display-lg`) fully styles an element. The
+     paired font-* token sets the family (Space Grotesk for display,
+     Inter for body, JetBrains Mono for labels). */
+
+  --font-display-lg: 'Space Grotesk', 'Geist', sans-serif;
+  --font-headline-md: 'Space Grotesk', 'Geist', sans-serif;
+  --font-body-lg: 'Inter', sans-serif;
+  --font-body-md: 'Inter', sans-serif;
+  --font-body-sm: 'Inter', sans-serif;
+  --font-label-md: 'JetBrains Mono', monospace;
+  --font-label-sm: 'JetBrains Mono', monospace;
+
+  --text-display-lg: 2rem;          /* 32px */
+  --text-display-lg--line-height: 1.1;
+  --text-display-lg--font-weight: 700;
+  --text-display-lg--letter-spacing: -0.03em;
+
+  --text-headline-md: 1.375rem;     /* 22px */
+  --text-headline-md--line-height: 1.2;
+  --text-headline-md--font-weight: 600;
+  --text-headline-md--letter-spacing: -0.02em;
+
+  --text-body-lg: 1rem;             /* 16px */
+  --text-body-lg--line-height: 1.6;
+  --text-body-lg--font-weight: 400;
+
+  --text-body-md: 0.875rem;         /* 14px */
+  --text-body-md--line-height: 1.6;
+  --text-body-md--font-weight: 400;
+
+  --text-body-sm: 0.8125rem;        /* 13px */
+  --text-body-sm--line-height: 1.55;
+  --text-body-sm--font-weight: 400;
+
+  --text-label-md: 0.75rem;         /* 12px */
+  --text-label-md--line-height: 1.35;
+  --text-label-md--font-weight: 600;
+  --text-label-md--letter-spacing: 0.04em;
+
+  --text-label-sm: 0.6875rem;       /* 11px */
+  --text-label-sm--line-height: 1.35;
+  --text-label-sm--font-weight: 500;
+  --text-label-sm--letter-spacing: 0.04em;
+
   /* Spacing */
   --spacing-margin-desktop: 32px;
   --spacing-margin-mobile: 16px;
@@ -119,7 +182,7 @@ body {
 ───────────────────────────────────────────────────────────── */
 
 .executive-title {
-  font-family: 'Geist', sans-serif;
+  font-family: 'Space Grotesk', 'Geist', sans-serif;
   font-weight: 700;
   letter-spacing: -0.03em;
 }
@@ -137,7 +200,7 @@ body {
 }
 
 .metric-value {
-  font-family: 'Geist', sans-serif;
+  font-family: 'Space Grotesk', 'Geist', sans-serif;
 
   font-weight: 700;
 
@@ -412,4 +475,209 @@ body {
 
 .glow-pulse-blue {
   animation: glow-pulse 2s ease-in-out infinite;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Motion — soft fades & micro-transitions (the "living AI" feel)
+───────────────────────────────────────────────────────────── */
+
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Entrance for cards / sections. Pair with .stagger-N for sequenced reveals. */
+.animate-fade-in {
+  opacity: 0;
+  animation: fade-in-up 0.55s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.stagger-1 { animation-delay: 0.04s; }
+.stagger-2 { animation-delay: 0.10s; }
+.stagger-3 { animation-delay: 0.16s; }
+.stagger-4 { animation-delay: 0.22s; }
+.stagger-5 { animation-delay: 0.28s; }
+.stagger-6 { animation-delay: 0.34s; }
+
+/* ─────────────────────────────────────────────────────────────
+   Floating cards — gentle lift + glow on hover
+───────────────────────────────────────────────────────────── */
+
+.floating-card {
+  transition:
+    transform 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.25s ease,
+    border-color 0.25s ease;
+  will-change: transform;
+}
+
+.floating-card:hover {
+  transform: translateY(-3px);
+  border-color: rgba(86, 204, 242, 0.32);
+  box-shadow:
+    0 0 0 1px rgba(86, 204, 242, 0.08),
+    0 14px 40px rgba(0, 0, 0, 0.45),
+    0 0 36px rgba(47, 128, 255, 0.14);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Sparklines — tiny inline trend glyphs on KPI rows
+───────────────────────────────────────────────────────────── */
+
+.sparkline {
+  display: inline-block;
+  width: 36px;
+  height: 12px;
+  border-radius: 2px;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 100% 100%;
+  opacity: 0.85;
+}
+
+.sparkline-positive {
+  background-image: linear-gradient(
+    to right,
+    transparent,
+    transparent 70%,
+    rgba(86, 242, 193, 0.0)
+  );
+  /* upward trend mark */
+  border-bottom: 1.5px solid #56F2C1;
+  box-shadow: inset 0 -6px 8px -6px rgba(86, 242, 193, 0.55);
+}
+
+.sparkline-negative {
+  border-bottom: 1.5px solid #FF4D6D;
+  box-shadow: inset 0 -6px 8px -6px rgba(255, 77, 109, 0.55);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Focus & selection — keyboard accessibility + on-brand highlight
+───────────────────────────────────────────────────────────── */
+
+:focus-visible {
+  outline: 2px solid rgba(86, 204, 242, 0.65);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+::selection {
+  background: rgba(47, 128, 255, 0.35);
+  color: #F5F7FA;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Loading — premium "AI is thinking" primitives
+───────────────────────────────────────────────────────────── */
+
+/* Generic rotation for inline status icons (also used by Tailwind animate-spin) */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Skeleton shimmer — for content placeholders while data streams in */
+@keyframes skeleton-sweep {
+  0%   { background-position: -180% 0; }
+  100% { background-position: 180% 0; }
+}
+
+.skeleton {
+  border-radius: 8px;
+  background:
+    linear-gradient(
+      100deg,
+      rgba(148, 163, 184, 0.06) 30%,
+      rgba(86, 204, 242, 0.16) 50%,
+      rgba(148, 163, 184, 0.06) 70%
+    );
+  background-size: 200% 100%;
+  animation: skeleton-sweep 1.5s ease-in-out infinite;
+}
+
+/* Indeterminate progress bar — a comet of light sweeping a track */
+@keyframes progress-sweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(320%); }
+}
+
+.progress-track {
+  position: relative;
+  height: 3px;
+  width: 100%;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(47, 128, 255, 0.12);
+}
+
+.progress-track::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 32%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, #2F80FF, #56CCF2, #56F2C1, transparent);
+  animation: progress-sweep 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+/* Flowing connector — a pulse of light travelling down the pipeline rail */
+@keyframes rail-flow {
+  0%   { transform: translateY(-120%); opacity: 0; }
+  35%  { opacity: 1; }
+  100% { transform: translateY(560%); opacity: 0; }
+}
+
+.rail-flow {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 28px;
+  background: linear-gradient(180deg, transparent, #56CCF2, transparent);
+  filter: blur(1px);
+  animation: rail-flow 2.2s ease-in-out infinite;
+}
+
+/* Soft breathing glow for "live"/active surfaces */
+@keyframes breathe {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+
+.animate-breathe {
+  animation: breathe 2.4s ease-in-out infinite;
+}
+
+/* Blinking caret for streaming text */
+@keyframes caret-blink {
+  0%, 45%  { opacity: 1; }
+  50%, 95% { opacity: 0.15; }
+  100%     { opacity: 1; }
+}
+
+.animate-caret {
+  animation: caret-blink 1.05s steps(1) infinite;
+}
+
+/* Respect users who prefer reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+
+  .animate-fade-in {
+    opacity: 1;
+  }
 }

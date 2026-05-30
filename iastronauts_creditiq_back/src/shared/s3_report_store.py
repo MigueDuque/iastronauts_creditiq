@@ -42,6 +42,56 @@ def build_s3_key(
 # Serialization
 # ---------------------------------------------------------------------------
 
+_RISK_EMOJI = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴"}
+_RISK_ES = {"LOW": "BAJO", "MEDIUM": "MEDIO", "HIGH": "ALTO"}
+
+
+def _render_risk_section(report: FinalReportOutput) -> str:
+    """Renders the 'Análisis de Riesgo' section with the 3 report-facing
+    categories (Crédito, Mercado, Financiero). Returns '' when no data."""
+    categories = report.risk_categories or {}
+    summary = report.risk_summary or {}
+    if not categories and not summary:
+        return ""
+
+    headline = summary.get("risk_headline", "")
+    narratives = summary.get("category_narratives") or {}
+
+    out = "## Análisis de Riesgo\n\n"
+    if headline:
+        out += f"**{headline}**\n\n"
+
+    for key in ("credito", "mercado", "financiero"):
+        cat = categories.get(key)
+        if not cat:
+            continue
+        label = cat.get("label", key)
+        level = cat.get("level", "N/A")
+        score = cat.get("score", 0)
+        emoji = _RISK_EMOJI.get(level, "⚪")
+        level_es = _RISK_ES.get(level, level)
+        out += f"### {emoji} {label} — {level_es} ({score}/100)\n\n"
+
+        narrative = narratives.get(key)
+        if narrative:
+            out += f"{narrative}\n\n"
+
+        findings = cat.get("key_findings") or []
+        for f in findings[:5]:
+            out += f"- {f}\n"
+        if findings:
+            out += "\n"
+
+    recs = summary.get("risk_recommendations") or []
+    if recs:
+        out += "### Recomendaciones\n\n"
+        for r in recs:
+            out += f"- {r}\n"
+        out += "\n"
+
+    return out + "---\n\n"
+
+
 def serialize_to_markdown(report: FinalReportOutput) -> str:
     """Serializes a FinalReportOutput to a structured .md file.
 
@@ -105,6 +155,7 @@ def serialize_to_markdown(report: FinalReportOutput) -> str:
         f"## Resumen para Junta Directiva\n\n"
         f"{report.board_summary or '_Por generar_'}\n\n"
         f"---\n\n"
+        f"{_render_risk_section(report)}"
         f"## Análisis de Variaciones por Cuenta\n\n"
         f"| Cuenta | Valor Actual | Valor Anterior | Variación % | Materialidad | Riesgo |\n"
         f"|--------|-------------:|---------------:|------------:|:------------:|:------:|\n"

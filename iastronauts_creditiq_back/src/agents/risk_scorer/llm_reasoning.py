@@ -76,11 +76,19 @@ PRINCIPALES FACTORES DE RIESGO IDENTIFICADOS:
 HALLAZGOS CLAVE POR DIMENSIÓN:
 {key_findings_text}
 
+CATEGORÍAS DE RIESGO PARA EL INFORME (Crédito / Mercado / Financiero):
+{categories_text}
+
 Responde con un JSON con exactamente esta estructura:
 {{
   "risk_narrative_paragraph1": "Párrafo sobre el perfil general de riesgo y la dimensión de mayor riesgo.",
   "risk_narrative_paragraph2": "Párrafo sobre riesgos secundarios y su interacción.",
   "risk_narrative_paragraph3": "Párrafo sobre fortalezas y contexto mitigante.",
+  "category_narratives": {{
+    "credito": "Párrafo (3-4 oraciones) sobre el Riesgo de Crédito: emisores, contraparte/custodio, cuentas por cobrar.",
+    "mercado": "Párrafo (3-4 oraciones) sobre el Riesgo de Mercado: valorización, concentración, tasa de interés y exposición cambiaria.",
+    "financiero": "Párrafo (3-4 oraciones) sobre el Riesgo Financiero: liquidez (incl. redenciones) y solvencia/apalancamiento."
+  }},
   "risk_recommendations": ["Acción concreta 1", "Acción concreta 2", "Acción concreta 3"],
   "risk_headline": "Una sola oración que resume el perfil de riesgo para el encabezado del informe."
 }}
@@ -109,6 +117,23 @@ def _format_drivers(all_drivers: list[str]) -> str:
     return "\n".join(f"  • {d}" for d in all_drivers[:8])
 
 
+def _format_categories(risk_categories: dict) -> str:
+    if not risk_categories:
+        return "  (Sin categorías de riesgo disponibles)"
+    lines = []
+    for key in ("credito", "mercado", "financiero"):
+        cat = risk_categories.get(key)
+        if not cat:
+            continue
+        label = cat.get("label", key)
+        level = cat.get("level", "N/A")
+        score = cat.get("score", 0)
+        lines.append(f"  {label}: {level} (score {score}/100)")
+        for f in (cat.get("key_findings") or [])[:3]:
+            lines.append(f"      - {f}")
+    return "\n".join(lines) if lines else "  (Sin categorías de riesgo disponibles)"
+
+
 def _format_findings(dimension_findings: dict) -> str:
     labels = {
         "liquidity": "Liquidez",
@@ -125,6 +150,24 @@ def _format_findings(dimension_findings: dict) -> str:
     return "\n".join(lines) if lines else "  (Sin hallazgos significativos)"
 
 
+def _fallback_category_narratives(risk_categories: dict) -> dict:
+    """Deterministic per-category prose built from each category's findings."""
+    out: dict = {}
+    level_es = {"LOW": "bajo", "MEDIUM": "medio", "HIGH": "alto"}
+    for key in ("credito", "mercado", "financiero"):
+        cat = (risk_categories or {}).get(key)
+        if not cat:
+            out[key] = ""
+            continue
+        label = cat.get("label", key)
+        level = level_es.get(cat.get("level", ""), cat.get("level", "").lower())
+        score = cat.get("score", 0)
+        findings = cat.get("key_findings") or []
+        body = " ".join(findings[:3]) if findings else "Sin hallazgos materiales en esta categoría."
+        out[key] = f"{label}: nivel {level} (score {score}/100). {body}"
+    return out
+
+
 def generate_risk_narrative(
     company_name: str,
     period: str,
@@ -138,13 +181,15 @@ def generate_risk_narrative(
     tenant_id: Optional[str],
     job_id: Optional[str],
     llm: LLMProvider,
+    risk_categories: Optional[dict] = None,
 ) -> dict:
     """
     Returns dict with keys:
       risk_narrative_paragraph1, risk_narrative_paragraph2, risk_narrative_paragraph3,
-      risk_recommendations, risk_headline
+      category_narratives, risk_recommendations, risk_headline
     Returns fallback dict on LLM failure.
     """
+    risk_categories = risk_categories or {}
     entity_type = "Fondo de inversión colectiva (CIV)" if is_investment_fund else "Empresa corporativa"
 
     user_prompt = _RISK_USER_TEMPLATE.format(
@@ -156,6 +201,7 @@ def generate_risk_narrative(
         dimensions_json=_format_dimensions(dimension_scores, dimension_levels),
         risk_drivers_text=_format_drivers(all_risk_drivers),
         key_findings_text=_format_findings(dimension_findings),
+        categories_text=_format_categories(risk_categories),
     )
 
     try:
@@ -165,7 +211,7 @@ def generate_risk_narrative(
             temperature=0.2,
             tenant_id=tenant_id,
             job_id=job_id,
-            max_tokens=2000,
+            max_tokens=2600,
         )
         required = {
             "risk_narrative_paragraph1",
@@ -175,6 +221,9 @@ def generate_risk_narrative(
             "risk_headline",
         }
         if required.issubset(result.keys()):
+            # category_narratives is best-effort; backfill from findings if the LLM omitted it.
+            if not isinstance(result.get("category_narratives"), dict):
+                result["category_narratives"] = _fallback_category_narratives(risk_categories)
             return result
         logger.warning("LLM response missing required keys; using fallback.")
     except Exception as exc:
@@ -213,6 +262,7 @@ def generate_risk_narrative(
         "risk_narrative_paragraph1": p1,
         "risk_narrative_paragraph2": p2,
         "risk_narrative_paragraph3": p3,
+        "category_narratives": _fallback_category_narratives(risk_categories),
         "risk_recommendations": all_risk_drivers[:3] if all_risk_drivers else ["Monitorear indicadores de riesgo trimestralmente."],
         "risk_headline": f"Perfil de riesgo {overall_risk.lower()} — score compuesto {composite_score}/100.",
     }

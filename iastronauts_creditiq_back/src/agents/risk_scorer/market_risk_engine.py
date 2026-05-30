@@ -8,16 +8,19 @@ For investment funds (primary driver):
   - Equity market exposure: % of assets in mark-to-market instruments
   - Issuer concentration (HHI, effective positions)
   - Sector concentration
+  - Interest-rate exposure: % of portfolio in fixed-income (Instrumentos de Deuda)
+  - Currency (FX) exposure: assets denominated in foreign currency
 
 For operating companies:
   - Currency exposure (FX risk)
-  - Interest rate risk (financial expenses trend)
+  - Interest rate risk (fixed-income holdings / financial expenses)
   - Revenue concentration
 
 Scoring (0–100, higher = less risk):
   Component 1 — Fair value income dependency: max 35 pts
   Component 2 — Asset concentration (HHI):   max 35 pts
   Component 3 — Sector / diversification:    max 30 pts
+  Interest-rate + FX exposure:               up to −12 pts deduction
 """
 
 from __future__ import annotations
@@ -38,6 +41,11 @@ class MarketRiskResult:
     top3_concentration_pct: float | None    # top 3 positions as % of portfolio
     hhi: float | None                       # Herfindahl-Hirschman Index (0–1)
     effective_positions: float | None       # 1 / HHI equivalent
+    fixed_income_pct: float | None = None   # % of portfolio in Instrumentos de Deuda (rate-sensitive)
+    interest_rate_sensitivity: str = "no_data"  # low | moderate | high | no_data
+    fx_exposure_pct: float | None = None    # % of assets in foreign-currency accounts
+    fx_exposure_detected: bool = False
+    reporting_currency: str = "COP"
     key_findings: List[str] = field(default_factory=list)
     risk_drivers: List[str] = field(default_factory=list)
     is_fund_adjusted: bool = False
@@ -58,6 +66,8 @@ def score_market_risk(
     fund_analysis: dict,
     analysis_results: list,
     is_investment_fund: bool,
+    sheet_concentration: dict | None = None,
+    currency: str = "COP",
 ) -> MarketRiskResult:
     totals = financial_ratios.get("totals", {})
     total_revenue = totals.get("total_revenue", 0.0)
@@ -202,7 +212,49 @@ def score_market_risk(
         else:
             pts_div = 10
 
-    score = pts_fv + pts_hhi + pts_div
+    # ─── Interest-rate exposure (fixed income from sheet_concentration) ───────
+    fixed_income_pct: float | None = None
+    interest_rate_sensitivity = "no_data"
+    instrument_breakdown = (sheet_concentration or {}).get("instrument_breakdown") or []
+    if (sheet_concentration or {}).get("instrument_available") and instrument_breakdown:
+        debt_row = next(
+            (ib for ib in instrument_breakdown if ib.get("instrument_type") == "Instrumentos de Deuda"),
+            None,
+        )
+        fixed_income_pct = debt_row.get("pct", 0.0) if debt_row else 0.0
+        if fixed_income_pct >= 50.0:
+            interest_rate_sensitivity = "high"
+        elif fixed_income_pct >= 20.0:
+            interest_rate_sensitivity = "moderate"
+        else:
+            interest_rate_sensitivity = "low"
+
+    # ─── FX exposure (foreign-currency denominated accounts) ──────────────────
+    reporting_currency = (currency or "COP").upper()
+    _FX_KEYWORDS = ("dolar", "dólar", "usd", "euro", " eur", "divisa",
+                    "moneda extranjera", "exterior", "yen", "libra", "gbp")
+    fx_value = sum(
+        a.get("current_value", 0.0)
+        for a in analysis_results
+        if any(kw in a.get("account_name", "").lower() for kw in _FX_KEYWORDS)
+        and a.get("current_value", 0.0) > 0
+        and a.get("current_value", 0.0) < total_assets * 0.9  # exclude aggregate totals
+    )
+    fx_exposure_pct = round(fx_value / total_assets * 100, 2) if total_assets > 0 else 0.0
+    fx_exposure_detected = fx_exposure_pct > 1.0 or reporting_currency != "COP"
+
+    # ─── Rate + FX deduction (caps the market score for hidden exposures) ─────
+    rate_fx_deduction = 0
+    if interest_rate_sensitivity == "high":
+        rate_fx_deduction += 6
+    elif interest_rate_sensitivity == "moderate":
+        rate_fx_deduction += 3
+    if fx_exposure_pct >= 30.0:
+        rate_fx_deduction += 6
+    elif fx_exposure_pct >= 10.0:
+        rate_fx_deduction += 3
+
+    score = max(0, pts_fv + pts_hhi + pts_div - rate_fx_deduction)
 
     # ─── Build narrative findings ──────────────────────────────────────────────
     findings: List[str] = []
@@ -234,6 +286,32 @@ def score_market_risk(
     if is_investment_fund and equity_exposure_pct >= 90.0:
         findings.append(f"Exposición de renta variable total (~{equity_exposure_pct:.0f}%): todos los resultados están sujetos a volatilidad de mercado accionario.")
 
+    # Interest-rate findings
+    if interest_rate_sensitivity == "high":
+        findings.append(
+            f"Exposición elevada a tasa de interés: {fixed_income_pct:.1f}% del portafolio en instrumentos de deuda — sensibilidad a movimientos de tasas."
+        )
+        drivers.append(f"Renta fija representa {fixed_income_pct:.1f}% del portafolio (riesgo de tasa)")
+    elif interest_rate_sensitivity == "moderate":
+        findings.append(
+            f"Exposición moderada a tasa de interés ({fixed_income_pct:.1f}% en instrumentos de deuda)."
+        )
+
+    # FX findings
+    if fx_exposure_pct >= 30.0:
+        findings.append(
+            f"Riesgo cambiario significativo: {fx_exposure_pct:.1f}% de activos en moneda extranjera (reporte en {reporting_currency})."
+        )
+        drivers.append(f"Exposición cambiaria >30% de activos")
+    elif fx_exposure_pct >= 10.0:
+        findings.append(
+            f"Exposición cambiaria moderada ({fx_exposure_pct:.1f}% de activos en moneda extranjera)."
+        )
+    elif reporting_currency != "COP":
+        findings.append(
+            f"Entidad reporta en {reporting_currency}: resultados sujetos a conversión y riesgo cambiario estructural."
+        )
+
     return MarketRiskResult(
         level=_level_from_score(score),
         score=score,
@@ -243,6 +321,11 @@ def score_market_risk(
         top3_concentration_pct=top3_concentration_pct,
         hhi=hhi,
         effective_positions=effective_positions,
+        fixed_income_pct=fixed_income_pct,
+        interest_rate_sensitivity=interest_rate_sensitivity,
+        fx_exposure_pct=fx_exposure_pct,
+        fx_exposure_detected=fx_exposure_detected,
+        reporting_currency=reporting_currency,
         key_findings=findings,
         risk_drivers=drivers,
         is_fund_adjusted=is_investment_fund,

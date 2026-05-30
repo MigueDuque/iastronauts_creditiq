@@ -23,6 +23,11 @@ Devuelve ÚNICAMENTE este JSON — sin texto antes ni después, sin bloques de c
   "risk_narrative_paragraph1": "Párrafo sobre el perfil general de riesgo y la dimensión de mayor riesgo. Incluye la puntuación compuesta y el nivel general. Menciona la dimensión más crítica con su score y hallazgos específicos.",
   "risk_narrative_paragraph2": "Párrafo sobre los riesgos secundarios y su interacción. Explica cómo se relacionan entre sí y su impacto potencial sobre la entidad en escenarios adversos.",
   "risk_narrative_paragraph3": "Párrafo sobre fortalezas identificadas y factores mitigantes. Menciona las dimensiones de bajo riesgo y el contexto que respalda la capacidad de gestión de la entidad.",
+  "category_narratives": {
+    "credito": "Párrafo (3-4 oraciones) específico de Riesgo de Crédito: concentración de emisores, riesgo de contraparte/custodio (bancos donde reposa el efectivo) y cartera por cobrar.",
+    "mercado": "Párrafo (3-4 oraciones) específico de Riesgo de Mercado: dependencia de valorización a valor razonable, concentración del portafolio (HHI), riesgo de tasa de interés (renta fija) y exposición cambiaria.",
+    "financiero": "Párrafo (3-4 oraciones) específico de Riesgo Financiero: liquidez (razón corriente, efectivo, presión de redenciones en fondos) y solvencia/apalancamiento."
+  },
   "risk_recommendations": [
     "Acción concreta y específica 1",
     "Acción concreta y específica 2",
@@ -30,6 +35,9 @@ Devuelve ÚNICAMENTE este JSON — sin texto antes ni después, sin bloques de c
   ],
   "risk_headline": "Una sola oración — máximo 20 palabras — que resume el perfil de riesgo para el encabezado del informe."
 }
+
+Las tres categorías del informe son fijas: **Riesgo de Crédito**, **Riesgo de Mercado** y **Riesgo Financiero**.
+El Riesgo Financiero agrupa liquidez y solvencia. El riesgo de rentabilidad/operacional alimenta el resumen ejecutivo, no estas tres categorías.
 
 ═══════════════════════════════════════════════════════
 GUÍA POR TIPO DE ENTIDAD
