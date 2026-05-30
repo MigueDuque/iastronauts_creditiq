@@ -866,13 +866,13 @@ export default function AnalysisPage() {
                         // Collect every tile the agent deemed relevant, then let the
                         // layout decide how many rows are needed so they always fit.
                         const tiles: React.ReactNode[] = []
+                        tiles.push(
+                          <StatTile key="health" wide label="Financial Health" value={analyzerData.overall_financial_health.replace(/_/g, ' ')} color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#2F80FF'} icon="monitor_heart" />
+                        )
                         if (isFundWithNav) tiles.push(
                           <StatTile key="aum" label="AUM — Patrimonio Neto"
                             value={`${analyzerData.fund_analysis!.nav_reconciliation!.closing_nav!.toLocaleString('en-US', { maximumFractionDigits: 0 })}`}
                             sub="COP MM" color="var(--color-brand-accent)" icon="account_balance_wallet" />
-                        )
-                        tiles.push(
-                          <StatTile key="health" wide label="Financial Health" value={analyzerData.overall_financial_health.replace(/_/g, ' ')} color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#2F80FF'} icon="monitor_heart" />
                         )
                         dashboardMetrics.forEach(m => tiles.push(
                           <StatTile key={m.key} label={m.label} value={m.value}
