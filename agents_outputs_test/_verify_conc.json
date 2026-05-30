@@ -1,0 +1,43 @@
+{
+ "top_account_name": "Activos financieros a valor razonable",
+ "top_account_pct": 96.97,
+ "top3_concentration_pct": 98.39,
+ "hhi": 0.9406,
+ "effective_positions": 1.06,
+ "label": "CRITICAL",
+ "top_accounts": [
+  {
+   "name": "Activos financieros a valor razonable",
+   "value_cop_mm": 1540.3,
+   "pct_of_total": 96.97,
+   "category": "assets"
+  },
+  {
+   "name": "Acciones Grupo Cibest",
+   "value_cop_mm": 15.62,
+   "pct_of_total": 0.98,
+   "category": "assets"
+  },
+  {
+   "name": "Gastos pagados por anticipado",
+   "value_cop_mm": 7.06,
+   "pct_of_total": 0.44,
+   "category": "assets"
+  },
+  {
+   "name": "Acciones ISA",
+   "value_cop_mm": 5.07,
+   "pct_of_total": 0.32,
+   "category": "assets"
+  },
+  {
+   "name": "Acciones Ecopetrol",
+   "value_cop_mm": 3.67,
+   "pct_of_total": 0.23,
+   "category": "assets"
+  }
+ ],
+ "category_concentration": {
+  "assets": 100.0
+ }
+}

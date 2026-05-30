@@ -61,8 +61,22 @@ _CLOSING_NAV_KW   = ("total patrimonio", "total activo neto", "total activos net
                       "activo neto de inversionistas")
 _CONTRIBUTIONS_KW = ("aportes de inversionistas", "aporte inversionistas", "suscripciones")
 _REDEMPTIONS_KW  = ("retiros de inversionistas", "retiro inversionistas", "redenciones")
-_PERIOD_RETURN_KW = ("ganancia del período", "utilidad del período", "resultado del período",
+_PERIOD_RETURN_KW = ("ganancia del período", "utilidad del período", "utilidad neta del período",
+                     "ganancia neta del período", "resultado del período",
                      "pérdida del período", "resultado neto del período")
+
+# Balance-sheet net-assets line = authoritative point-in-time NAV (= patrimonio).
+# This is the figure the AUM / "Patrimonio" KPI must use, because the balance sheet
+# always satisfies assets = liabilities + equity. It must NOT be confused with the
+# statement-of-changes roll-forward rows ("activos netos iniciales/finales"), which on
+# some EEFF are reported at a different scale/unit than the balance sheet.
+_BALANCE_NAV_KW   = ("patrimonio neto", "patrimonio de los inversionistas",
+                     "activo neto de los inversionistas", "activos netos de los inversionistas",
+                     "activos netos inversionistas", "net assets attributable")
+# Tokens that mark a row as a statement-of-changes / flow row rather than the
+# balance-sheet net-assets line (excluded from the authoritative NAV pick).
+_NAV_ROLLFORWARD_KW = ("inicial", "final", "cambios", "aporte", "retiro",
+                       "suscrip", "redenci")
 
 _EQUITY_ASSET_KW    = ("acciones", "renta variable", "equity", "acción",
                         "inversión en ")   # "inversión en [company]" → equity by default
@@ -239,21 +253,34 @@ def _compute_nav_reconciliation(
     accounts: list[ExtractedAccount],
     fallback_closing_nav: float,
 ) -> NavReconciliation | None:
-    opening_nav = contributions = redemptions = period_return = None
-    closing_nav = fallback_closing_nav
+    statement_opening = contributions = redemptions = period_return = None
+    balance_nav_current = balance_nav_previous = None
+    statement_closing_candidates: list[float] = []
 
     for acc in accounts:
         name = acc.normalized_account_name.lower()
         val = acc.current_value
+
+        # 1) Balance-sheet net assets — authoritative NAV. Skip flow/roll-forward rows.
+        if _hit(name, _BALANCE_NAV_KW) and not _hit(name, _NAV_ROLLFORWARD_KW):
+            if val is not None and abs(val) > 0:
+                balance_nav_current = val
+                balance_nav_previous = acc.previous_value
+            continue
+
+        # 2) Statement-of-changes closing total — cross-check only. Ignore zero/None so
+        #    a prior-period column reported as 0.0 in the current period cannot win.
         if _hit(name, _CLOSING_NAV_KW):
-            # For closing NAV we prefer the is_total=True row (the authoritative sum);
-            # fall back to a detail row only if no total row was found yet.
-            if acc.is_total or closing_nav == fallback_closing_nav:
-                closing_nav = val
-        elif acc.is_total:
-            continue  # skip all other total/subtotal rows to prevent double-counting
-        elif _hit(name, _OPENING_NAV_KW):
-            opening_nav = val
+            if val is not None and abs(val) > 0:
+                statement_closing_candidates.append(val)
+            continue
+
+        if acc.is_total:
+            continue  # skip other subtotal/total rows to prevent double-counting
+
+        # 3) Roll-forward components
+        if _hit(name, _OPENING_NAV_KW):
+            statement_opening = val
         elif _hit(name, _CONTRIBUTIONS_KW):
             contributions = val
         elif _hit(name, _REDEMPTIONS_KW):
@@ -262,27 +289,76 @@ def _compute_nav_reconciliation(
         elif _hit(name, _PERIOD_RETURN_KW):
             period_return = val
 
-    if opening_nav is None:
-        return None
+    statement_closing = (
+        max(statement_closing_candidates, key=abs) if statement_closing_candidates else None
+    )
 
-    net_flow = (contributions or 0) + (redemptions or 0)
-    implied_closing = opening_nav + (contributions or 0) + (redemptions or 0) + (period_return or 0)
-    gap = abs(implied_closing - closing_nav)
-    reconciles = gap < max(1.0, abs(closing_nav) * 0.001)  # within 0.1% or 1 COP MM
+    # Authoritative closing NAV (AUM / Patrimonio): balance net assets > statement total
+    # > caller fallback. Never report a zero when a real figure exists upstream.
+    closing_nav = balance_nav_current
+    if closing_nav is None or abs(closing_nav) == 0:
+        closing_nav = statement_closing
+    if closing_nav is None or abs(closing_nav) == 0:
+        closing_nav = fallback_closing_nav
+    if closing_nav is None or abs(closing_nav) == 0:
+        return None  # no anchor for a meaningful NAV
 
-    if reconciles:
-        narrative = (
-            f"NAV reconciliado: apertura {opening_nav:,.1f} + aportes "
-            f"{contributions or 0:+,.1f} + retiros {redemptions or 0:+,.1f} + "
-            f"rendimiento {period_return or 0:+,.1f} = cierre {closing_nav:,.1f} COP MM. "
-            f"Diferencia: {gap:,.2f} COP MM ({gap/max(abs(closing_nav),1)*100:.3f}%)."
-        )
+    # Opening NAV must be on the SAME scale as closing so growth % is meaningful.
+    if balance_nav_current is not None and balance_nav_previous:
+        opening_nav = balance_nav_previous
     else:
+        opening_nav = statement_opening
+
+    net_flow = (
+        (contributions or 0) + (redemptions or 0)
+        if (contributions is not None or redemptions is not None)
+        else None
+    )
+
+    # Detect a scale/units inconsistency between the balance sheet and the statement of
+    # changes in net assets (e.g. one reported in COP millones, the other in a different
+    # unit). When present, report the balance NAV and flag it rather than emitting a
+    # spurious ±100% NAV move.
+    scale_factor = None
+    if balance_nav_current is not None and statement_closing and abs(statement_closing) > 0:
+        hi = max(abs(balance_nav_current), abs(statement_closing))
+        lo = max(min(abs(balance_nav_current), abs(statement_closing)), 1e-6)
+        scale_factor = hi / lo
+
+    if scale_factor is not None and scale_factor > 5.0:
+        gap = abs(abs(balance_nav_current) - abs(statement_closing))
+        reconciles = False
         narrative = (
-            f"Reconciliación de NAV con diferencia de {gap:,.1f} COP MM "
-            f"({gap/max(abs(closing_nav),1)*100:.1f}%). "
-            f"Verifique si hay cuentas de ajuste no capturadas."
+            f"Inconsistencia de escala/unidades: el patrimonio del balance "
+            f"({balance_nav_current:,.1f} COP MM) y el cierre del estado de cambios en el "
+            f"patrimonio ({statement_closing:,.1f} COP MM) difieren en un factor de "
+            f"{scale_factor:,.0f}×. Se reporta el patrimonio del balance como NAV. "
+            f"Verifique las unidades del estado de cambios en el patrimonio en el EEFF fuente."
         )
+    elif statement_opening is not None:
+        implied_closing = (
+            statement_opening + (contributions or 0) + (redemptions or 0) + (period_return or 0)
+        )
+        ref_closing = statement_closing if statement_closing is not None else closing_nav
+        gap = abs(implied_closing - ref_closing)
+        reconciles = gap < max(1.0, abs(ref_closing) * 0.001)  # within 0.1% or 1 COP MM
+        if reconciles:
+            narrative = (
+                f"NAV reconciliado: apertura {statement_opening:,.1f} + aportes "
+                f"{contributions or 0:+,.1f} + retiros {redemptions or 0:+,.1f} + "
+                f"rendimiento {period_return or 0:+,.1f} = cierre {ref_closing:,.1f} COP MM. "
+                f"Diferencia: {gap:,.2f} COP MM ({gap/max(abs(ref_closing),1)*100:.3f}%)."
+            )
+        else:
+            narrative = (
+                f"Reconciliación de NAV con diferencia de {gap:,.1f} COP MM "
+                f"({gap/max(abs(ref_closing),1)*100:.1f}%). "
+                f"Verifique si hay cuentas de ajuste no capturadas (p. ej. rendimiento del período)."
+            )
+    else:
+        gap = 0.0
+        reconciles = True
+        narrative = f"Patrimonio (NAV) al cierre: {closing_nav:,.1f} COP MM."
 
     return NavReconciliation(
         opening_nav=opening_nav,
@@ -290,7 +366,7 @@ def _compute_nav_reconciliation(
         redemptions=redemptions,
         investment_return=period_return,
         closing_nav=closing_nav,
-        net_investor_flow=net_flow if (contributions or redemptions) else None,
+        net_investor_flow=net_flow,
         reconciles=reconciles,
         gap_cop_mm=round(gap, 3),
         narrative=narrative,

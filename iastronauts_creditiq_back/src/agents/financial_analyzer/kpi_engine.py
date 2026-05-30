@@ -228,7 +228,7 @@ def _build_dashboard_metrics(kpis: dict, fund_analysis: dict | None, total_asset
         aum_val = total_assets
     cards.append({
         "key":    "aum",
-        "label":  "AUM",
+        "label":  "Patrimonio",
         "value":  f"{aum_val:,.0f} MM",
         "signal": "positive" if aum_val > 0 else "neutral",
     })
