@@ -30,6 +30,7 @@ import logging
 import os
 
 import boto3
+from botocore.config import Config
 
 from shared.job_store import (
     load as job_load,
@@ -55,8 +56,21 @@ _AGENTS: dict[int, tuple[str, str, str, str | None]] = {
 }
 
 
+# The worker synchronously invokes a target agent (RequestResponse) that can run
+# for minutes. botocore's DEFAULT read_timeout is 60s, which fires long before the
+# Analyzer's 300s Lambda budget — surfacing as
+#   "Read timeout on endpoint URL: .../creditiq-analyzer-dev/invocations".
+# Set read_timeout above the longest agent timeout (Analyzer = 300s) and disable
+# retries so a slow-but-succeeding agent is never invoked twice.
+_INVOKE_CONFIG = Config(
+    connect_timeout=10,
+    read_timeout=320,
+    retries={"max_attempts": 1, "mode": "standard"},
+)
+
+
 def _lambda():
-    return boto3.client("lambda")
+    return boto3.client("lambda", config=_INVOKE_CONFIG)
 
 
 def _save_status(job_id: str, status: str, error: str | None = None) -> None:

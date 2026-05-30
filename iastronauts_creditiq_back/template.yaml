@@ -13,6 +13,13 @@ Parameters:
     Type: String
     Default: anthropic_api
     AllowedValues: [anthropic_api, bedrock]
+  LlmModel:
+    Type: String
+    # Default to Haiku — cheapest for the mechanical extraction/analysis calls.
+    # Without this, agents fall back to the hardcoded claude-sonnet-4-6 in
+    # llm_provider.py (~4x the cost). Override per-deploy if a richer model is
+    # wanted for the analytical agents.
+    Default: claude-haiku-4-5-20251001
   AnthropicApiKey:
     Type: String
     NoEcho: true
@@ -40,9 +47,10 @@ Globals:
         MAIN_BUCKET: !Ref MainBucket
         WORKFLOW_ARN: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:creditiq-analysis-workflow-${Stage}"
         LLM_PROVIDER: !Ref LlmProvider
+        LLM_MODEL: !Ref LlmModel
         # API key is resolved from Secrets Manager in production (see AnthropicApiKeySecret).
         # Local dev still reads ANTHROPIC_API_KEY directly from .env.
-        ANTHROPIC_API_KEY_SECRET_ARN: !If [HasAnthropicKey, !Ref AnthropicApiKeySecret, !Ref "AWS::NoValue"]
+        ANTHROPIC_API_KEY_SECRET_ARN: !Ref AnthropicApiKeySecret
         GNEWS_API_KEY: !Ref GnewsApiKey
         AWS_ACCOUNT_ID: !Ref AWS::AccountId
   HttpApi:
@@ -65,14 +73,16 @@ Globals:
 Resources:
 
   # Anthropic API key stored in Secrets Manager instead of plaintext Lambda env vars.
-  # Created only when a key is passed at deploy time (see HasAnthropicKey condition).
+  # The secret ALWAYS exists; its value is only (re)written when AnthropicApiKey is
+  # passed at deploy time. Omitting the param leaves the existing value untouched —
+  # so a value set out-of-band (aws secretsmanager put-secret-value) survives
+  # redeploys and you never have to pass the key just to ship unrelated changes.
   AnthropicApiKeySecret:
     Type: AWS::SecretsManager::Secret
-    Condition: HasAnthropicKey
     Properties:
       Name: !Sub "creditiq-anthropic-api-key-${Stage}"
       Description: Anthropic API key for CreditIQ LLM calls
-      SecretString: !Ref AnthropicApiKey
+      SecretString: !If [HasAnthropicKey, !Ref AnthropicApiKey, !Ref "AWS::NoValue"]
 
   # Único bucket con 3 prefijos: uploads/, reports/, rag/
   MainBucket:
@@ -221,12 +231,9 @@ Resources:
                   - xray:GetSamplingRules
                   - xray:GetSamplingTargets
                 Resource: "*"
-              - !If
-                - HasAnthropicKey
-                - Effect: Allow
-                  Action: secretsmanager:GetSecretValue
-                  Resource: !Ref AnthropicApiKeySecret
-                - !Ref "AWS::NoValue"
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref AnthropicApiKeySecret
 
   # Rol para Lambdas de agentes (Step Functions)
   AgentLambdaRole:
@@ -275,12 +282,9 @@ Resources:
                   - xray:GetSamplingRules
                   - xray:GetSamplingTargets
                 Resource: "*"
-              - !If
-                - HasAnthropicKey
-                - Effect: Allow
-                  Action: secretsmanager:GetSecretValue
-                  Resource: !Ref AnthropicApiKeySecret
-                - !Ref "AWS::NoValue"
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref AnthropicApiKeySecret
 
   WorkflowLogGroup:
     Type: AWS::Logs::LogGroup
