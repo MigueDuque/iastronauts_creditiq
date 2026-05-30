@@ -117,6 +117,52 @@ def _heuristic_news_score(articles: list[dict[str, Any]]) -> list[dict[str, Any]
     return scored[:5]
 
 
+def _news_window_for_period(analysis_period: str | None) -> tuple[str | None, str | None]:
+    """
+    Translate the reporting period into an ISO-8601 (from, to) window so the news we
+    fetch matches the era of the financial statements being analysed — not 'today'.
+
+    Supports 'YYYY-Qn', 'YYYY-Hn', 'YYYY-MM' and 'YYYY'. A 'YYYY-MM' period is treated
+    as the half-year it falls in (these EEFF compare against the prior December, i.e.
+    semester/annual cadence). Returns (None, None) when the period can't be parsed or
+    lies in the future, so the caller falls back to latest news.
+    """
+    if not analysis_period:
+        return None, None
+    p = analysis_period.strip().upper().replace("/", "-")
+    try:
+        year = int(p[:4])
+    except (ValueError, IndexError):
+        return None, None
+
+    bounds = {
+        "Q1": ((1, 1), (3, 31)), "Q2": ((4, 1), (6, 30)),
+        "Q3": ((7, 1), (9, 30)), "Q4": ((10, 1), (12, 31)),
+        "H1": ((1, 1), (6, 30)), "H2": ((7, 1), (12, 31)),
+    }
+    start_md = end_md = None
+    for tag, (smd, emd) in bounds.items():
+        if tag in p:
+            start_md, end_md = smd, emd
+            break
+    if start_md is None:
+        parts = p.split("-")
+        if len(parts) >= 2 and parts[1].isdigit():          # YYYY-MM → enclosing half
+            month = max(1, min(12, int(parts[1])))
+            start_md, end_md = ((1, 1), (6, 30)) if month <= 6 else ((7, 1), (12, 31))
+        else:                                                # YYYY → full year
+            start_md, end_md = (1, 1), (12, 31)
+
+    start = datetime(year, *start_md)
+    end = datetime(year, *end_md)
+    now = datetime.now()
+    if start > now:
+        return None, None
+    if end > now:
+        end = now
+    return (start.strftime("%Y-%m-%dT00:00:00Z"), end.strftime("%Y-%m-%dT23:59:59Z"))
+
+
 def generate_macro_context(
     analysis_period: str | None = None,
     country: str = "Colombia",
@@ -142,8 +188,10 @@ def generate_macro_context(
     logger.info("MacroContextEngine start | period=%s country=%s", analysis_period, country)
 
     # ── 1. Fetch raw data ────────────────────────────────────────────────────
+    # News is scoped to the reporting period (real context of the analysis), not today.
+    news_from, news_to = _news_window_for_period(analysis_period)
     te_data = fetch_colombia_indicators()
-    news_data = fetch_colombia_news()
+    news_data = fetch_colombia_news(date_from=news_from, date_to=news_to)
     market_data = fetch_market_data()
 
     # ── 2. Classify qualitative states ──────────────────────────────────────
@@ -198,6 +246,7 @@ def generate_macro_context(
         "market_context": market_ctx,
         "sector_context": sector_context,
         "news_context": news_context,
+        "news_window": {"from": news_from, "to": news_to},
         "market_assets_context": market_assets_context,
         "macro_signals": macro_signals,
         "_data_availability": {
