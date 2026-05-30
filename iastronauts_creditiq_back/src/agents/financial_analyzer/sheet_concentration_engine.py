@@ -38,6 +38,13 @@ _CASH_KW: tuple[str, ...] = (
     "efectivo",
     "caja",
 )
+# Cash-FLOW statement sheets ("FLUJO_EFECTIVO") also contain "efectivo" but hold
+# movements (e.g. "Disminución de inversiones"), not bank balances/holdings. They must
+# never feed any position/concentration view, or they pollute the custodian breakdown.
+_FLOW_SHEET_KW: tuple[str, ...] = (
+    "flujo",
+    "cash flow",
+)
 
 
 # ── Asset-type keywords (applied to account names in the balance sheet) ───────
@@ -181,6 +188,9 @@ def analyze_sheet_concentration(accounts: list[ExtractedAccount]) -> SheetConcen
 
     for acc in accounts:
         if acc.current_value <= 0 or acc.is_total:
+            continue
+        # Skip cash-flow statement rows — movements, not holdings (see _FLOW_SHEET_KW).
+        if _sheet_matches(acc.source_sheet, _FLOW_SHEET_KW):
             continue
         if _sheet_matches(acc.source_sheet, _CASH_KW):
             cash.append(acc)
