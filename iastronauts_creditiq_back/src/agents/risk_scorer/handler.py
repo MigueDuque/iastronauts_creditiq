@@ -104,7 +104,21 @@ def lambda_handler(event: dict, context) -> dict:
         analysis_results=analysis_list,
         financial_ratios=payload.financial_ratios,
         is_investment_fund=is_fund,
+        business_context=payload.business_context,
     )
+
+    # Mejora 6: propagate anti-hallucination failures onto the affected accounts
+    # so the report/frontend can mark individual claims as unverified.
+    _halluc_by_id = {
+        f["account_id"]: f["detail"]
+        for f in composite.anti_hallucination_result.get("failures", [])
+        if f.get("account_id")
+    }
+    if _halluc_by_id:
+        for acct in payload.analysis_results:
+            if acct.account_id in _halluc_by_id:
+                acct.hallucination_flag = True
+                acct.hallucination_detail = _halluc_by_id[acct.account_id]
 
     logger.info(
         "Composite: score=%d level=%s validation=%d human_review=%s",
@@ -171,6 +185,8 @@ def lambda_handler(event: dict, context) -> dict:
         "operational": asdict(operational),
         "composite_score": composite.composite_score,
         "weights_used": "fund" if is_fund else "corporate",
+        # Mejora 1: full, auditable breakdown of the composite score.
+        "composite_score_detail": composite.composite_score_detail,
     }
 
     # Serialize RiskLevel enums inside risk_dimensions
@@ -204,6 +220,13 @@ def lambda_handler(event: dict, context) -> dict:
         requires_human_review=composite.requires_human_review,
         analysis_confidence=composite.analysis_confidence,
         anti_hallucination_passed=composite.anti_hallucination_passed,
+        # ── Transparency detail objects (Mejoras 1, 2, 4, 6, 7, 9) ──────────────
+        composite_score_detail=composite.composite_score_detail,
+        validation_score_detail=composite.validation_score_detail,
+        anti_hallucination_result=composite.anti_hallucination_result,
+        analysis_confidence_detail=composite.analysis_confidence_detail,
+        data_quality_warnings=composite.data_quality_warnings,
+        anomaly_detection_summary=composite.anomaly_detection_summary,
         risk_dimensions=risk_dimensions,
         risk_categories=risk_categories,
         risk_summary=risk_summary,

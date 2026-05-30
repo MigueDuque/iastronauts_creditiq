@@ -165,15 +165,48 @@ interface RiskDimension {
   score: number; level: string; weight: number; key_findings: string[]; risk_drivers: string[]
 }
 
+interface CompositeScoreDetail {
+  value?: number; formula?: string
+  weights?: Record<string, number>; weighted_components?: Record<string, number>
+  weight_profile?: string; weight_profile_rationale?: string
+}
+interface ValidationScoreDetail {
+  value?: number; formula?: string
+  components?: Record<string, { score: number; weight: number; description: string }>
+  issues_penalized?: string[]
+}
+interface AntiHallucinationResult {
+  passed?: boolean; checks_performed?: number; checks_failed?: number
+  failures?: { account_id: string; check: string; detail: string; action: string }[]
+  impact_on_output?: string
+}
+interface AnalysisConfidenceDetail {
+  value?: number; formula?: string
+  factors?: Record<string, number>; weights?: Record<string, number>; note?: string
+}
+interface DataQualityWarning { field: string; value: unknown; impact: string; severity: string }
+interface AnomalyDetectionSummary {
+  total_detected?: number; included_in_output?: number; filtered_out?: number
+  anomaly_confidence_threshold?: number; filter_criteria?: string; filtered_accounts?: string[]
+}
+
 interface ScorerOutput {
   job_id: string; company_name: string; overall_risk_score: string
   validation_score: number; analysis_confidence: number
   anti_hallucination_passed: boolean; requires_human_review: boolean
   issues_found: string[]; compliance_flags: string[]; fund_context_adjusted: boolean
+  // ── Transparency detail objects (additive; scalars above stay canonical) ──
+  composite_score_detail?: CompositeScoreDetail
+  validation_score_detail?: ValidationScoreDetail
+  anti_hallucination_result?: AntiHallucinationResult
+  analysis_confidence_detail?: AnalysisConfidenceDetail
+  data_quality_warnings?: DataQualityWarning[]
+  anomaly_detection_summary?: AnomalyDetectionSummary
   risk_dimensions: {
     liquidity?: RiskDimension; credit?: RiskDimension; solvency?: RiskDimension
     market?: RiskDimension; operational?: RiskDimension
     composite_score?: number; weights_used?: string
+    composite_score_detail?: CompositeScoreDetail
   }
   risk_summary: {
     risk_headline?: string
@@ -828,27 +861,48 @@ export default function AnalysisPage() {
 
                   {(vs === 'done' || vs === 'waiting') && analyzerData && (
                     <>
-                      {/* Dashboard KPIs — every tile on a single row */}
-                      <div className="flex gap-3">
-                        {isFundWithNav && (
-                          <StatTile
-                            label="AUM — Patrimonio Neto"
+                      {/* Dashboard KPIs — auto-distributed across 1 or 2 balanced rows */}
+                      {(() => {
+                        // Collect every tile the agent deemed relevant, then let the
+                        // layout decide how many rows are needed so they always fit.
+                        const tiles: React.ReactNode[] = []
+                        if (isFundWithNav) tiles.push(
+                          <StatTile key="aum" label="AUM — Patrimonio Neto"
                             value={`${analyzerData.fund_analysis!.nav_reconciliation!.closing_nav!.toLocaleString('en-US', { maximumFractionDigits: 0 })}`}
-                            sub="COP MM"
-                            color="var(--color-brand-accent)"
-                            icon="account_balance_wallet"
-                          />
-                        )}
-                        <StatTile wide label="Financial Health" value={analyzerData.overall_financial_health.replace(/_/g, ' ')} color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#2F80FF'} icon="monitor_heart" />
-                        {dashboardMetrics.slice(0, 5).map(m => (
+                            sub="COP MM" color="var(--color-brand-accent)" icon="account_balance_wallet" />
+                        )
+                        tiles.push(
+                          <StatTile key="health" wide label="Financial Health" value={analyzerData.overall_financial_health.replace(/_/g, ' ')} color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#2F80FF'} icon="monitor_heart" />
+                        )
+                        dashboardMetrics.forEach(m => tiles.push(
                           <StatTile key={m.key} label={m.label} value={m.value}
                             signal={m.signal}
                             color={m.signal === 'positive' ? 'var(--color-success-low)' : m.signal === 'negative' ? 'var(--color-danger-soft)' : 'var(--color-warning-soft)'}
                             icon={metricIcon(m.key)} />
-                        ))}
-                        <StatTile label="High Materiality" value={analyzerData.high_materiality_accounts.length} sub="accounts" big color="#56CCF2" icon="priority_high" />
-                        <StatTile label="Anomalies" value={anomalyCount} sub="detected" big color={anomalyCount > 0 ? '#FFB020' : '#56F2C1'} icon={anomalyCount > 0 ? 'warning' : 'check_circle'} />
-                      </div>
+                        ))
+                        tiles.push(
+                          <StatTile key="materiality" label="High Materiality" value={analyzerData.high_materiality_accounts.length} sub="accounts" big color="#56CCF2" icon="priority_high" />
+                        )
+                        tiles.push(
+                          <StatTile key="anomalies" label="Anomalies" value={anomalyCount} sub="detected" big color={anomalyCount > 0 ? '#FFB020' : '#56F2C1'} icon={anomalyCount > 0 ? 'warning' : 'check_circle'} />
+                        )
+
+                        // Up to 6 tiles stay on a single row; beyond that, split into
+                        // two rows with a near-equal count so neither row looks sparse.
+                        const MAX_PER_ROW = 6
+                        const rowCount = Math.ceil(tiles.length / MAX_PER_ROW)
+                        const perRow = Math.ceil(tiles.length / rowCount)
+                        const rows: React.ReactNode[][] = []
+                        for (let i = 0; i < tiles.length; i += perRow) rows.push(tiles.slice(i, i + perRow))
+
+                        return (
+                          <div className="flex flex-col gap-3">
+                            {rows.map((row, i) => (
+                              <div key={i} className="flex gap-3">{row}</div>
+                            ))}
+                          </div>
+                        )
+                      })()}
 
                       {/* Tier 1 signals */}
                       {(analyzerData.insight_tiers?.tier1_critical ?? []).length > 0 && (
@@ -1117,7 +1171,7 @@ export default function AnalysisPage() {
                         </div>
                       )}
 
-                      {/* Compliance flags */}
+                      {/* Compliance flags (regulatory only — NIIF / SFC) */}
                       {scorerData.compliance_flags.length > 0 && (
                         <div className="bg-surface border border-border rounded-lg p-4">
                           <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
@@ -1125,6 +1179,116 @@ export default function AnalysisPage() {
                             Compliance Flags ({scorerData.compliance_flags.length})
                           </div>
                           {scorerData.compliance_flags.map((f, i) => <div key={i} className="text-label-sm font-label-sm text-outline mb-1">· {f}</div>)}
+                        </div>
+                      )}
+
+                      {/* Score transparency — auditability of composite & validation scores */}
+                      {(scorerData.composite_score_detail || scorerData.validation_score_detail) && (
+                        <details className="bg-surface border border-border rounded-lg p-4 group">
+                          <summary className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest flex items-center gap-2 cursor-pointer select-none">
+                            <span className="material-symbols-outlined text-[14px]">function</span>
+                            Score Transparency
+                            <span className="ml-auto material-symbols-outlined text-[16px] text-outline group-open:rotate-180 transition-transform">expand_more</span>
+                          </summary>
+                          <div className="mt-4 flex flex-col gap-4">
+                            {scorerData.composite_score_detail?.formula && (
+                              <div>
+                                <p className="text-[10px] font-mono text-outline uppercase tracking-widest mb-1">
+                                  Composite Score = {scorerData.composite_score_detail.value}/100
+                                  {scorerData.composite_score_detail.weight_profile ? ` · perfil ${scorerData.composite_score_detail.weight_profile}` : ''}
+                                </p>
+                                <code className="block text-[11px] font-mono text-on-surface bg-surface-container rounded px-2 py-1.5 break-words">{scorerData.composite_score_detail.formula}</code>
+                                {scorerData.composite_score_detail.weighted_components && (
+                                  <div className="flex flex-wrap gap-1.5 mt-2">
+                                    {Object.entries(scorerData.composite_score_detail.weighted_components).map(([k, v]) => (
+                                      <span key={k} className="text-[10px] font-mono text-outline bg-surface-container rounded px-1.5 py-0.5">{k}: {v}</span>
+                                    ))}
+                                  </div>
+                                )}
+                                {scorerData.composite_score_detail.weight_profile_rationale && (
+                                  <p className="text-[10px] text-outline leading-tight mt-1.5">{scorerData.composite_score_detail.weight_profile_rationale}</p>
+                                )}
+                              </div>
+                            )}
+                            {scorerData.validation_score_detail?.components && (
+                              <div>
+                                <p className="text-[10px] font-mono text-outline uppercase tracking-widest mb-1.5">Validation Score = {scorerData.validation_score_detail.value}/100 · sum(score × weight)</p>
+                                {Object.entries(scorerData.validation_score_detail.components).map(([k, c]) => (
+                                  <div key={k} className="flex items-center gap-2 mb-1">
+                                    <span className="text-[10px] font-mono text-outline w-44 shrink-0">{k} (×{c.weight})</span>
+                                    <div className="flex-1 h-1 bg-surface-container rounded overflow-hidden">
+                                      <div className="h-full rounded" style={{ width: `${c.score}%`, background: c.score >= 75 ? '#56F2C1' : c.score >= 50 ? '#FFB020' : '#FF4D6D', opacity: 0.7 }} />
+                                    </div>
+                                    <span className="text-[10px] font-mono text-on-surface w-8 text-right">{c.score}</span>
+                                  </div>
+                                ))}
+                                {(scorerData.validation_score_detail.issues_penalized ?? []).map((iss, i) => (
+                                  <p key={i} className="text-[10px] text-risk-medium leading-tight mt-1">− {iss}</p>
+                                ))}
+                              </div>
+                            )}
+                            {scorerData.analysis_confidence_detail?.factors && (
+                              <div>
+                                <p className="text-[10px] font-mono text-outline uppercase tracking-widest mb-1.5">Analysis Confidence = {((scorerData.analysis_confidence_detail.value ?? 0) * 100).toFixed(0)}% (independiente del riesgo)</p>
+                                <div className="flex flex-wrap gap-1.5">
+                                  {Object.entries(scorerData.analysis_confidence_detail.factors).map(([k, v]) => (
+                                    <span key={k} className="text-[10px] font-mono text-outline bg-surface-container rounded px-1.5 py-0.5">{k}: {(v as number).toFixed(2)}</span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </details>
+                      )}
+
+                      {/* Anti-hallucination failures (per-account) */}
+                      {scorerData.anti_hallucination_result?.failures && scorerData.anti_hallucination_result.failures.length > 0 && (
+                        <div className="bg-surface border border-border rounded-lg p-4">
+                          <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
+                            <span className="material-symbols-outlined text-[14px]" style={{ color: '#FF4D6D' }}>report</span>
+                            Anti-hallucination ({scorerData.anti_hallucination_result.checks_failed}/{scorerData.anti_hallucination_result.checks_performed} fallidas)
+                          </div>
+                          {scorerData.anti_hallucination_result.failures.map((f, i) => (
+                            <div key={i} className="mb-2">
+                              <p className="text-[11px] font-mono text-on-surface">· <span className="text-[#FF4D6D]">{f.account_id}</span> — {f.check}</p>
+                              <p className="text-[10px] text-outline leading-tight ml-3">{f.detail}</p>
+                              <p className="text-[10px] text-outline leading-tight ml-3 italic">{f.action}</p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Data quality warnings (null business_context) */}
+                      {scorerData.data_quality_warnings && scorerData.data_quality_warnings.length > 0 && (
+                        <div className="bg-surface border border-border rounded-lg p-4">
+                          <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
+                            <span className="material-symbols-outlined text-[14px]" style={{ color: '#FFB020' }}>data_alert</span>
+                            Data Quality Warnings ({scorerData.data_quality_warnings.length})
+                          </div>
+                          {scorerData.data_quality_warnings.map((w, i) => (
+                            <div key={i} className="mb-2">
+                              <p className="text-[11px] font-mono text-on-surface">· {w.field}
+                                <span className="ml-2 text-[9px] px-1.5 py-0.5 rounded" style={{ color: w.severity === 'MEDIUM' ? '#FFB020' : '#56CCF2', background: w.severity === 'MEDIUM' ? '#FFB02015' : '#56CCF215' }}>{w.severity}</span>
+                              </p>
+                              <p className="text-[10px] text-outline leading-tight ml-3">{w.impact}</p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Anomaly detection decision */}
+                      {scorerData.anomaly_detection_summary && (scorerData.anomaly_detection_summary.total_detected ?? 0) > 0 && (
+                        <div className="bg-surface border border-border rounded-lg p-4">
+                          <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-2 flex items-center gap-2">
+                            <span className="material-symbols-outlined text-[14px]">filter_alt</span>
+                            Anomaly Detection
+                          </div>
+                          <p className="text-[11px] font-mono text-outline">
+                            {scorerData.anomaly_detection_summary.total_detected} detectadas ·
+                            {' '}{scorerData.anomaly_detection_summary.included_in_output} incluidas ·
+                            {' '}{scorerData.anomaly_detection_summary.filtered_out} filtradas
+                          </p>
+                          <p className="text-[10px] text-outline leading-tight mt-1">{scorerData.anomaly_detection_summary.filter_criteria}</p>
                         </div>
                       )}
 

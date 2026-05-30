@@ -743,7 +743,7 @@ class FinancialAnalyzerService:
                 confidence=confidence,
                 evidence_count=evidence_count,
                 evidence_sources=evidence_sources,
-                causality_chain=chain_narratives,
+                causality_chain=chain_narratives or None,
                 is_related_party=insight.is_related_party if insight else False,
                 related_party_counterpart=insight.related_party_counterpart if insight else None,
                 investment_signal=insight.investment_signal if insight else None,

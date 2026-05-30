@@ -42,6 +42,23 @@ class ScorerOutput(BaseModel):
     analysis_confidence: float = Field(ge=0.0, le=1.0)
     anti_hallucination_passed: bool
 
+    # ── Transparency upgrades (additive; the scalars above stay canonical so the
+    #    Revisor, Report Generator and frontend keep working). Each detail object
+    #    explains how its scalar was computed so the number is auditable. ────────
+    # Mejora 1: composite_score breakdown (formula, weights, weighted_components,
+    #           weight_profile + rationale).
+    composite_score_detail: dict = {}
+    # Mejora 2: validation_score breakdown (5 weighted components + issues_penalized).
+    validation_score_detail: dict = {}
+    # Mejora 6: anti-hallucination per-account check results + impact on output.
+    anti_hallucination_result: dict = {}
+    # Mejora 7: how analysis_confidence was derived (independent of composite_score).
+    analysis_confidence_detail: dict = {}
+    # Mejora 9: explicit warnings for null business_context fields and their impact.
+    data_quality_warnings: list = []
+    # Mejora 4: anomaly detection decision (detected / included / filtered + criteria).
+    anomaly_detection_summary: dict = {}
+
     # 5 risk dimensions (liquidity, credit, solvency, market, operational)
     risk_dimensions: dict = {}
     # 3 report-facing risk categories (credito, mercado, financiero) built from the
