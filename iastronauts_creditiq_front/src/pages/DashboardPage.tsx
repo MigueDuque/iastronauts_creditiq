@@ -113,7 +113,16 @@ const AI_SIGNALS = [
   },
 ]
 
-const NEWS_ITEMS = [
+interface NewsItem {
+  thumb?: string
+  title: string
+  sub: string
+  time: string
+  url?: string
+}
+
+// Shown until live GNews data arrives (or if the request fails / returns empty).
+const FALLBACK_NEWS: NewsItem[] = [
   {
     thumb: 'https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?w=80&h=60&fit=crop',
     title: 'BanRep mantiene tasa de interés en 11.75%',
@@ -134,7 +143,42 @@ const NEWS_ITEMS = [
   },
 ]
 
+const API = import.meta.env.VITE_API_URL || ''
+
 /* ─── helpers ───────────────────────────────────────────────────────────────── */
+
+/** Relative "x min ago" label from an ISO/parseable timestamp; '' if unusable. */
+function relativeTime(iso?: string): string {
+  if (!iso) return ''
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return ''
+  const diff = Math.max(0, Date.now() - t)
+  const min = Math.round(diff / 60_000)
+  if (min < 1) return 'just now'
+  if (min < 60) return `${min} min ago`
+  const hr = Math.round(min / 60)
+  if (hr < 24) return `${hr} h ago`
+  return `${Math.round(hr / 24)} d ago`
+}
+
+/** Map a loosely-shaped GNews/backend article onto our NewsItem. */
+function normalizeNews(raw: unknown): NewsItem | null {
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  const title = (o.title ?? o.headline) as string | undefined
+  if (!title) return null
+  const source = (o.source ?? o.publisher) as string | undefined
+  const impact = (o.impact ?? o.summary ?? o.description ?? source) as string | undefined
+  const published = (o.publishedAt ?? o.published_at ?? o.date) as string | undefined
+  return {
+    title,
+    sub: impact ? String(impact).slice(0, 90) : '',
+    time: relativeTime(published) || (typeof o.time === 'string' ? o.time : ''),
+    thumb: (o.thumb ?? o.image ?? o.image_url ?? o.urlToImage) as string | undefined,
+    url: (o.url ?? o.link) as string | undefined,
+  }
+}
+
 function formatDate(d: Date) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 }
@@ -148,6 +192,29 @@ export default function DashboardPage() {
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 60_000)
     return () => clearInterval(t)
+  }, [])
+
+  // Live market news (real-time, unlike the date-anchored news used during analysis).
+  // Falls back to FALLBACK_NEWS when no endpoint is configured or the request fails.
+  const [news, setNews] = useState<NewsItem[]>(FALLBACK_NEWS)
+  useEffect(() => {
+    if (!API) return
+    let alive = true
+    const load = async () => {
+      try {
+        const res = await fetch(`${API}/market/news`)
+        if (!res.ok || !alive) return
+        const data = await res.json()
+        const raw: unknown[] = Array.isArray(data) ? data : data?.news ?? data?.articles ?? []
+        const items = raw.map(normalizeNews).filter((n): n is NewsItem => n !== null).slice(0, 3)
+        if (alive && items.length) setNews(items)
+      } catch (e) {
+        console.error('[news]', e)
+      }
+    }
+    load()
+    const t = setInterval(load, 300_000) // refresh every 5 min
+    return () => { alive = false; clearInterval(t) }
   }, [])
 
   return (
@@ -313,88 +380,57 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* RIGHT globe — real Earth photo, partially overflowing edges like mockup */}
+          {/* Earth globe — tucked into the bottom-right corner. Only ~a quarter
+              is visible; the rest is clipped by the card (overflow:hidden) and sits
+              BEHIND the content (zIndex 1 < content zIndex 2), never in front.
+              Tune position with `right` (gap from edge) and `bottom` (how much shows). */}
           <div
             style={{
-              width: 380,
-              flexShrink: 0,
-              position: 'relative',
-              display: 'flex',
-              alignItems: 'flex-start',
-              justifyContent: 'flex-end',
-              // hero card has overflow:hidden, so the globe will be clipped naturally
+              position: 'absolute',
+              right: 10,        // small gap — "a bit separate from the right side"
+              bottom: -200,     // sink ~3/4 of the sphere below the card, leaving a quarter
+              width: 440,
+              height: 440,
+              zIndex: 1,
+              pointerEvents: 'none',
             }}
           >
-            {/* Orbital rings — behind the globe */}
-            <svg
-              style={{
-                position: 'absolute',
-                width: '130%',
-                height: '130%',
-                top: '-15%',
-                right: '-15%',
-                opacity: 0.45,
-                pointerEvents: 'none',
-                zIndex: 1,
-              }}
-              viewBox="0 0 500 500"
-            >
-              {/* Ring 1 */}
-              <ellipse
-                cx="250" cy="250"
-                rx="230" ry="68"
-                fill="none"
-                stroke="#94a3b8"
-                strokeWidth="1"
-                transform="rotate(-22 250 250)"
-              />
-              {/* Ring 2 */}
-              <ellipse
-                cx="250" cy="250"
-                rx="210" ry="52"
-                fill="none"
-                stroke="#cbd5e1"
-                strokeWidth="0.6"
-                transform="rotate(6 250 250)"
-              />
-              {/* star dots at ring tips */}
-              <circle cx="28" cy="238" r="3" fill="#cbd5e1" opacity="0.9" />
-              <circle cx="472" cy="260" r="2.5" fill="#94a3b8" opacity="0.8" />
-            </svg>
-
-            {/* Ambient glow */}
+            {/* Atmospheric limb glow */}
             <div
               style={{
                 position: 'absolute',
-                top: '-10%',
-                right: '-10%',
-                width: 380,
-                height: 380,
+                inset: '-10%',
                 borderRadius: '50%',
-                background: 'radial-gradient(circle, rgba(56,189,248,0.14) 0%, transparent 65%)',
-                filter: 'blur(30px)',
-                zIndex: 0,
+                background:
+                  'radial-gradient(circle at 50% 36%, rgba(96,165,250,0.22) 0%, rgba(56,189,248,0.10) 42%, transparent 66%)',
+                filter: 'blur(36px)',
               }}
             />
 
-            {/* Earth image — large, offset to top-right so it crops naturally */}
-            <img
-              src="/earth_globe.png"
-              alt="Earth globe"
+            {/* Earth */}
+            <div
               style={{
-                width: 340,
-                height: 340,
-                objectFit: 'cover',
+                position: 'absolute',
+                inset: 0,
                 borderRadius: '50%',
-                position: 'relative',
-                zIndex: 2,
-                marginTop: '-30px',
-                marginRight: '-40px',
+                overflow: 'hidden',
                 filter:
-                  'drop-shadow(0 0 50px rgba(56,189,248,0.3)) drop-shadow(-8px 8px 24px rgba(14,165,233,0.2))',
+                  'drop-shadow(0 30px 50px rgba(0,0,0,0.5)) drop-shadow(-6px 10px 30px rgba(14,165,233,0.14))',
                 animation: 'globeFloat 9s ease-in-out infinite',
               }}
-            />
+            >
+              <img
+                src="/earth_globe.png"
+                alt="Earth globe"
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  objectFit: 'cover',
+                  display: 'block',
+                  filter: 'brightness(0.92) saturate(1.05) contrast(1.7)',
+                }}
+              />
+            </div>
 
             <style>{`
               @keyframes globeFloat {
@@ -569,14 +605,15 @@ export default function DashboardPage() {
               flexDirection: 'column',
             }}
           >
-            {NEWS_ITEMS.map((n, i) => (
+            {news.map((n, i) => (
               <div
                 key={n.title}
+                onClick={() => n.url && window.open(n.url, '_blank', 'noopener,noreferrer')}
                 style={{
                   display: 'flex',
                   gap: 12,
                   padding: '16px 18px',
-                  borderBottom: i < NEWS_ITEMS.length - 1 ? '1px solid rgba(59,130,246,0.07)' : 'none',
+                  borderBottom: i < news.length - 1 ? '1px solid rgba(59,130,246,0.07)' : 'none',
                   cursor: 'pointer',
                   transition: 'background 0.2s',
                 }}

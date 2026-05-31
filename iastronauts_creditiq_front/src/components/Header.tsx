@@ -1,5 +1,4 @@
 
-import { Link, useLocation } from 'react-router-dom'
 import IconButton from '@mui/material/IconButton'
 
 interface HeaderProps {
@@ -7,8 +6,6 @@ interface HeaderProps {
 }
 
 export default function Header({ onMenuToggle }: HeaderProps) {
-  const { pathname } = useLocation()
-
   return (
     <header
       style={{
@@ -49,60 +46,6 @@ export default function Header({ onMenuToggle }: HeaderProps) {
             </IconButton>
           )}
         </div>
-
-        {/* Center: nav tabs (desktop only, hidden when sidebar is present) */}
-        <nav
-          style={{
-            display: 'flex',
-            gap: 24,
-            alignItems: 'center',
-          }}
-          className="hidden md:flex"
-        >
-          {[
-            { path: '/', label: 'Dashboard', icon: 'dashboard' },
-            { path: '/analysis', label: 'Analyses', icon: 'analytics' },
-          ].map(({ path, label, icon }) => {
-            const active = pathname === path
-            return (
-              <Link
-                key={path}
-                to={path}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  paddingBottom: 4,
-                  textDecoration: 'none',
-                  color: active ? '#2F80FF' : '#94A3B8',
-                  fontWeight: active ? 700 : 500,
-                  borderBottom: active ? '2px solid #2F80FF' : '2px solid transparent',
-                  transition: 'color 0.2s, border-color 0.2s',
-                }}
-              >
-                <span
-                  className="material-symbols-outlined"
-                  style={{
-                    fontSize: 18,
-                    fontVariationSettings: active ? "'FILL' 1" : "'FILL' 0",
-                  }}
-                >
-                  {icon}
-                </span>
-                <span
-                  style={{
-                    fontFamily: 'JetBrains Mono, monospace',
-                    fontSize: 12,
-                    letterSpacing: '0.05em',
-                    fontWeight: 500,
-                  }}
-                >
-                  {label}
-                </span>
-              </Link>
-            )
-          })}
-        </nav>
 
         {/* Right: action icons */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
