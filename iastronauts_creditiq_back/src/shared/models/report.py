@@ -32,6 +32,15 @@ class FinalReportOutput(BaseModel):
     niif_note_drafts: list[NiifNoteDraft]
     markdown_report_url: str
     pdf_report_url: str | None = None
+    report_sections: dict = {}
+    financial_ratios: dict = {}
+    fund_analysis: dict = {}
+    executive_kpis: dict = {}
+    sheet_concentration: dict = {}
+    structured_analysis: dict = {}
+    cross_statement_signals: list[dict] = []
+    earnings_sustainability: str = ""
+    historical_context: list[dict] = []
 
     # ── Risk section (propagated from ScorerOutput) ──────────────────────────
     # 3 report-facing categories: credito, mercado, financiero

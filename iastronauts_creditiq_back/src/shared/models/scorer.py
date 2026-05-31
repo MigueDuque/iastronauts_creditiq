@@ -29,6 +29,20 @@ class ScorerOutput(BaseModel):
     overall_financial_health: FinancialHealth
     executive_narrative: str
     niif18_compliance: dict = {}
+    earnings_quality: dict = {}
+    portfolio_concentration: dict = {}
+    fund_analysis: dict = {}
+    macro_context: dict = {}
+    executive_kpis: dict = {}
+    portfolio_thesis: str = ""
+    insight_tiers: dict = {}
+    narrative_layers: dict = {}
+    executive_synthesis: dict = {}
+    structured_analysis: dict = {}
+    cross_statement_signals: list[dict] = []
+    earnings_sustainability: str = ""
+    financial_diagnostics: dict = {}
+    sheet_concentration: dict = {}
 
     # NIIF structural compliance result from DocumentExtractor (passed through)
     niif_validation: dict = {}

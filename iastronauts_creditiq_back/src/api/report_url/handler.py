@@ -5,7 +5,7 @@ import os
 import boto3
 from botocore.exceptions import ClientError
 
-from shared.job_store import load_first as job_load_first, load as job_load, FINANCIAL_ANALYZER, EXTRACTOR
+from shared.job_store import load_first as job_load_first, FINANCIAL_ANALYZER, EXTRACTOR, REPORT_GENERATOR
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -34,8 +34,30 @@ def _s3_report_fallback(analysis_id: str) -> dict:
     Tries in precedence order: financial_analyzer → extractor.
     Used in local dev when SFN execution doesn't exist.
     """
-    data = job_load_first(analysis_id, [FINANCIAL_ANALYZER, EXTRACTOR])
+    data = job_load_first(analysis_id, [REPORT_GENERATOR, FINANCIAL_ANALYZER, EXTRACTOR])
     if data:
+        markdown_url = data.get("markdown_report_url", "")
+        pdf_url = data.get("pdf_report_url", "")
+        if markdown_url.startswith("s3://"):
+            md_key = markdown_url.removeprefix(f"s3://{BUCKET}/")
+            body = {
+                "analysis_id": analysis_id,
+                "markdown_url": s3.generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": BUCKET, "Key": md_key},
+                    ExpiresIn=EXPIRATION,
+                ),
+                "pdf_url": None,
+                "expires_in": EXPIRATION,
+            }
+            if pdf_url.startswith("s3://"):
+                pdf_key = pdf_url.removeprefix(f"s3://{BUCKET}/")
+                body["pdf_url"] = s3.generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": BUCKET, "Key": pdf_key},
+                    ExpiresIn=EXPIRATION,
+                )
+            return _response(200, body)
         return _response(200, data)
     return _response(409, {"error": "El análisis aún no está completo", "status": "processing"})
 
@@ -55,7 +77,7 @@ def lambda_handler(event: dict, context) -> dict:
 
         if execution["status"] == "RUNNING":
             # Pipeline may be paused at a review gate — serve best available agent output from S3
-            data = job_load_first(analysis_id, [FINANCIAL_ANALYZER, EXTRACTOR])
+            data = job_load_first(analysis_id, [REPORT_GENERATOR, FINANCIAL_ANALYZER, EXTRACTOR])
             if data:
                 return _response(200, data)
             return _response(409, {"error": "El análisis aún no está completo", "status": "processing"})
@@ -66,10 +88,11 @@ def lambda_handler(event: dict, context) -> dict:
         # ReportGenerator output contains markdown_report_url: "s3://{bucket}/{key}"
         output = json.loads(execution.get("output", "{}"))
         markdown_url = output.get("markdown_report_url", "")
+        pdf_url = output.get("pdf_report_url", "")
 
         if not markdown_url.startswith("s3://"):
             # Agents are stubs — serve best available output so the accounts table renders
-            data = job_load_first(analysis_id, [FINANCIAL_ANALYZER, EXTRACTOR])
+            data = job_load_first(analysis_id, [REPORT_GENERATOR, FINANCIAL_ANALYZER, EXTRACTOR])
             if data:
                 return _response(200, data)
             return _response(404, {"error": "No se encontró el reporte generado"})
@@ -82,10 +105,19 @@ def lambda_handler(event: dict, context) -> dict:
             Params={"Bucket": BUCKET, "Key": s3_key},
             ExpiresIn=EXPIRATION,
         )
+        pdf_presigned_url = None
+        if pdf_url.startswith("s3://"):
+            pdf_key = pdf_url.removeprefix(f"s3://{BUCKET}/")
+            pdf_presigned_url = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": BUCKET, "Key": pdf_key},
+                ExpiresIn=EXPIRATION,
+            )
 
         return _response(200, {
             "analysis_id": analysis_id,
             "markdown_url": presigned_url,
+            "pdf_url": pdf_presigned_url,
             "expires_in": EXPIRATION,
         })
 
