@@ -46,6 +46,9 @@ class MarketRiskResult:
     fx_exposure_pct: float | None = None    # % of assets in foreign-currency accounts
     fx_exposure_detected: bool = False
     reporting_currency: str = "COP"
+    # Mejora 3: self-describing concentration block (HHI definition, effective
+    # positions, interpretation, regulatory threshold and alert level).
+    concentration_metrics: Dict = field(default_factory=dict)
     key_findings: List[str] = field(default_factory=list)
     risk_drivers: List[str] = field(default_factory=list)
     is_fund_adjusted: bool = False
@@ -312,6 +315,62 @@ def score_market_risk(
             f"Entidad reporta en {reporting_currency}: resultados sujetos a conversión y riesgo cambiario estructural."
         )
 
+    # ─── Mejora 3: self-describing concentration metrics ──────────────────────
+    # HHI is opaque to non-portfolio-theory readers; ship its definition,
+    # formula, regulatory threshold and a plain-language interpretation inline.
+    concentration_metrics: Dict = {}
+    if hhi is not None or top_issuer_pct is not None:
+        if hhi is not None and hhi >= 0.40:
+            alert_level = "CRITICO"
+        elif hhi is not None and hhi >= 0.25:
+            alert_level = "ALTO"
+        elif top_issuer_pct is not None and top_issuer_pct >= 30.0:
+            alert_level = "ALTO"
+        elif hhi is not None and hhi >= 0.15:
+            alert_level = "MODERADO"
+        else:
+            alert_level = "BAJO"
+
+        if hhi is not None:
+            eff_pos = effective_positions if effective_positions is not None else (round(1 / hhi, 2) if hhi > 0 else None)
+            if alert_level in ("CRITICO", "ALTO"):
+                interpretation = (
+                    f"HHI={hhi:.3f} equivale a una cartera concentrada en "
+                    f"{eff_pos:.1f} posiciones efectivas. Diversificación insuficiente."
+                    if eff_pos is not None else
+                    f"HHI={hhi:.3f}: diversificación insuficiente."
+                )
+            elif alert_level == "MODERADO":
+                interpretation = (
+                    f"HHI={hhi:.3f} ({eff_pos:.1f} posiciones efectivas): concentración moderada, monitorear límites."
+                    if eff_pos is not None else f"HHI={hhi:.3f}: concentración moderada."
+                )
+            else:
+                interpretation = (
+                    f"HHI={hhi:.3f} ({eff_pos:.1f} posiciones efectivas): cartera diversificada."
+                    if eff_pos is not None else f"HHI={hhi:.3f}: cartera diversificada."
+                )
+            concentration_metrics["hhi"] = {
+                "value": round(hhi, 4),
+                "definition": (
+                    "Índice de Herfindahl-Hirschman: mide concentración de cartera. "
+                    "Rango: 0 (máxima diversificación) a 1 (concentración total en un activo). "
+                    "Calculado como suma de cuadrados de las participaciones individuales."
+                ),
+                "effective_positions": eff_pos,
+                "effective_positions_definition": (
+                    "Posiciones efectivas = 1/HHI. Indica el número equivalente de posiciones "
+                    "igualmente ponderadas que replicarían la concentración observada."
+                ),
+                "interpretation": interpretation,
+                "threshold_used": "HHI > 0.25 = concentración alta (referencia regulatoria SFC Colombia)",
+                "alert_level": alert_level,
+            }
+        if top_issuer_pct is not None:
+            concentration_metrics["top_issuer_pct"] = top_issuer_pct
+        if top3_concentration_pct is not None:
+            concentration_metrics["top3_concentration_pct"] = top3_concentration_pct
+
     return MarketRiskResult(
         level=_level_from_score(score),
         score=score,
@@ -326,6 +385,7 @@ def score_market_risk(
         fx_exposure_pct=fx_exposure_pct,
         fx_exposure_detected=fx_exposure_detected,
         reporting_currency=reporting_currency,
+        concentration_metrics=concentration_metrics,
         key_findings=findings,
         risk_drivers=drivers,
         is_fund_adjusted=is_investment_fund,

@@ -36,6 +36,14 @@ _CASH_FLOW_KEYWORDS: tuple[str, ...] = (
 
 def _is_portfolio_position(variation: AccountVariation) -> bool:
     """Return True only for real asset holdings; exclude flow/P&L accounts."""
+    # Subtotal/total rows (e.g. "Total activos") are not positions — counting them
+    # double-counts and, combined with liability/equity rows, pushes top-N above 100%.
+    if variation.is_total:
+        return False
+    # Concentration is measured within asset holdings. Mixing liabilities/equity in
+    # (which by the accounting identity sum to ≈ assets) is what produced top-3 > 100%.
+    if variation.category.lower() != "assets":
+        return False
     name = variation.account_name.lower()
     if any(kw in name for kw in _CASH_FLOW_KEYWORDS):
         return False

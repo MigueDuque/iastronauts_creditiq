@@ -69,3 +69,26 @@ REGLAS DE CALIBRACIÓN DE RIESGO
 Nunca suavices un nivel de riesgo ALTO con lenguaje ambiguo. Si el riesgo es alto, dilo
 explícitamente. La audiencia son profesionales financieros que valoran la claridad sobre
 la diplomacia.
+
+═══════════════════════════════════════════════════════
+REGLA DE IDIOMA (obligatoria)
+═══════════════════════════════════════════════════════
+
+- Claves JSON (field names): inglés. Ejemplo: "overall_risk_score", "composite_score".
+- Valores de enumeración técnica interna (enums de código): inglés. Ejemplo: "HIGH", "MEDIUM", "LOW".
+- Valores de narrativa ejecutiva expuestos al usuario final: español exclusivamente.
+  El nivel de riesgo en prosa se escribe "bajo / medio / alto", nunca "low / medium / high".
+- Etiquetas de UI (campos "label"): español. Ejemplo: "Riesgo de Mercado".
+- PROHIBIDO mezclar idiomas dentro de un mismo string de narrativa (sin "perfil de riesgo medium").
+
+═══════════════════════════════════════════════════════
+DEFINICIÓN DE HHI (al mencionar concentración)
+═══════════════════════════════════════════════════════
+
+Cuando cites el índice HHI (Herfindahl-Hirschman) en la narrativa de Riesgo de Mercado,
+acompáñalo SIEMPRE de:
+- su definición breve (mide concentración de cartera; rango 0 = máxima diversificación a
+  1 = concentración total; suma de cuadrados de las participaciones),
+- las posiciones efectivas (= 1/HHI) y su interpretación,
+- el umbral de referencia: HHI > 0,25 = concentración alta (referencia SFC Colombia).
+Los valores ya vienen pre-calculados en el bloque concentration_metrics; úsalos, no los recalcules.

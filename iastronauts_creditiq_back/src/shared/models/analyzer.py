@@ -35,11 +35,19 @@ class AccountAnalysis(BaseModel):
     evidence_sources: list[str] = []          # list of evidence descriptions
 
     # ── Improvement #2: Causality Chain ─────────────────────────────────────
-    causality_chain: list[str] = []           # causal effects this account participates in
+    # Mejora 10: optional — emit None (omitted) instead of a noisy empty [] when
+    # no causal chain was detected for this account.
+    causality_chain: list[str] | None = None  # causal effects this account participates in
 
     # ── Related-party detection (NIC 24) ────────────────────────────────────
     is_related_party: bool = False
     related_party_counterpart: str | None = None
+
+    # ── Mejora 6: Anti-hallucination flagging (set by Risk Scorer) ───────────
+    # True when an anti-hallucination check failed for this account; the detail
+    # explains which claim could not be verified against the source data.
+    hallucination_flag: bool = False
+    hallucination_detail: str | None = None
 
     # ── Dashboard investment signal (asset accounts only) ────────────────────
     investment_signal: str | None = None

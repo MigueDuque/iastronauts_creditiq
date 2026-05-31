@@ -29,6 +29,20 @@ class ScorerOutput(BaseModel):
     overall_financial_health: FinancialHealth
     executive_narrative: str
     niif18_compliance: dict = {}
+    earnings_quality: dict = {}
+    portfolio_concentration: dict = {}
+    fund_analysis: dict = {}
+    macro_context: dict = {}
+    executive_kpis: dict = {}
+    portfolio_thesis: str = ""
+    insight_tiers: dict = {}
+    narrative_layers: dict = {}
+    executive_synthesis: dict = {}
+    structured_analysis: dict = {}
+    cross_statement_signals: list[dict] = []
+    earnings_sustainability: str = ""
+    financial_diagnostics: dict = {}
+    sheet_concentration: dict = {}
 
     # NIIF structural compliance result from DocumentExtractor (passed through)
     niif_validation: dict = {}
@@ -41,6 +55,23 @@ class ScorerOutput(BaseModel):
     requires_human_review: bool
     analysis_confidence: float = Field(ge=0.0, le=1.0)
     anti_hallucination_passed: bool
+
+    # ── Transparency upgrades (additive; the scalars above stay canonical so the
+    #    Revisor, Report Generator and frontend keep working). Each detail object
+    #    explains how its scalar was computed so the number is auditable. ────────
+    # Mejora 1: composite_score breakdown (formula, weights, weighted_components,
+    #           weight_profile + rationale).
+    composite_score_detail: dict = {}
+    # Mejora 2: validation_score breakdown (5 weighted components + issues_penalized).
+    validation_score_detail: dict = {}
+    # Mejora 6: anti-hallucination per-account check results + impact on output.
+    anti_hallucination_result: dict = {}
+    # Mejora 7: how analysis_confidence was derived (independent of composite_score).
+    analysis_confidence_detail: dict = {}
+    # Mejora 9: explicit warnings for null business_context fields and their impact.
+    data_quality_warnings: list = []
+    # Mejora 4: anomaly detection decision (detected / included / filtered + criteria).
+    anomaly_detection_summary: dict = {}
 
     # 5 risk dimensions (liquidity, credit, solvency, market, operational)
     risk_dimensions: dict = {}

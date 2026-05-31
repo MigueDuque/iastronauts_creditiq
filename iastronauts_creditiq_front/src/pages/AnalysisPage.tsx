@@ -1,28 +1,28 @@
 import { useState, useEffect, useRef } from 'react'
 import AiReasoningPipeline from '../components/AiReasoningPipeline'
 
-const API          = import.meta.env.VITE_API_URL || ''
-const STORAGE_KEY  = 'creditiq_analysis_id'
-const STATUS_KEY   = 'creditiq_status'
-const REPORT_KEY   = 'creditiq_report'
+const API = import.meta.env.VITE_API_URL || ''
+const STORAGE_KEY = 'creditiq_analysis_id'
+const STATUS_KEY = 'creditiq_status'
+const REPORT_KEY = 'creditiq_report'
 const ANALYZER_KEY = 'creditiq_analyzer_data'
-const SCORER_KEY   = 'creditiq_scorer_data'
-const PHASE_KEY    = 'creditiq_phase'
-const HEADERS      = { 'x-tenant-id': 'demo' }
+const SCORER_KEY = 'creditiq_scorer_data'
+const PHASE_KEY = 'creditiq_phase'
+const HEADERS = { 'x-tenant-id': 'demo' }
 
 // ── Processing step timings ────────────────────────────────────────────────
 
 const EXTRACTION_STEPS = [
-  { label: 'Connecting & downloading from S3',          start: 0  },
-  { label: 'Parsing document (Textract / pandas)',       start: 4  },
-  { label: 'LLM classification & NIIF normalization',   start: 55 },
+  { label: 'Connecting & downloading from S3', start: 0 },
+  { label: 'Parsing document (Textract / pandas)', start: 4 },
+  { label: 'LLM classification & NIIF normalization', start: 55 },
 ] as const
 
 const ANALYZER_STEPS = [
-  { label: 'Loading historical reports & enriching accounts',  start: 0  },
-  { label: 'Computing ratios, materiality & anomaly flags',    start: 5  },
-  { label: 'LLM sub-agents: Movement · Causality · Thesis',   start: 15 },
-  { label: 'Executive narrative & portfolio synthesis',        start: 50 },
+  { label: 'Loading historical reports & enriching accounts', start: 0 },
+  { label: 'Computing ratios, materiality & anomaly flags', start: 5 },
+  { label: 'LLM sub-agents: Movement · Causality · Thesis', start: 15 },
+  { label: 'Executive narrative & portfolio synthesis', start: 50 },
 ] as const
 
 function stepState(idx: number, starts: readonly number[], elapsed: number): 'pending' | 'active' | 'done' {
@@ -35,25 +35,25 @@ function stepState(idx: number, starts: readonly number[], elapsed: number): 'pe
 // ── Color maps ────────────────────────────────────────────────────────────
 
 const CATEGORY_COLOR: Record<string, string> = {
-  assets:      '#5BA4FF',
+  assets: '#5BA4FF',
   liabilities: '#FF6B9D',
-  equity:      '#6DD4FF',
-  revenue:     '#FFB84D',
-  expense:     '#7FD0FF',
-  other:       '#A8B8D8',
+  equity: '#6DD4FF',
+  revenue: '#FFB84D',
+  expense: '#7FD0FF',
+  other: '#A8B8D8',
 }
 
 const HEALTH_COLOR: Record<string, string> = {
-  STABLE:   '#6DD4FF',
-  GROWING:  '#5BA4FF',
-  DECLINING:'#FFB84D',
+  STABLE: '#6DD4FF',
+  GROWING: '#5BA4FF',
+  DECLINING: '#FFB84D',
   CRITICAL: '#FF6B9D',
 }
 
 const RISK_COLOR: Record<string, string> = {
-  LOW:    '#56F2C1',
+  LOW: '#56F2C1',
   MEDIUM: '#FFB020',
-  HIGH:   '#FF6B9D',
+  HIGH: '#FF6B9D',
 }
 
 // Accent color per agent view
@@ -66,7 +66,7 @@ const AGENT_COLOR: Record<string, string> = {
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-type ActiveView      = 'agent1' | 'agent2' | 'agent3' | 'agent4'
+type ActiveView = 'agent1' | 'agent2' | 'agent3' | 'agent4'
 type ProcessingPhase = 'agent1' | 'agent2' | 'agent3' | 'agent4' | null
 
 interface JobSummary {
@@ -165,15 +165,48 @@ interface RiskDimension {
   score: number; level: string; weight: number; key_findings: string[]; risk_drivers: string[]
 }
 
+interface CompositeScoreDetail {
+  value?: number; formula?: string
+  weights?: Record<string, number>; weighted_components?: Record<string, number>
+  weight_profile?: string; weight_profile_rationale?: string
+}
+interface ValidationScoreDetail {
+  value?: number; formula?: string
+  components?: Record<string, { score: number; weight: number; description: string }>
+  issues_penalized?: string[]
+}
+interface AntiHallucinationResult {
+  passed?: boolean; checks_performed?: number; checks_failed?: number
+  failures?: { account_id: string; check: string; detail: string; action: string }[]
+  impact_on_output?: string
+}
+interface AnalysisConfidenceDetail {
+  value?: number; formula?: string
+  factors?: Record<string, number>; weights?: Record<string, number>; note?: string
+}
+interface DataQualityWarning { field: string; value: unknown; impact: string; severity: string }
+interface AnomalyDetectionSummary {
+  total_detected?: number; included_in_output?: number; filtered_out?: number
+  anomaly_confidence_threshold?: number; filter_criteria?: string; filtered_accounts?: string[]
+}
+
 interface ScorerOutput {
   job_id: string; company_name: string; overall_risk_score: string
   validation_score: number; analysis_confidence: number
   anti_hallucination_passed: boolean; requires_human_review: boolean
   issues_found: string[]; compliance_flags: string[]; fund_context_adjusted: boolean
+  // ── Transparency detail objects (additive; scalars above stay canonical) ──
+  composite_score_detail?: CompositeScoreDetail
+  validation_score_detail?: ValidationScoreDetail
+  anti_hallucination_result?: AntiHallucinationResult
+  analysis_confidence_detail?: AnalysisConfidenceDetail
+  data_quality_warnings?: DataQualityWarning[]
+  anomaly_detection_summary?: AnomalyDetectionSummary
   risk_dimensions: {
     liquidity?: RiskDimension; credit?: RiskDimension; solvency?: RiskDimension
     market?: RiskDimension; operational?: RiskDimension
     composite_score?: number; weights_used?: string
+    composite_score_detail?: CompositeScoreDetail
   }
   risk_summary: {
     risk_headline?: string
@@ -225,10 +258,10 @@ export default function AnalysisPage() {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // track previous data to detect new arrivals for auto-switching
-  const prevReport   = useRef(report)
+  const prevReport = useRef(report)
   const prevAnalyzer = useRef(analyzerData)
-  const prevScorer   = useRef(scorerData)
-  const prevStatus   = useRef(jobStatus?.status)
+  const prevScorer = useRef(scorerData)
+  const prevStatus = useRef(jobStatus?.status)
   const userNavigatedRef = useRef(false)
   const [newData, setNewData] = useState<Set<ActiveView>>(new Set())
 
@@ -354,7 +387,7 @@ export default function AnalysisPage() {
           if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
         }
         if (data.status === 'extraction_complete' || data.status === 'analysis_complete' ||
-            data.status === 'scoring_complete' || data.status === 'completed') {
+          data.status === 'scoring_complete' || data.status === 'completed') {
           if (!report) {
             const r = await fetch(`${API}/analyses/${jobId}/extractor`, { headers: HEADERS })
             if (r.ok && alive) setReport(await r.json())
@@ -413,7 +446,7 @@ export default function AnalysisPage() {
   }
 
   async function confirmClear() {
-    if (jobId) { try { await fetch(`${API}/analyses/${jobId}`, { method: 'DELETE', headers: HEADERS }) } catch {} }
+    if (jobId) { try { await fetch(`${API}/analyses/${jobId}`, { method: 'DELETE', headers: HEADERS }) } catch { } }
     _doClean()
   }
 
@@ -428,7 +461,7 @@ export default function AnalysisPage() {
 
   async function selectJob(job: JobSummary) {
     setShowJobPicker(false)
-    ;[STORAGE_KEY, STATUS_KEY, REPORT_KEY, ANALYZER_KEY, SCORER_KEY, PHASE_KEY].forEach(k => localStorage.removeItem(k))
+      ;[STORAGE_KEY, STATUS_KEY, REPORT_KEY, ANALYZER_KEY, SCORER_KEY, PHASE_KEY].forEach(k => localStorage.removeItem(k))
     setJobStatus(null); setReport(null); setAnalyzerData(null); setScorerData(null); setPhase(null); setElapsed(0)
     userNavigatedRef.current = false; setNewData(new Set())
     localStorage.setItem(STORAGE_KEY, job.job_id)
@@ -438,13 +471,13 @@ export default function AnalysisPage() {
     // Always try all three endpoints — don't trust job.status which may be stale
     const [extRes, anlRes, scoRes] = await Promise.allSettled([
       fetch(`${API}/analyses/${jid}/extractor`, { headers: HEADERS }).then(r => r.ok ? r.json() : null),
-      fetch(`${API}/analyses/${jid}/analyzer`,  { headers: HEADERS }).then(r => r.ok ? r.json() : null),
-      fetch(`${API}/analyses/${jid}/scorer`,    { headers: HEADERS }).then(r => r.ok ? r.json() : null),
+      fetch(`${API}/analyses/${jid}/analyzer`, { headers: HEADERS }).then(r => r.ok ? r.json() : null),
+      fetch(`${API}/analyses/${jid}/scorer`, { headers: HEADERS }).then(r => r.ok ? r.json() : null),
     ])
 
-    const extData = extRes.status === 'fulfilled' && extRes.value?.accounts            ? extRes.value : null
-    const anlData = anlRes.status === 'fulfilled' && anlRes.value?.analysis_results    ? anlRes.value : null
-    const scoData = scoRes.status === 'fulfilled' && scoRes.value?.overall_risk_score  ? scoRes.value : null
+    const extData = extRes.status === 'fulfilled' && extRes.value?.accounts ? extRes.value : null
+    const anlData = anlRes.status === 'fulfilled' && anlRes.value?.analysis_results ? anlRes.value : null
+    const scoData = scoRes.status === 'fulfilled' && scoRes.value?.overall_risk_score ? scoRes.value : null
 
     if (extData) setReport(extData)
     if (anlData) setAnalyzerData(anlData)
@@ -454,10 +487,10 @@ export default function AnalysisPage() {
     const reported = job.status as JobStatus['status']
     const trueStatus: JobStatus['status'] =
       reported === 'completed' || reported === 'failed' || reported === 'cancelled' ? reported :
-      scoData  ? 'scoring_complete' :
-      anlData  ? 'analysis_complete' :
-      extData  ? 'extraction_complete' :
-      reported
+        scoData ? 'scoring_complete' :
+          anlData ? 'analysis_complete' :
+            extData ? 'extraction_complete' :
+              reported
 
     const syntheticStatus: JobStatus = { analysis_id: jid, status: trueStatus }
     localStorage.setItem(STATUS_KEY, JSON.stringify(syntheticStatus))
@@ -557,7 +590,7 @@ export default function AnalysisPage() {
     setPhase('agent4'); setElapsed(0)
     setActiveView('agent4')
     await fetch(`${API}/analyses/${jobId}/continue`, { method: 'POST', headers: HEADERS })
-    _startPolling(() => {})
+    _startPolling(() => { })
   }
 
   async function confirmRestart() {
@@ -580,9 +613,9 @@ export default function AnalysisPage() {
   // Which agent is currently running (for background-banner logic)
   const runningView: ActiveView | null =
     phase === 'agent2' ? 'agent2' :
-    phase === 'agent3' ? 'agent3' :
-    phase === 'agent4' ? 'agent4' :
-    (st === 'processing' || st === 'pending') ? 'agent1' : null
+      phase === 'agent3' ? 'agent3' :
+        phase === 'agent4' ? 'agent4' :
+          (st === 'processing' || st === 'pending') ? 'agent1' : null
 
   const isProcessing = st === 'processing' || st === 'pending'
 
@@ -606,9 +639,9 @@ export default function AnalysisPage() {
     return phase === 'agent4' ? 'running' : 'locked'
   }
 
-  const accounts   = report?.accounts ?? []
+  const accounts = report?.accounts ?? []
   const categories = ['all', ...Array.from(new Set(accounts.map(a => a.category))).sort()]
-  const filtered   = catFilter === 'all' ? accounts : accounts.filter(a => a.category === catFilter)
+  const filtered = catFilter === 'all' ? accounts : accounts.filter(a => a.category === catFilter)
   const anomalyCount = analyzerData?.analysis_results?.filter(r => r.anomaly_detected).length ?? 0
 
   const dashboardMetrics = (analyzerData?.executive_kpis?.dashboard_metrics ?? [])
@@ -617,15 +650,15 @@ export default function AnalysisPage() {
     analyzerData.fund_analysis.nav_reconciliation?.closing_nav != null)
   const metricIcon = (key: string) =>
     key === 'aum_growth' ? 'trending_up' : key === 'net_flow' ? 'swap_vert' :
-    key === 'roe' ? 'percent' : key === 'net_margin' ? 'payments' :
-    key === 'ebitda_margin' ? 'bar_chart' : key === 'concentration' ? 'hub' : 'analytics'
+      key === 'roe' ? 'percent' : key === 'net_margin' ? 'payments' :
+        key === 'ebitda_margin' ? 'bar_chart' : key === 'concentration' ? 'hub' : 'analytics'
 
   const processingLabel =
     phase === 'agent2' ? 'Agent 2 — Financial Analysis' :
-    phase === 'agent3' ? 'Agent 3 — Risk Scoring' :
-    phase === 'agent4' ? 'Agent 4 — Report Generation' :
-    st === 'pending'   ? 'Queued — starting pipeline…' :
-                         'Agent 1 — Document Extraction'
+      phase === 'agent3' ? 'Agent 3 — Risk Scoring' :
+        phase === 'agent4' ? 'Agent 4 — Report Generation' :
+          st === 'pending' ? 'Queued — starting pipeline…' :
+            'Agent 1 — Document Extraction'
 
   const companyName = report?.company_name ?? analyzerData?.company_name ?? scorerData?.company_name ?? null
 
@@ -676,7 +709,7 @@ export default function AnalysisPage() {
                   }}
                 >
                   {st === 'completed' ? 'check_circle' : st === 'failed' ? 'error' :
-                   isProcessing ? 'autorenew' : 'pause_circle'}
+                    isProcessing ? 'autorenew' : 'pause_circle'}
                 </span>
                 <div>
                   <div className="text-body-md font-body-md font-semibold text-on-surface">
@@ -722,7 +755,7 @@ export default function AnalysisPage() {
             {/* ── Background running banner ── */}
             {isProcessing && runningView && runningView !== activeView && (
               <div className="bg-surface border border-border rounded-lg px-4 py-2.5 flex items-center gap-3"
-                   style={{ borderColor: 'rgba(86,204,242,0.3)', background: 'rgba(86,204,242,0.04)' }}>
+                style={{ borderColor: 'rgba(86,204,242,0.3)', background: 'rgba(86,204,242,0.04)' }}>
                 <span className="material-symbols-outlined text-[15px] animate-spin" style={{ color: '#56CCF2' }}>autorenew</span>
                 <span className="text-[11px] font-mono text-outline flex-1">
                   {processingLabel} — running in background
@@ -740,7 +773,7 @@ export default function AnalysisPage() {
             {/* ── Error state ── */}
             {st === 'failed' && (
               <div className="bg-surface border border-risk-high/30 rounded p-5"
-                   style={{ background: 'rgba(255,77,109,0.05)' }}>
+                style={{ background: 'rgba(255,77,109,0.05)' }}>
                 <div className="text-label-sm font-label-sm text-risk-high uppercase mb-2 font-mono">Pipeline failed</div>
                 <pre className="text-body-sm font-body-sm text-risk-high whitespace-pre-wrap font-mono">
                   {jobStatus?.error ?? 'See logs for details.'}
@@ -751,466 +784,597 @@ export default function AnalysisPage() {
             {/* Agent views — keyed so switching tabs replays the fade-in */}
             <div key={activeView} className="flex flex-col gap-4 animate-fade-in">
 
-            {/* ══ AGENT 1 VIEW ════════════════════════════════════════════ */}
-            {activeView === 'agent1' && (() => {
-              const vs = getViewState('agent1')
-              return (
-                <>
-                  {vs === 'running' && (
-                    <StepSpinner
-                      label="Agent 1 — Document Extraction"
-                      elapsed={elapsed}
-                      steps={EXTRACTION_STEPS}
-                      hint="PDF Textract jobs take 30–120s · polling every 8s"
-                    />
-                  )}
-
-                  {(vs === 'done' || vs === 'waiting') && report && (
-                    <>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <MetricCard label="Data Confidence" value={`${(report.extraction_confidence * 100).toFixed(1)}%`} color="#FFB020" icon="verified_user" />
-                        <MetricCard label="Reporting Periods" value={report.periods.join(' · ') || '—'} color="#FFB020" icon="calendar_month" />
-                      </div>
-
-                      {vs === 'waiting' && (
-                        <ContinueBanner
-                          color="#FFB020"
-                          icon="checklist"
-                          title="Agent 1 complete — review extracted accounts"
-                          subtitle="Verify the table below, then run the financial analysis engine."
-                        >
-                          <button
-                            onClick={handleRunAgent2Click}
-                            className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95 shrink-0"
-                            style={{ background: '#FFB020', color: '#050816' }}
-                          >
-                            <span className="material-symbols-outlined text-[16px]">play_arrow</span>
-                            Run Agent 2 — Financial Analysis
-                          </button>
-                        </ContinueBanner>
-                      )}
-
-                      <AccountsTable
-                        report={report}
-                        filtered={filtered}
-                        accounts={accounts}
-                        categories={categories}
-                        catFilter={catFilter}
-                        setCatFilter={setCatFilter}
+              {/* ══ AGENT 1 VIEW ════════════════════════════════════════════ */}
+              {activeView === 'agent1' && (() => {
+                const vs = getViewState('agent1')
+                return (
+                  <>
+                    {vs === 'running' && (
+                      <StepSpinner
+                        label="Agent 1 — Document Extraction"
+                        elapsed={elapsed}
+                        steps={EXTRACTION_STEPS}
+                        hint="PDF Textract jobs take 30–120s · polling every 8s"
                       />
-                    </>
-                  )}
+                    )}
 
-                  {vs === 'locked' && (
-                    <LockedView
-                      icon="description"
-                      message="Agent 1 hasn't run yet"
-                      hint="Start a new analysis or load a previous job."
-                    />
-                  )}
-                </>
-              )
-            })()}
+                    {(vs === 'done' || vs === 'waiting') && report && (
+                      <>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <MetricCard label="Data Confidence" value={`${(report.extraction_confidence * 100).toFixed(1)}%`} color="#FFB020" icon="verified_user" />
+                          <MetricCard label="Reporting Periods" value={report.periods.join(' · ') || '—'} color="#FFB020" icon="calendar_month" />
+                        </div>
 
-            {/* ══ AGENT 2 VIEW ════════════════════════════════════════════ */}
-            {activeView === 'agent2' && (() => {
-              const vs = getViewState('agent2')
-              return (
-                <>
-                  {vs === 'running' && (
-                    <StepSpinner
-                      label="Agent 2 — Financial Analysis"
-                      elapsed={elapsed}
-                      steps={ANALYZER_STEPS}
-                      hint="LLM analysis takes 30–90s depending on portfolio size · polling every 4s"
-                    />
-                  )}
-
-                  {(vs === 'done' || vs === 'waiting') && analyzerData && (
-                    <>
-                      {/* Dashboard KPIs — every tile on a single row */}
-                      <div className="flex gap-3">
-                        {isFundWithNav && (
-                          <StatTile
-                            label="AUM — Patrimonio Neto"
-                            value={`${analyzerData.fund_analysis!.nav_reconciliation!.closing_nav!.toLocaleString('en-US', { maximumFractionDigits: 0 })}`}
-                            sub="COP MM"
-                            color="var(--color-brand-accent)"
-                            icon="account_balance_wallet"
-                          />
+                        {vs === 'waiting' && (
+                          <ContinueBanner
+                            color="#FFB020"
+                            icon="checklist"
+                            title="Agent 1 complete — review extracted accounts"
+                            subtitle="Verify the table below, then run the financial analysis engine."
+                          >
+                            <button
+                              onClick={handleRunAgent2Click}
+                              className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95 shrink-0"
+                              style={{ background: '#FFB020', color: '#050816' }}
+                            >
+                              <span className="material-symbols-outlined text-[16px]">play_arrow</span>
+                              Run Agent 2 — Financial Analysis
+                            </button>
+                          </ContinueBanner>
                         )}
-                        <StatTile wide label="Financial Health" value={analyzerData.overall_financial_health.replace(/_/g, ' ')} color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#2F80FF'} icon="monitor_heart" />
-                        {dashboardMetrics.slice(0, 5).map(m => (
-                          <StatTile key={m.key} label={m.label} value={m.value}
-                            signal={m.signal}
-                            color={m.signal === 'positive' ? 'var(--color-success-low)' : m.signal === 'negative' ? 'var(--color-danger-soft)' : 'var(--color-warning-soft)'}
-                            icon={metricIcon(m.key)} />
-                        ))}
-                        <StatTile label="High Materiality" value={analyzerData.high_materiality_accounts.length} sub="accounts" big color="#56CCF2" icon="priority_high" />
-                        <StatTile label="Anomalies" value={anomalyCount} sub="detected" big color={anomalyCount > 0 ? '#FFB020' : '#56F2C1'} icon={anomalyCount > 0 ? 'warning' : 'check_circle'} />
-                      </div>
 
-                      {/* Tier 1 signals */}
-                      {(analyzerData.insight_tiers?.tier1_critical ?? []).length > 0 && (
-                        <div className="bg-surface border rounded overflow-hidden" style={{ borderColor: 'rgba(255,77,109,0.35)' }}>
-                          <div className="px-5 py-3 border-b flex items-center gap-2" style={{ borderColor: 'rgba(255,77,109,0.20)', background: 'rgba(255,77,109,0.05)' }}>
-                            <span className="material-symbols-outlined text-[15px]" style={{ color: '#FF4D6D' }}>priority_high</span>
-                            <span className="text-[10px] font-mono uppercase tracking-widest" style={{ color: '#FF4D6D' }}>Critical Executive Signals</span>
-                            <span className="ml-auto text-[9px] font-mono text-outline">{analyzerData.insight_tiers!.tier1_critical!.length} signal{analyzerData.insight_tiers!.tier1_critical!.length !== 1 ? 's' : ''}</span>
-                          </div>
-                          <div className="divide-y divide-border">
-                            {analyzerData.insight_tiers!.tier1_critical!.map((t, i) => (
-                              <div key={i} className="px-5 py-3 flex gap-4 items-start">
-                                <span className="text-[9px] font-mono px-1.5 py-0.5 rounded shrink-0 mt-0.5" style={{ color: '#FF4D6D', background: 'rgba(255,77,109,0.12)', border: '1px solid rgba(255,77,109,0.25)' }}>{t.category || 'SIGNAL'}</span>
-                                <div className="flex-1 min-w-0">
-                                  <p className="text-body-sm font-body-sm font-semibold text-on-surface">{t.signal}</p>
-                                  {t.so_what && <p className="text-[11px] text-outline mt-0.5 leading-snug">{t.so_what}</p>}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
+                        <AccountsTable
+                          report={report}
+                          filtered={filtered}
+                          accounts={accounts}
+                          categories={categories}
+                          catFilter={catFilter}
+                          setCatFilter={setCatFilter}
+                        />
+                      </>
+                    )}
 
-                      {/* Portfolio thesis */}
-                      {analyzerData.portfolio_thesis && (
-                        <div className="bg-surface border border-border rounded-lg p-5">
-                          <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
-                            <span className="material-symbols-outlined text-[14px]">strategy</span>Portfolio Thesis
-                          </div>
-                          <p className="text-body-sm font-body-sm text-on-surface leading-relaxed">{analyzerData.portfolio_thesis}</p>
-                        </div>
-                      )}
+                    {vs === 'locked' && (
+                      <LockedView
+                        icon="description"
+                        message="Agent 1 hasn't run yet"
+                        hint="Start a new analysis or load a previous job."
+                      />
+                    )}
+                  </>
+                )
+              })()}
 
-                      {/* Narrative layers */}
-                      {analyzerData.narrative_layers && (analyzerData.narrative_layers.executive || analyzerData.narrative_layers.tactical || analyzerData.narrative_layers.technical)
-                        ? <NarrativeLayers layers={analyzerData.narrative_layers} />
-                        : analyzerData.executive_narrative
-                        ? (
-                          <div className="bg-surface border border-border rounded-lg p-5">
-                            <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
-                              <span className="material-symbols-outlined text-[14px]">description</span>Executive Narrative
-                            </div>
-                            <p className="text-body-sm font-body-sm text-on-surface leading-relaxed">{analyzerData.executive_narrative}</p>
-                          </div>
-                        ) : null}
+              {/* ══ AGENT 2 VIEW ════════════════════════════════════════════ */}
+              {activeView === 'agent2' && (() => {
+                const vs = getViewState('agent2')
+                return (
+                  <>
+                    {vs === 'running' && (
+                      <StepSpinner
+                        label="Agent 2 — Financial Analysis"
+                        elapsed={elapsed}
+                        steps={ANALYZER_STEPS}
+                        hint="LLM analysis takes 30–90s depending on portfolio size · polling every 4s"
+                      />
+                    )}
 
-                      {/* Tier 2 findings */}
-                      {(analyzerData.insight_tiers?.tier2_material ?? []).length > 0 && (
-                        <div className="bg-surface border border-border rounded-lg overflow-hidden">
-                          <div className="px-5 py-3 border-b border-border bg-surface-container-low flex items-center gap-2">
-                            <span className="material-symbols-outlined text-[14px] text-outline">insights</span>
-                            <span className="text-[10px] font-mono text-on-surface-variant uppercase tracking-widest">Material Account Findings</span>
-                          </div>
-                          <div className="divide-y divide-border">
-                            {analyzerData.insight_tiers!.tier2_material!.map((t, i) => (
-                              <div key={i} className="px-5 py-3 flex gap-4 items-start">
-                                <span className="text-[9px] font-mono text-outline shrink-0 mt-0.5 w-16 truncate">{t.account_id}</span>
-                                <div className="flex-1 min-w-0">
-                                  <p className="text-body-sm font-body-sm text-on-surface">{t.signal}</p>
-                                  {t.so_what && <p className="text-[11px] text-outline mt-0.5">{t.so_what}</p>}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
+                    {(vs === 'done' || vs === 'waiting') && analyzerData && (
+                      <>
+                        {/* Dashboard KPIs — auto-distributed across 1 or 2 balanced rows */}
+                        {(() => {
+                          // Collect every tile the agent deemed relevant, then let the
+                          // layout decide how many rows are needed so they always fit.
+                          const tiles: React.ReactNode[] = []
+                          tiles.push(
+                            <StatTile key="health" wide label="Financial Health" value={analyzerData.overall_financial_health.replace(/_/g, ' ')} color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#2F80FF'} icon="monitor_heart" />
+                          )
+                          if (isFundWithNav) tiles.push(
+                            <StatTile key="aum" label="Equity"
+                              value={`${analyzerData.fund_analysis!.nav_reconciliation!.closing_nav!.toLocaleString('en-US', { maximumFractionDigits: 0 })}`}
+                              sub="COP MM" color="var(--color-brand-accent)" icon="account_balance_wallet" />
+                          )
+                          dashboardMetrics.forEach(m => tiles.push(
+                            <StatTile key={m.key} label={m.label} value={m.value}
+                              signal={m.signal}
+                              color={m.signal === 'positive' ? 'var(--color-success-low)' : m.signal === 'negative' ? 'var(--color-danger-soft)' : 'var(--color-warning-soft)'}
+                              icon={metricIcon(m.key)} />
+                          ))
+                          tiles.push(
+                            <StatTile key="materiality" label="High Materiality" value={analyzerData.high_materiality_accounts.length} sub="accounts" big color="#56CCF2" icon="priority_high" />
+                          )
+                          tiles.push(
+                            <StatTile key="anomalies" label="Anomalies" value={anomalyCount} sub="detected" big color={anomalyCount > 0 ? '#FFB020' : '#56F2C1'} icon={anomalyCount > 0 ? 'warning' : 'check_circle'} />
+                          )
 
-                      {/* Top accounts table */}
-                      {analyzerData.analysis_results.length > 0 && (
-                        <div className="bg-surface border border-border rounded-lg overflow-hidden">
-                          <div className="p-4 border-b border-border bg-surface-container-low flex items-center justify-between">
-                            <h3 className="text-body-md font-body-md font-semibold text-on-surface">Top Accounts — Variation & Risk</h3>
-                            <span className="text-[10px] font-mono text-outline">sorted by |Δ%|</span>
-                          </div>
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-left whitespace-nowrap">
-                              <thead className="bg-surface-container-lowest border-b border-border text-label-sm font-label-sm text-on-surface-variant uppercase">
-                                <tr>{['Account', 'Δ%', 'Materiality', 'Risk', 'Anomaly'].map(h => (
-                                  <th key={h} className="py-2.5 px-3 font-medium" style={{ textAlign: h === 'Δ%' ? 'right' : 'left' }}>{h}</th>
-                                ))}</tr>
-                              </thead>
-                              <tbody className="text-body-sm font-body-sm text-on-surface divide-y divide-border">
-                                {[...analyzerData.analysis_results].sort((a, b) => Math.abs(b.variation_pct) - Math.abs(a.variation_pct)).slice(0, 10).map((r, i) => (
-                                  <tr key={r.account_id} className={`hover:bg-surface-container-lowest/50 ${i % 2 ? 'bg-surface-container-lowest/20' : ''}`}>
-                                    <td className="py-2 px-3 text-on-surface min-w-[200px]">{r.account_name}</td>
-                                    <td className="py-2 px-3 text-right font-mono text-[11px]" style={{ color: r.variation_pct > 0 ? '#56F2C1' : r.variation_pct < 0 ? '#FF4D6D' : '#94A3B8' }}>
-                                      {r.variation_pct !== 0 ? `${r.variation_pct > 0 ? '+' : ''}${r.variation_pct.toFixed(1)}%` : '—'}
-                                    </td>
-                                    <td className="py-2 px-3">
-                                      <span className="text-[10px] font-mono px-2 py-0.5 rounded" style={{ color: r.materiality === 'HIGH' ? '#FF4D6D' : r.materiality === 'MEDIUM' ? '#FFB020' : '#56F2C1', background: r.materiality === 'HIGH' ? '#FF4D6D20' : r.materiality === 'MEDIUM' ? '#FFB02020' : '#56F2C120', border: `1px solid ${r.materiality === 'HIGH' ? '#FF4D6D40' : r.materiality === 'MEDIUM' ? '#FFB02040' : '#56F2C140'}` }}>{r.materiality}</span>
-                                    </td>
-                                    <td className="py-2 px-3"><span className="text-[10px] font-mono" style={{ color: RISK_COLOR[r.risk_level] ?? '#8d90a2' }}>{r.risk_level}</span></td>
-                                    <td className="py-2 px-3">{r.anomaly_detected && <span className="material-symbols-outlined text-[14px]" style={{ color: '#FFB020' }}>warning</span>}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      )}
+                          // Up to 6 tiles stay on a single row; beyond that, split into
+                          // two rows with a near-equal count so neither row looks sparse.
+                          const MAX_PER_ROW = 6
+                          const rowCount = Math.ceil(tiles.length / MAX_PER_ROW)
+                          const perRow = Math.ceil(tiles.length / rowCount)
+                          const rows: React.ReactNode[][] = []
+                          for (let i = 0; i < tiles.length; i += perRow) rows.push(tiles.slice(i, i + perRow))
 
-                      {/* Sheet concentration */}
-                      {analyzerData.sheet_concentration && (analyzerData.sheet_concentration.asset_available || analyzerData.sheet_concentration.instrument_available || analyzerData.sheet_concentration.bank_available) && (
-                        <SheetConcentrationSection sc={analyzerData.sheet_concentration} />
-                      )}
-
-                      {/* NIIF 18 */}
-                      {(analyzerData.financial_ratios.niif18?.compliance?.flags?.length ?? 0) > 0 && (
-                        <div className="bg-surface border border-border rounded-lg p-4">
-                          <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
-                            <span className="material-symbols-outlined text-[14px]">policy</span>NIIF 18 Compliance Flags
-                          </div>
-                          {analyzerData.financial_ratios.niif18!.compliance!.flags.map((f, i) => (
-                            <div key={i} className="text-label-sm font-label-sm text-risk-medium mb-1">· {f}</div>
-                          ))}
-                        </div>
-                      )}
-
-                      {/* Continue banner */}
-                      {vs === 'waiting' && (
-                        <ContinueBanner
-                          color="#56CCF2"
-                          icon="analytics"
-                          title="Agent 2 complete — review financial analysis"
-                          subtitle="Analysis looks correct? Continue to risk scoring."
-                        >
-                          <button
-                            onClick={handleRunAgent2Click}
-                            className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors"
-                          >
-                            <span className="material-symbols-outlined text-[13px]">replay</span>
-                            Re-run Agent 2
-                          </button>
-                          <button
-                            onClick={handleRunAgent3Click}
-                            className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95"
-                            style={{ background: '#56CCF2', color: '#050816' }}
-                          >
-                            <span className="material-symbols-outlined text-[16px]">play_arrow</span>
-                            Run Agent 3 — Risk Scoring
-                          </button>
-                        </ContinueBanner>
-                      )}
-                      {vs === 'done' && st !== 'analysis_complete' && (
-                        <div className="flex justify-end gap-2">
-                          <button onClick={handleRunAgent2Click} className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors">
-                            <span className="material-symbols-outlined text-[13px]">replay</span>Re-run Agent 2
-                          </button>
-                        </div>
-                      )}
-                    </>
-                  )}
-
-                  {vs === 'locked' && (
-                    <LockedView icon="analytics" message="Agent 2 hasn't run yet" hint="Complete Agent 1 extraction first, then run the financial analysis." />
-                  )}
-                </>
-              )
-            })()}
-
-            {/* ══ AGENT 3 VIEW ════════════════════════════════════════════ */}
-            {activeView === 'agent3' && (() => {
-              const vs = getViewState('agent3')
-              return (
-                <>
-                  {vs === 'running' && (
-                    <PulseSpinner
-                      label="Agent 3 — Risk Scoring"
-                      elapsed={elapsed}
-                      message="Running risk scoring engines…"
-                      hint="Risk scoring takes 15–45s · polling every 4s"
-                    />
-                  )}
-
-                  {(vs === 'done' || vs === 'waiting') && scorerData && (
-                    <>
-                      {/* Overview cards */}
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                        <MetricCard label="Overall Risk" value={scorerData.overall_risk_score} color={RISK_COLOR[scorerData.overall_risk_score] ?? '#8d90a2'} icon="security" />
-                        <MetricCard label="Validation Score" value={`${scorerData.validation_score}/100`}
-                          color={scorerData.validation_score >= 75 ? '#56F2C1' : scorerData.validation_score >= 50 ? '#FFB020' : '#FF4D6D'} icon="verified" />
-                        <MetricCard label="Confidence" value={`${(scorerData.analysis_confidence * 100).toFixed(0)}%`}
-                          color={scorerData.analysis_confidence >= 0.8 ? '#56F2C1' : scorerData.analysis_confidence >= 0.6 ? '#FFB020' : '#FF4D6D'} icon="query_stats" />
-                        <div className="bg-surface border border-border rounded-lg p-4 flex flex-col gap-2">
-                          <span className="text-label-sm font-label-sm text-on-surface-variant uppercase text-[10px]">Flags</span>
-                          <span className={`text-[11px] font-mono ${scorerData.anti_hallucination_passed ? 'text-[#56F2C1]' : 'text-[#FF4D6D]'}`}>
-                            {scorerData.anti_hallucination_passed ? '✓ Anti-hallucination' : '✗ Anti-hallucination'}
-                          </span>
-                          <span className={`text-[11px] font-mono ${!scorerData.requires_human_review ? 'text-[#56F2C1]' : 'text-[#FFB020]'}`}>
-                            {scorerData.requires_human_review ? '⚠ Human review required' : '✓ Auto-approved'}
-                          </span>
-                          {scorerData.fund_context_adjusted && <span className="text-[11px] font-mono text-[#56CCF2]">⊕ Fund weights applied</span>}
-                        </div>
-                      </div>
-
-                      {/* Risk dimension grid */}
-                      <div className="bg-surface border border-border rounded-lg overflow-hidden">
-                        <div className="px-5 py-3 border-b border-border bg-surface-container-low flex items-center gap-2">
-                          <span className="material-symbols-outlined text-[14px] text-outline">assessment</span>
-                          <span className="text-[10px] font-mono text-on-surface-variant uppercase tracking-widest">Risk Dimensions</span>
-                          {scorerData.risk_dimensions.composite_score != null && (
-                            <span className="ml-auto text-[9px] font-mono text-outline">
-                              composite {scorerData.risk_dimensions.composite_score}/100
-                              {scorerData.risk_dimensions.weights_used ? ` · ${scorerData.risk_dimensions.weights_used} weights` : ''}
-                            </span>
-                          )}
-                        </div>
-                        <div className="grid grid-cols-1 md:grid-cols-5 divide-y md:divide-y-0 md:divide-x divide-border">
-                          {(['liquidity', 'credit', 'solvency', 'market', 'operational'] as const).map(dim => {
-                            const d = scorerData.risk_dimensions[dim]
-                            if (!d) return null
-                            const c = RISK_COLOR[d.level] ?? '#8d90a2'
-                            const names: Record<string, string> = { liquidity: 'Liquidity', credit: 'Credit', solvency: 'Solvency', market: 'Market', operational: 'Operational' }
-                            return (
-                              <div key={dim} className="p-4 flex flex-col gap-2">
-                                <div className="flex items-center justify-between">
-                                  <span className="text-[10px] font-mono text-outline uppercase">{names[dim]}</span>
-                                  <span className="text-[9px] font-mono px-1.5 py-0.5 rounded" style={{ color: c, background: `${c}15`, border: `1px solid ${c}30` }}>{d.level}</span>
-                                </div>
-                                <div className="flex items-end gap-2">
-                                  <span className="text-[20px] font-mono font-bold" style={{ color: c }}>{d.score}</span>
-                                  <span className="text-[10px] font-mono text-outline mb-0.5">/100</span>
-                                </div>
-                                <div className="h-1 bg-surface-container rounded overflow-hidden">
-                                  <div className="h-full rounded" style={{ width: `${d.score}%`, background: c, opacity: 0.7 }} />
-                                </div>
-                                {d.key_findings.slice(0, 2).map((f, i) => (
-                                  <p key={i} className="text-[10px] text-outline leading-tight">· {f}</p>
-                                ))}
-                              </div>
-                            )
-                          })}
-                        </div>
-                      </div>
-
-                      {/* LLM narrative */}
-                      {scorerData.risk_summary?.risk_headline && (
-                        <div className="bg-surface border border-border rounded-lg p-5">
-                          <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
-                            <span className="material-symbols-outlined text-[14px]">shield</span>Risk Assessment
-                          </div>
-                          <p className="text-body-md font-body-md font-semibold text-on-surface mb-4">{scorerData.risk_summary.risk_headline}</p>
-                          <div className="flex flex-col gap-3">
-                            {[scorerData.risk_summary.risk_narrative_paragraph1, scorerData.risk_summary.risk_narrative_paragraph2, scorerData.risk_summary.risk_narrative_paragraph3]
-                              .filter(Boolean).map((p, i) => <p key={i} className="text-body-sm font-body-sm text-on-surface leading-relaxed">{p}</p>)}
-                          </div>
-                          {(scorerData.risk_summary.risk_recommendations ?? []).length > 0 && (
-                            <div className="mt-4 pt-4 border-t border-border">
-                              <p className="text-[10px] font-mono text-outline uppercase tracking-widest mb-2">Recommendations</p>
-                              {scorerData.risk_summary.risk_recommendations!.map((r, i) => (
-                                <div key={i} className="text-label-sm font-label-sm text-on-surface mb-1.5">· {r}</div>
+                          return (
+                            <div className="flex flex-col gap-3">
+                              {rows.map((row, i) => (
+                                <div key={i} className="flex gap-3">{row}</div>
                               ))}
                             </div>
-                          )}
-                        </div>
-                      )}
+                          )
+                        })()}
 
-                      {/* Issues */}
-                      {scorerData.issues_found.length > 0 && (
-                        <div className="bg-surface border border-border rounded-lg p-4">
-                          <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
-                            <span className="material-symbols-outlined text-[14px]" style={{ color: '#FFB020' }}>warning</span>
-                            Issues Found ({scorerData.issues_found.length})
+                        {/* Tier 1 signals */}
+                        {(analyzerData.insight_tiers?.tier1_critical ?? []).length > 0 && (
+                          <div className="bg-surface border rounded overflow-hidden" style={{ borderColor: 'rgba(255,77,109,0.35)' }}>
+                            <div className="px-5 py-3 border-b flex items-center gap-2" style={{ borderColor: 'rgba(255,77,109,0.20)', background: 'rgba(255,77,109,0.05)' }}>
+                              <span className="material-symbols-outlined text-[15px]" style={{ color: '#FF4D6D' }}>priority_high</span>
+                              <span className="text-[10px] font-mono uppercase tracking-widest" style={{ color: '#FF4D6D' }}>Critical Executive Signals</span>
+                              <span className="ml-auto text-[9px] font-mono text-outline">{analyzerData.insight_tiers!.tier1_critical!.length} signal{analyzerData.insight_tiers!.tier1_critical!.length !== 1 ? 's' : ''}</span>
+                            </div>
+                            <div className="divide-y divide-border">
+                              {analyzerData.insight_tiers!.tier1_critical!.map((t, i) => (
+                                <div key={i} className="px-5 py-3 flex gap-4 items-start">
+                                  <span className="text-[9px] font-mono px-1.5 py-0.5 rounded shrink-0 mt-0.5" style={{ color: '#FF4D6D', background: 'rgba(255,77,109,0.12)', border: '1px solid rgba(255,77,109,0.25)' }}>{t.category || 'SIGNAL'}</span>
+                                  <div className="flex-1 min-w-0">
+                                    <p className="text-body-sm font-body-sm font-semibold text-on-surface">{t.signal}</p>
+                                    {t.so_what && <p className="text-[11px] text-outline mt-0.5 leading-snug">{t.so_what}</p>}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
                           </div>
-                          {scorerData.issues_found.map((issue, i) => <div key={i} className="text-label-sm font-label-sm text-risk-medium mb-1">· {issue}</div>)}
-                        </div>
-                      )}
+                        )}
 
-                      {/* Compliance flags */}
-                      {scorerData.compliance_flags.length > 0 && (
-                        <div className="bg-surface border border-border rounded-lg p-4">
-                          <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
-                            <span className="material-symbols-outlined text-[14px]">policy</span>
-                            Compliance Flags ({scorerData.compliance_flags.length})
+                        {/* Portfolio thesis */}
+                        {analyzerData.portfolio_thesis && (
+                          <div className="bg-surface border border-border rounded-lg p-5">
+                            <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
+                              <span className="material-symbols-outlined text-[14px]">strategy</span>Portfolio Thesis
+                            </div>
+                            <p className="text-body-sm font-body-sm text-on-surface leading-relaxed">{analyzerData.portfolio_thesis}</p>
                           </div>
-                          {scorerData.compliance_flags.map((f, i) => <div key={i} className="text-label-sm font-label-sm text-outline mb-1">· {f}</div>)}
-                        </div>
-                      )}
+                        )}
 
-                      {/* Continue / re-run */}
-                      {vs === 'waiting' && (
-                        <ContinueBanner
-                          color="#A78BFA"
-                          icon="security"
-                          title="Agent 3 complete — review risk scoring"
-                          subtitle="Risk assessment looks correct? Continue to report generation."
-                        >
-                          <button
-                            onClick={() => { setRestartIntent('agent3'); setShowRestartDialog(true) }}
-                            className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors"
+                        {/* Narrative layers */}
+                        {analyzerData.narrative_layers && (analyzerData.narrative_layers.executive || analyzerData.narrative_layers.tactical || analyzerData.narrative_layers.technical)
+                          ? <NarrativeLayers layers={analyzerData.narrative_layers} />
+                          : analyzerData.executive_narrative
+                            ? (
+                              <div className="bg-surface border border-border rounded-lg p-5">
+                                <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
+                                  <span className="material-symbols-outlined text-[14px]">description</span>Executive Narrative
+                                </div>
+                                <p className="text-body-sm font-body-sm text-on-surface leading-relaxed">{analyzerData.executive_narrative}</p>
+                              </div>
+                            ) : null}
+
+                        {/* Tier 2 findings */}
+                        {(analyzerData.insight_tiers?.tier2_material ?? []).length > 0 && (
+                          <div className="bg-surface border border-border rounded-lg overflow-hidden">
+                            <div className="px-5 py-3 border-b border-border bg-surface-container-low flex items-center gap-2">
+                              <span className="material-symbols-outlined text-[14px] text-outline">insights</span>
+                              <span className="text-[10px] font-mono text-on-surface-variant uppercase tracking-widest">Material Account Findings</span>
+                            </div>
+                            <div className="divide-y divide-border">
+                              {analyzerData.insight_tiers!.tier2_material!.map((t, i) => (
+                                <div key={i} className="px-5 py-3 flex gap-4 items-start">
+                                  <span className="text-[9px] font-mono text-outline shrink-0 mt-0.5 w-16 truncate">{t.account_id}</span>
+                                  <div className="flex-1 min-w-0">
+                                    <p className="text-body-sm font-body-sm text-on-surface">{t.signal}</p>
+                                    {t.so_what && <p className="text-[11px] text-outline mt-0.5">{t.so_what}</p>}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Top accounts table */}
+                        {analyzerData.analysis_results.length > 0 && (
+                          <div className="bg-surface border border-border rounded-lg overflow-hidden">
+                            <div className="p-4 border-b border-border bg-surface-container-low flex items-center justify-between">
+                              <h3 className="text-body-md font-body-md font-semibold text-on-surface">Top Accounts — Variation & Risk</h3>
+                              <span className="text-[10px] font-mono text-outline">sorted by |Δ%|</span>
+                            </div>
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-left whitespace-nowrap">
+                                <thead className="bg-surface-container-lowest border-b border-border text-label-sm font-label-sm text-on-surface-variant uppercase">
+                                  <tr>{['Account', 'Δ%', 'Materiality', 'Risk', 'Anomaly'].map(h => (
+                                    <th key={h} className="py-2.5 px-3 font-medium" style={{ textAlign: h === 'Δ%' ? 'right' : 'left' }}>{h}</th>
+                                  ))}</tr>
+                                </thead>
+                                <tbody className="text-body-sm font-body-sm text-on-surface divide-y divide-border">
+                                  {[...analyzerData.analysis_results].sort((a, b) => Math.abs(b.variation_pct) - Math.abs(a.variation_pct)).slice(0, 10).map((r, i) => (
+                                    <tr key={r.account_id} className={`hover:bg-surface-container-lowest/50 ${i % 2 ? 'bg-surface-container-lowest/20' : ''}`}>
+                                      <td className="py-2 px-3 text-on-surface min-w-[200px]">{r.account_name}</td>
+                                      <td className="py-2 px-3 text-right font-mono text-[11px]" style={{ color: r.variation_pct > 0 ? '#56F2C1' : r.variation_pct < 0 ? '#FF4D6D' : '#94A3B8' }}>
+                                        {r.variation_pct !== 0 ? `${r.variation_pct > 0 ? '+' : ''}${r.variation_pct.toFixed(1)}%` : '—'}
+                                      </td>
+                                      <td className="py-2 px-3">
+                                        <span className="text-[10px] font-mono px-2 py-0.5 rounded" style={{ color: r.materiality === 'HIGH' ? '#FF4D6D' : r.materiality === 'MEDIUM' ? '#FFB020' : '#56F2C1', background: r.materiality === 'HIGH' ? '#FF4D6D20' : r.materiality === 'MEDIUM' ? '#FFB02020' : '#56F2C120', border: `1px solid ${r.materiality === 'HIGH' ? '#FF4D6D40' : r.materiality === 'MEDIUM' ? '#FFB02040' : '#56F2C140'}` }}>{r.materiality}</span>
+                                      </td>
+                                      <td className="py-2 px-3"><span className="text-[10px] font-mono" style={{ color: RISK_COLOR[r.risk_level] ?? '#8d90a2' }}>{r.risk_level}</span></td>
+                                      <td className="py-2 px-3">{r.anomaly_detected && <span className="material-symbols-outlined text-[14px]" style={{ color: '#FFB020' }}>warning</span>}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Sheet concentration */}
+                        {analyzerData.sheet_concentration && (analyzerData.sheet_concentration.asset_available || analyzerData.sheet_concentration.instrument_available || analyzerData.sheet_concentration.bank_available) && (
+                          <SheetConcentrationSection sc={analyzerData.sheet_concentration} />
+                        )}
+
+                        {/* NIIF 18 */}
+                        {(analyzerData.financial_ratios.niif18?.compliance?.flags?.length ?? 0) > 0 && (
+                          <div className="bg-surface border border-border rounded-lg p-4">
+                            <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
+                              <span className="material-symbols-outlined text-[14px]">policy</span>NIIF 18 Compliance Flags
+                            </div>
+                            {analyzerData.financial_ratios.niif18!.compliance!.flags.map((f, i) => (
+                              <div key={i} className="text-label-sm font-label-sm text-risk-medium mb-1">· {f}</div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Continue banner */}
+                        {vs === 'waiting' && (
+                          <ContinueBanner
+                            color="#56CCF2"
+                            icon="analytics"
+                            title="Agent 2 complete — review financial analysis"
+                            subtitle="Analysis looks correct? Continue to risk scoring."
                           >
-                            <span className="material-symbols-outlined text-[13px]">replay</span>
-                            Re-run Agent 3
-                          </button>
-                          <button
-                            onClick={handleRunAgent4Click}
-                            className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95"
-                            style={{ background: '#A78BFA', color: '#050816' }}
+                            <button
+                              onClick={handleRunAgent2Click}
+                              className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors"
+                            >
+                              <span className="material-symbols-outlined text-[13px]">replay</span>
+                              Re-run Agent 2
+                            </button>
+                            <button
+                              onClick={handleRunAgent3Click}
+                              className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95"
+                              style={{ background: '#56CCF2', color: '#050816' }}
+                            >
+                              <span className="material-symbols-outlined text-[16px]">play_arrow</span>
+                              Run Agent 3 — Risk Scoring
+                            </button>
+                          </ContinueBanner>
+                        )}
+                        {vs === 'done' && st !== 'analysis_complete' && (
+                          <div className="flex justify-end gap-2">
+                            <button onClick={handleRunAgent2Click} className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors">
+                              <span className="material-symbols-outlined text-[13px]">replay</span>Re-run Agent 2
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    {vs === 'locked' && (
+                      <LockedView icon="analytics" message="Agent 2 hasn't run yet" hint="Complete Agent 1 extraction first, then run the financial analysis." />
+                    )}
+                  </>
+                )
+              })()}
+
+              {/* ══ AGENT 3 VIEW ════════════════════════════════════════════ */}
+              {activeView === 'agent3' && (() => {
+                const vs = getViewState('agent3')
+                return (
+                  <>
+                    {vs === 'running' && (
+                      <PulseSpinner
+                        label="Agent 3 — Risk Scoring"
+                        elapsed={elapsed}
+                        message="Running risk scoring engines…"
+                        hint="Risk scoring takes 15–45s · polling every 4s"
+                      />
+                    )}
+
+                    {(vs === 'done' || vs === 'waiting') && scorerData && (
+                      <>
+                        {/* Overview cards */}
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                          <MetricCard label="Overall Risk" value={scorerData.overall_risk_score} color={RISK_COLOR[scorerData.overall_risk_score] ?? '#8d90a2'} icon="security" />
+                          <MetricCard label="Validation Score" value={`${scorerData.validation_score}/100`}
+                            color={scorerData.validation_score >= 75 ? '#56F2C1' : scorerData.validation_score >= 50 ? '#FFB020' : '#FF4D6D'} icon="verified" />
+                          <MetricCard label="Confidence" value={`${(scorerData.analysis_confidence * 100).toFixed(0)}%`}
+                            color={scorerData.analysis_confidence >= 0.8 ? '#56F2C1' : scorerData.analysis_confidence >= 0.6 ? '#FFB020' : '#FF4D6D'} icon="query_stats" />
+                          <div className="bg-surface border border-border rounded-lg p-4 flex flex-col gap-2">
+                            <span className="text-label-sm font-label-sm text-on-surface-variant uppercase text-[10px]">Flags</span>
+                            <span className={`text-[11px] font-mono ${scorerData.anti_hallucination_passed ? 'text-[#56F2C1]' : 'text-[#FF4D6D]'}`}>
+                              {scorerData.anti_hallucination_passed ? '✓ Anti-hallucination' : '✗ Anti-hallucination'}
+                            </span>
+                            <span className={`text-[11px] font-mono ${!scorerData.requires_human_review ? 'text-[#56F2C1]' : 'text-[#FFB020]'}`}>
+                              {scorerData.requires_human_review ? '⚠ Human review required' : '✓ Auto-approved'}
+                            </span>
+                            {scorerData.fund_context_adjusted && <span className="text-[11px] font-mono text-[#56CCF2]">⊕ Fund weights applied</span>}
+                          </div>
+                        </div>
+
+                        {/* Risk dimension grid */}
+                        <div className="bg-surface border border-border rounded-lg overflow-hidden">
+                          <div className="px-5 py-3 border-b border-border bg-surface-container-low flex items-center gap-2">
+                            <span className="material-symbols-outlined text-[14px] text-outline">assessment</span>
+                            <span className="text-[10px] font-mono text-on-surface-variant uppercase tracking-widest">Risk Dimensions</span>
+                            {scorerData.risk_dimensions.composite_score != null && (
+                              <span className="ml-auto text-[9px] font-mono text-outline">
+                                composite {scorerData.risk_dimensions.composite_score}/100
+                                {scorerData.risk_dimensions.weights_used ? ` · ${scorerData.risk_dimensions.weights_used} weights` : ''}
+                              </span>
+                            )}
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-5 divide-y md:divide-y-0 md:divide-x divide-border">
+                            {(['liquidity', 'credit', 'solvency', 'market', 'operational'] as const).map(dim => {
+                              const d = scorerData.risk_dimensions[dim]
+                              if (!d) return null
+                              const c = RISK_COLOR[d.level] ?? '#8d90a2'
+                              const names: Record<string, string> = { liquidity: 'Liquidity', credit: 'Credit', solvency: 'Solvency', market: 'Market', operational: 'Operational' }
+                              return (
+                                <div key={dim} className="p-4 flex flex-col gap-2">
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-[10px] font-mono text-outline uppercase">{names[dim]}</span>
+                                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded" style={{ color: c, background: `${c}15`, border: `1px solid ${c}30` }}>{d.level}</span>
+                                  </div>
+                                  <div className="flex items-end gap-2">
+                                    <span className="text-[20px] font-mono font-bold" style={{ color: c }}>{d.score}</span>
+                                    <span className="text-[10px] font-mono text-outline mb-0.5">/100</span>
+                                  </div>
+                                  <div className="h-1 bg-surface-container rounded overflow-hidden">
+                                    <div className="h-full rounded" style={{ width: `${d.score}%`, background: c, opacity: 0.7 }} />
+                                  </div>
+                                  {d.key_findings.slice(0, 2).map((f, i) => (
+                                    <p key={i} className="text-[10px] text-outline leading-tight">· {f}</p>
+                                  ))}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        </div>
+
+                        {/* LLM narrative */}
+                        {scorerData.risk_summary?.risk_headline && (
+                          <div className="bg-surface border border-border rounded-lg p-5">
+                            <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
+                              <span className="material-symbols-outlined text-[14px]">shield</span>Risk Assessment
+                            </div>
+                            <p className="text-body-md font-body-md font-semibold text-on-surface mb-4">{scorerData.risk_summary.risk_headline}</p>
+                            <div className="flex flex-col gap-3">
+                              {[scorerData.risk_summary.risk_narrative_paragraph1, scorerData.risk_summary.risk_narrative_paragraph2, scorerData.risk_summary.risk_narrative_paragraph3]
+                                .filter(Boolean).map((p, i) => <p key={i} className="text-body-sm font-body-sm text-on-surface leading-relaxed">{p}</p>)}
+                            </div>
+                            {(scorerData.risk_summary.risk_recommendations ?? []).length > 0 && (
+                              <div className="mt-4 pt-4 border-t border-border">
+                                <p className="text-[10px] font-mono text-outline uppercase tracking-widest mb-2">Recommendations</p>
+                                {scorerData.risk_summary.risk_recommendations!.map((r, i) => (
+                                  <div key={i} className="text-label-sm font-label-sm text-on-surface mb-1.5">· {r}</div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Issues */}
+                        {scorerData.issues_found.length > 0 && (
+                          <div className="bg-surface border border-border rounded-lg p-4">
+                            <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
+                              <span className="material-symbols-outlined text-[14px]" style={{ color: '#FFB020' }}>warning</span>
+                              Issues Found ({scorerData.issues_found.length})
+                            </div>
+                            {scorerData.issues_found.map((issue, i) => <div key={i} className="text-label-sm font-label-sm text-risk-medium mb-1">· {issue}</div>)}
+                          </div>
+                        )}
+
+                        {/* Compliance flags (regulatory only — NIIF / SFC) */}
+                        {scorerData.compliance_flags.length > 0 && (
+                          <div className="bg-surface border border-border rounded-lg p-4">
+                            <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
+                              <span className="material-symbols-outlined text-[14px]">policy</span>
+                              Compliance Flags ({scorerData.compliance_flags.length})
+                            </div>
+                            {scorerData.compliance_flags.map((f, i) => <div key={i} className="text-label-sm font-label-sm text-outline mb-1">· {f}</div>)}
+                          </div>
+                        )}
+
+                        {/* Score transparency — auditability of composite & validation scores */}
+                        {(scorerData.composite_score_detail || scorerData.validation_score_detail) && (
+                          <details className="bg-surface border border-border rounded-lg p-4 group">
+                            <summary className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest flex items-center gap-2 cursor-pointer select-none">
+                              <span className="material-symbols-outlined text-[14px]">function</span>
+                              Score Transparency
+                              <span className="ml-auto material-symbols-outlined text-[16px] text-outline group-open:rotate-180 transition-transform">expand_more</span>
+                            </summary>
+                            <div className="mt-4 flex flex-col gap-4">
+                              {scorerData.composite_score_detail?.formula && (
+                                <div>
+                                  <p className="text-[10px] font-mono text-outline uppercase tracking-widest mb-1">
+                                    Composite Score = {scorerData.composite_score_detail.value}/100
+                                    {scorerData.composite_score_detail.weight_profile ? ` · perfil ${scorerData.composite_score_detail.weight_profile}` : ''}
+                                  </p>
+                                  <code className="block text-[11px] font-mono text-on-surface bg-surface-container rounded px-2 py-1.5 break-words">{scorerData.composite_score_detail.formula}</code>
+                                  {scorerData.composite_score_detail.weighted_components && (
+                                    <div className="flex flex-wrap gap-1.5 mt-2">
+                                      {Object.entries(scorerData.composite_score_detail.weighted_components).map(([k, v]) => (
+                                        <span key={k} className="text-[10px] font-mono text-outline bg-surface-container rounded px-1.5 py-0.5">{k}: {v}</span>
+                                      ))}
+                                    </div>
+                                  )}
+                                  {scorerData.composite_score_detail.weight_profile_rationale && (
+                                    <p className="text-[10px] text-outline leading-tight mt-1.5">{scorerData.composite_score_detail.weight_profile_rationale}</p>
+                                  )}
+                                </div>
+                              )}
+                              {scorerData.validation_score_detail?.components && (
+                                <div>
+                                  <p className="text-[10px] font-mono text-outline uppercase tracking-widest mb-1.5">Validation Score = {scorerData.validation_score_detail.value}/100 · sum(score × weight)</p>
+                                  {Object.entries(scorerData.validation_score_detail.components).map(([k, c]) => (
+                                    <div key={k} className="flex items-center gap-2 mb-1">
+                                      <span className="text-[10px] font-mono text-outline w-44 shrink-0">{k} (×{c.weight})</span>
+                                      <div className="flex-1 h-1 bg-surface-container rounded overflow-hidden">
+                                        <div className="h-full rounded" style={{ width: `${c.score}%`, background: c.score >= 75 ? '#56F2C1' : c.score >= 50 ? '#FFB020' : '#FF4D6D', opacity: 0.7 }} />
+                                      </div>
+                                      <span className="text-[10px] font-mono text-on-surface w-8 text-right">{c.score}</span>
+                                    </div>
+                                  ))}
+                                  {(scorerData.validation_score_detail.issues_penalized ?? []).map((iss, i) => (
+                                    <p key={i} className="text-[10px] text-risk-medium leading-tight mt-1">− {iss}</p>
+                                  ))}
+                                </div>
+                              )}
+                              {scorerData.analysis_confidence_detail?.factors && (
+                                <div>
+                                  <p className="text-[10px] font-mono text-outline uppercase tracking-widest mb-1.5">Analysis Confidence = {((scorerData.analysis_confidence_detail.value ?? 0) * 100).toFixed(0)}% (independiente del riesgo)</p>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {Object.entries(scorerData.analysis_confidence_detail.factors).map(([k, v]) => (
+                                      <span key={k} className="text-[10px] font-mono text-outline bg-surface-container rounded px-1.5 py-0.5">{k}: {(v as number).toFixed(2)}</span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </details>
+                        )}
+
+                        {/* Anti-hallucination failures (per-account) */}
+                        {scorerData.anti_hallucination_result?.failures && scorerData.anti_hallucination_result.failures.length > 0 && (
+                          <div className="bg-surface border border-border rounded-lg p-4">
+                            <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
+                              <span className="material-symbols-outlined text-[14px]" style={{ color: '#FF4D6D' }}>report</span>
+                              Anti-hallucination ({scorerData.anti_hallucination_result.checks_failed}/{scorerData.anti_hallucination_result.checks_performed} fallidas)
+                            </div>
+                            {scorerData.anti_hallucination_result.failures.map((f, i) => (
+                              <div key={i} className="mb-2">
+                                <p className="text-[11px] font-mono text-on-surface">· <span className="text-[#FF4D6D]">{f.account_id}</span> — {f.check}</p>
+                                <p className="text-[10px] text-outline leading-tight ml-3">{f.detail}</p>
+                                <p className="text-[10px] text-outline leading-tight ml-3 italic">{f.action}</p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Data quality warnings (null business_context) */}
+                        {scorerData.data_quality_warnings && scorerData.data_quality_warnings.length > 0 && (
+                          <div className="bg-surface border border-border rounded-lg p-4">
+                            <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-3 flex items-center gap-2">
+                              <span className="material-symbols-outlined text-[14px]" style={{ color: '#FFB020' }}>data_alert</span>
+                              Data Quality Warnings ({scorerData.data_quality_warnings.length})
+                            </div>
+                            {scorerData.data_quality_warnings.map((w, i) => (
+                              <div key={i} className="mb-2">
+                                <p className="text-[11px] font-mono text-on-surface">· {w.field}
+                                  <span className="ml-2 text-[9px] px-1.5 py-0.5 rounded" style={{ color: w.severity === 'MEDIUM' ? '#FFB020' : '#56CCF2', background: w.severity === 'MEDIUM' ? '#FFB02015' : '#56CCF215' }}>{w.severity}</span>
+                                </p>
+                                <p className="text-[10px] text-outline leading-tight ml-3">{w.impact}</p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Anomaly detection decision */}
+                        {scorerData.anomaly_detection_summary && (scorerData.anomaly_detection_summary.total_detected ?? 0) > 0 && (
+                          <div className="bg-surface border border-border rounded-lg p-4">
+                            <div className="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mb-2 flex items-center gap-2">
+                              <span className="material-symbols-outlined text-[14px]">filter_alt</span>
+                              Anomaly Detection
+                            </div>
+                            <p className="text-[11px] font-mono text-outline">
+                              {scorerData.anomaly_detection_summary.total_detected} detectadas ·
+                              {' '}{scorerData.anomaly_detection_summary.included_in_output} incluidas ·
+                              {' '}{scorerData.anomaly_detection_summary.filtered_out} filtradas
+                            </p>
+                            <p className="text-[10px] text-outline leading-tight mt-1">{scorerData.anomaly_detection_summary.filter_criteria}</p>
+                          </div>
+                        )}
+
+                        {/* Continue / re-run */}
+                        {vs === 'waiting' && (
+                          <ContinueBanner
+                            color="#A78BFA"
+                            icon="security"
+                            title="Agent 3 complete — review risk scoring"
+                            subtitle="Risk assessment looks correct? Continue to report generation."
                           >
-                            <span className="material-symbols-outlined text-[16px]">play_arrow</span>
-                            Run Agent 4 — Report
-                          </button>
-                        </ContinueBanner>
-                      )}
-                      {vs === 'done' && (
-                        <div className="flex justify-end gap-2">
-                          <button onClick={() => { setRestartIntent('agent3'); setShowRestartDialog(true) }} className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors">
-                            <span className="material-symbols-outlined text-[13px]">replay</span>Re-run Agent 3
-                          </button>
+                            <button
+                              onClick={() => { setRestartIntent('agent3'); setShowRestartDialog(true) }}
+                              className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors"
+                            >
+                              <span className="material-symbols-outlined text-[13px]">replay</span>
+                              Re-run Agent 3
+                            </button>
+                            <button
+                              onClick={handleRunAgent4Click}
+                              className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95"
+                              style={{ background: '#A78BFA', color: '#050816' }}
+                            >
+                              <span className="material-symbols-outlined text-[16px]">play_arrow</span>
+                              Run Agent 4 — Report
+                            </button>
+                          </ContinueBanner>
+                        )}
+                        {vs === 'done' && (
+                          <div className="flex justify-end gap-2">
+                            <button onClick={() => { setRestartIntent('agent3'); setShowRestartDialog(true) }} className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors">
+                              <span className="material-symbols-outlined text-[13px]">replay</span>Re-run Agent 3
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    {vs === 'locked' && (
+                      <LockedView icon="security" message="Agent 3 hasn't run yet" hint="Complete Agent 2 financial analysis first, then run risk scoring." />
+                    )}
+                  </>
+                )
+              })()}
+
+              {/* ══ AGENT 4 VIEW ════════════════════════════════════════════ */}
+              {activeView === 'agent4' && (() => {
+                const vs = getViewState('agent4')
+                return (
+                  <>
+                    {vs === 'running' && (
+                      <PulseSpinner
+                        label="Agent 4 — Report Generation"
+                        elapsed={elapsed}
+                        message="Generating report narrative…"
+                        hint="Report generation takes 15–60s · polling every 4s"
+                      />
+                    )}
+
+                    {vs === 'done' && (
+                      <>
+                        <div className="bg-surface border rounded p-8 flex flex-col items-center gap-4 text-center"
+                          style={{ borderColor: '#56F2C1', background: 'rgba(86,242,193,0.04)' }}>
+                          <span className="material-symbols-outlined text-[48px]" style={{ color: '#56F2C1' }}>task_alt</span>
+                          <div>
+                            <p className="text-body-md font-body-md font-semibold text-on-surface mb-1">Pipeline complete</p>
+                            <p className="text-label-sm font-label-sm text-outline">Report saved to S3. All agents finished successfully.</p>
+                          </div>
+                          <div className="flex gap-2 mt-2">
+                            <button onClick={() => { setRestartIntent('agent3'); setShowRestartDialog(true) }} className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors">
+                              <span className="material-symbols-outlined text-[13px]">replay</span>Re-run Agent 3
+                            </button>
+                            <button onClick={handleRunAgent4Click} className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors">
+                              <span className="material-symbols-outlined text-[13px]">replay</span>Re-run Agent 4
+                            </button>
+                          </div>
                         </div>
-                      )}
-                    </>
-                  )}
+                      </>
+                    )}
 
-                  {vs === 'locked' && (
-                    <LockedView icon="security" message="Agent 3 hasn't run yet" hint="Complete Agent 2 financial analysis first, then run risk scoring." />
-                  )}
-                </>
-              )
-            })()}
-
-            {/* ══ AGENT 4 VIEW ════════════════════════════════════════════ */}
-            {activeView === 'agent4' && (() => {
-              const vs = getViewState('agent4')
-              return (
-                <>
-                  {vs === 'running' && (
-                    <PulseSpinner
-                      label="Agent 4 — Report Generation"
-                      elapsed={elapsed}
-                      message="Generating report narrative…"
-                      hint="Report generation takes 15–60s · polling every 4s"
-                    />
-                  )}
-
-                  {vs === 'done' && (
-                    <>
-                      <div className="bg-surface border rounded p-8 flex flex-col items-center gap-4 text-center"
-                           style={{ borderColor: '#56F2C1', background: 'rgba(86,242,193,0.04)' }}>
-                        <span className="material-symbols-outlined text-[48px]" style={{ color: '#56F2C1' }}>task_alt</span>
-                        <div>
-                          <p className="text-body-md font-body-md font-semibold text-on-surface mb-1">Pipeline complete</p>
-                          <p className="text-label-sm font-label-sm text-outline">Report saved to S3. All agents finished successfully.</p>
-                        </div>
-                        <div className="flex gap-2 mt-2">
-                          <button onClick={() => { setRestartIntent('agent3'); setShowRestartDialog(true) }} className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors">
-                            <span className="material-symbols-outlined text-[13px]">replay</span>Re-run Agent 3
-                          </button>
-                          <button onClick={handleRunAgent4Click} className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors">
-                            <span className="material-symbols-outlined text-[13px]">replay</span>Re-run Agent 4
-                          </button>
-                        </div>
-                      </div>
-                    </>
-                  )}
-
-                  {vs === 'locked' && (
-                    <LockedView icon="article" message="Agent 4 hasn't run yet" hint="Complete risk scoring first, then generate the report." />
-                  )}
-                </>
-              )
-            })()}
+                    {vs === 'locked' && (
+                      <LockedView icon="article" message="Agent 4 hasn't run yet" hint="Complete risk scoring first, then generate the report." />
+                    )}
+                  </>
+                )
+              })()}
 
             </div>{/* /agent views */}
           </>
@@ -1225,12 +1389,12 @@ export default function AnalysisPage() {
             <div>
               <p className="text-body-md font-body-md font-semibold text-on-surface mb-1">
                 {restartIntent === 'agent2' ? 'Agent 2 already has results' :
-                 restartIntent === 'agent3' ? 'Agent 3 already has results' : 'Pipeline already completed'}
+                  restartIntent === 'agent3' ? 'Agent 3 already has results' : 'Pipeline already completed'}
               </p>
               <p className="text-label-sm font-label-sm text-outline">
                 {restartIntent === 'agent2' ? 'Re-running Agent 2 will overwrite the existing financial analysis.' :
-                 restartIntent === 'agent3' ? 'Re-running Agent 3 will overwrite the existing risk scoring.' :
-                 'Re-running Agent 4 will overwrite the existing report.'}
+                  restartIntent === 'agent3' ? 'Re-running Agent 3 will overwrite the existing risk scoring.' :
+                    'Re-running Agent 4 will overwrite the existing report.'}
               </p>
             </div>
           </div>
@@ -1244,7 +1408,7 @@ export default function AnalysisPage() {
             <button onClick={confirmRestart} className="w-full px-4 py-2.5 rounded border border-border text-outline font-mono text-[12px] text-left flex items-center gap-2 hover:bg-surface-container transition-colors">
               <span className="material-symbols-outlined text-[15px]">replay</span>
               {restartIntent === 'agent2' ? 'Re-run Agent 2 (overwrite analysis)' :
-               restartIntent === 'agent3' ? 'Re-run Agent 3 (overwrite risk scoring)' : 'Re-run Agent 4 (overwrite report)'}
+                restartIntent === 'agent3' ? 'Re-run Agent 3 (overwrite risk scoring)' : 'Re-run Agent 4 (overwrite report)'}
             </button>
             <button onClick={() => setShowRestartDialog(false)} className="w-full px-4 py-2 rounded text-outline font-mono text-[11px] hover:text-on-surface transition-colors text-center">
               Cancel
@@ -1434,7 +1598,7 @@ function ViewTabBar({ activeView, onSelectView, report, analyzerData, scorerData
 
             <div className="flex items-center gap-1.5 w-full">
               <span className="material-symbols-outlined text-[13px]"
-                    style={{ color: tab.running ? '#56CCF2' : tab.done ? tab.color : '#475569' }}>
+                style={{ color: tab.running ? '#56CCF2' : tab.done ? tab.color : '#475569' }}>
                 {tab.icon}
               </span>
               <span className="text-[9px] font-mono uppercase tracking-wider text-outline">{tab.label}</span>
@@ -1506,7 +1670,7 @@ function StepSpinner({ label, elapsed, steps, hint }: {
               <div className="pt-0.5 flex-1 min-w-0">
                 <p className={`text-body-sm font-body-sm ${s === 'active' ? 'text-on-surface font-semibold' : s === 'done' ? 'text-[#56F2C1]' : 'text-outline'}`}>{step.label}</p>
                 {s === 'active' && <div className="mt-2 max-w-[220px] progress-track" />}
-                {s === 'done'   && <p className="text-[10px] font-mono mt-1" style={{ color: '#56F2C1' }}>✓ Complete</p>}
+                {s === 'done' && <p className="text-[10px] font-mono mt-1" style={{ color: '#56F2C1' }}>✓ Complete</p>}
               </div>
             </div>
           )
@@ -1539,7 +1703,7 @@ function ContinueBanner({ color, icon, title, subtitle, children }: {
 }) {
   return (
     <div className="bg-surface border rounded p-5 flex flex-col md:flex-row items-center justify-between gap-4"
-         style={{ borderColor: color, background: `${color}0f` }}>
+      style={{ borderColor: color, background: `${color}0f` }}>
       <div className="flex items-start gap-3">
         <span className="material-symbols-outlined text-[22px] mt-0.5" style={{ color }}>{icon}</span>
         <div>
@@ -1580,7 +1744,7 @@ function PipelineDots({ status }: { status: string }) {
     <div className="flex items-center gap-1">
       {[0, 1, 2, 3].map(i => (
         <div key={i} className={`w-2 h-2 rounded-full ${i === done && running ? 'animate-pulse' : ''}`}
-             style={{ background: i < done ? colors[i] : i === done && running ? '#56CCF2' : '#1e2030' }} />
+          style={{ background: i < done ? colors[i] : i === done && running ? '#56CCF2' : '#1e2030' }} />
       ))}
     </div>
   )
@@ -1588,15 +1752,15 @@ function PipelineDots({ status }: { status: string }) {
 
 function StatusBadge({ status }: { status: string }) {
   const color =
-    status === 'completed'          ? '#56F2C1' :
-    status === 'scoring_complete'   ? '#A78BFA' :
-    status === 'analysis_complete'  ? '#56CCF2' :
-    status === 'extraction_complete'? '#FFB020' :
-    status === 'failed'             ? '#FF4D6D' :
-    status === 'cancelled'          ? '#FF4D6D' : '#94A3B8'
+    status === 'completed' ? '#56F2C1' :
+      status === 'scoring_complete' ? '#A78BFA' :
+        status === 'analysis_complete' ? '#56CCF2' :
+          status === 'extraction_complete' ? '#FFB020' :
+            status === 'failed' ? '#FF4D6D' :
+              status === 'cancelled' ? '#FF4D6D' : '#94A3B8'
   return (
     <span className="text-[9px] font-mono px-2 py-0.5 rounded shrink-0"
-          style={{ color, background: `${color}18`, border: `1px solid ${color}40` }}>
+      style={{ color, background: `${color}18`, border: `1px solid ${color}40` }}>
       {status.replace(/_/g, ' ').toUpperCase()}
     </span>
   )
@@ -1692,8 +1856,8 @@ function StatTile({ label, value, color, icon, sub, big, signal, wide }: {
 
 function NarrativeLayers({ layers }: { layers: { executive?: string; tactical?: string; technical?: string } }) {
   const tabs = [
-    { key: 'executive', label: 'Executive', icon: 'person',      text: layers.executive },
-    { key: 'tactical',  label: 'Tactical',  icon: 'swap_horiz',  text: layers.tactical  },
+    { key: 'executive', label: 'Executive', icon: 'person', text: layers.executive },
+    { key: 'tactical', label: 'Tactical', icon: 'swap_horiz', text: layers.tactical },
     { key: 'technical', label: 'Technical', icon: 'data_object', text: layers.technical },
   ].filter(t => t.text)
   const [active, setActive] = useState(tabs[0]?.key ?? 'executive')
@@ -1721,9 +1885,9 @@ type SheetConc = NonNullable<AnalyzerOutput['sheet_concentration']>
 
 function SheetConcentrationSection({ sc }: { sc: SheetConc }) {
   const tabs = [
-    { key: 'asset',      label: 'Activos',     icon: 'account_balance',   available: sc.asset_available },
+    { key: 'asset', label: 'Activos', icon: 'account_balance', available: sc.asset_available },
     { key: 'instrument', label: 'Instrumentos', icon: 'candlestick_chart', available: sc.instrument_available },
-    { key: 'bank',       label: 'Bancos',       icon: 'corporate_fare',    available: sc.bank_available },
+    { key: 'bank', label: 'Bancos', icon: 'corporate_fare', available: sc.bank_available },
   ].filter(t => t.available)
   const [active, setActive] = useState(tabs[0]?.key ?? 'asset')
   if (tabs.length === 0) return null

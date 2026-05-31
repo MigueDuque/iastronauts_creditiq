@@ -240,9 +240,11 @@ def generate_risk_narrative(
         "market": "mercado",
         "operational": "operacional",
     }
+    # Mejora 5: never leak the English enum into Spanish narrative ("medium" → "medio").
+    risk_es = {"LOW": "bajo", "MEDIUM": "medio", "HIGH": "alto"}.get(overall_risk, overall_risk.lower())
 
     p1 = (
-        f"{company_name} presenta un perfil de riesgo {overall_risk.lower()} con una puntuación compuesta de {composite_score}/100. "
+        f"{company_name} presenta un perfil de riesgo {risk_es} con una puntuación compuesta de {composite_score}/100. "
         + (f"Las dimensiones de mayor riesgo son: {', '.join(dim_es.get(d, d) for d in high_dims)}. " if high_dims else "")
         + "Se requiere seguimiento activo por parte de la administración."
     )
@@ -264,5 +266,5 @@ def generate_risk_narrative(
         "risk_narrative_paragraph3": p3,
         "category_narratives": _fallback_category_narratives(risk_categories),
         "risk_recommendations": all_risk_drivers[:3] if all_risk_drivers else ["Monitorear indicadores de riesgo trimestralmente."],
-        "risk_headline": f"Perfil de riesgo {overall_risk.lower()} — score compuesto {composite_score}/100.",
+        "risk_headline": f"Perfil de riesgo {risk_es} — score compuesto {composite_score}/100.",
     }

@@ -5,6 +5,7 @@ from datetime import datetime
 import boto3
 
 from .models.report import FinalReportOutput, NiifNoteDraft
+from .pdf_writer import markdown_to_pdf_bytes
 from .tenant_context import TenantBoundaryViolation
 
 _METADATA_RE = re.compile(r"<!--\s*CREDITIQ_REPORT\s*([\s\S]*?)-->", re.DOTALL)
@@ -38,12 +39,70 @@ def build_s3_key(
     )
 
 
+def build_pdf_s3_key(
+    tenant_id: str,
+    company_slug: str,
+    generated_at: datetime,
+    job_id: str,
+) -> str:
+    return (
+        f"reports/{tenant_id}/{company_slug}"
+        f"/{generated_at.year}/{generated_at.month:02d}"
+        f"/report_{job_id}.pdf"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Serialization
 # ---------------------------------------------------------------------------
 
 _RISK_EMOJI = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴"}
 _RISK_ES = {"LOW": "BAJO", "MEDIUM": "MEDIO", "HIGH": "ALTO"}
+
+
+_RISK_EMOJI = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴", "CRITICAL": "🔴"}
+_RISK_ES = {"LOW": "BAJO", "MEDIUM": "MEDIO", "HIGH": "ALTO", "CRITICAL": "CRITICO"}
+_HEALTH_ES = {
+    "GROWING": "CRECIENTE",
+    "STABLE": "ESTABLE",
+    "DECLINING": "DECRECIENTE",
+    "CRITICAL": "CRITICO",
+    "LIQUID": "LIQUIDA",
+    "LEVERAGED": "APALANCADA",
+    "SPECULATIVE": "ESPECULATIVA",
+    "CASH_STRESSED": "ESTRES DE CAJA",
+    "VALUATION_DRIVEN": "DEPENDIENTE DE VALORACION",
+    "CONCENTRATED": "CONCENTRADA",
+}
+_MAT_ES = {"LOW": "BAJA", "MEDIUM": "MEDIA", "HIGH": "ALTA"}
+
+
+def _enum_value(value) -> str:
+    return value.value if hasattr(value, "value") else str(value)
+
+
+def _money(value: float | int | None) -> str:
+    if value is None:
+        return "-"
+    return f"{float(value):,.1f}"
+
+
+def _pct(value: float | int | None) -> str:
+    if value is None:
+        return "-"
+    sign = "+" if float(value) > 0 else ""
+    return f"{sign}{float(value):.1f}%"
+
+
+def _top_accounts(report: FinalReportOutput, limit: int = 5) -> list:
+    return sorted(
+        report.analysis_results,
+        key=lambda a: (
+            0 if _enum_value(a.materiality) == "HIGH" else 1 if _enum_value(a.materiality) == "MEDIUM" else 2,
+            -abs(a.variation_pct or 0),
+            -abs(a.current_value or 0),
+        ),
+    )[:limit]
 
 
 def _render_risk_section(report: FinalReportOutput) -> str:
@@ -180,6 +239,104 @@ def deserialize_from_markdown(content: str) -> FinalReportOutput:
     return FinalReportOutput.model_validate(data)
 
 
+def serialize_to_markdown(report: FinalReportOutput) -> str:
+    """Render the final client-facing report in a corporate Markdown structure."""
+    metadata = report.model_dump(mode="json")
+    risk = _enum_value(report.overall_risk_score)
+    health = _enum_value(report.overall_financial_health)
+    periods_str = " - ".join(report.periods) if report.periods else "-"
+    sections = report.report_sections or {}
+
+    drivers = sections.get("drivers") or []
+    recommendations = sections.get("recommendations") or (report.risk_summary or {}).get("risk_recommendations") or []
+    table_analyses = sections.get("table_analyses") or []
+    global_analysis = sections.get("global_analysis") or []
+    anomaly_summary = sections.get("anomaly_summary") or "Sin anomalias criticas."
+    human_review = sections.get("requires_human_review")
+    if human_review is None:
+        human_review = report.validation_score < 80 or any(a.anomaly_detected for a in report.analysis_results)
+
+    accounts_rows = ""
+    for a in _top_accounts(report, limit=len(report.analysis_results)):
+        accounts_rows += (
+            f"| {a.account_name} "
+            f"| {_money(a.current_value)} "
+            f"| {_money(a.previous_value)} "
+            f"| {_pct(a.variation_pct)} "
+            f"| {_MAT_ES.get(_enum_value(a.materiality), _enum_value(a.materiality))} "
+            f"| {_RISK_ES.get(_enum_value(a.risk_level), _enum_value(a.risk_level))} "
+            f"| {a.executive_insight} |\n"
+        )
+
+    board_rows = ""
+    for a in _top_accounts(report, 3):
+        board_rows += f"| {a.account_name} | COP {_money(a.current_value)} MM ({_pct(a.variation_pct)}) |\n"
+    board_rows += f"| Riesgo Global | {_RISK_ES.get(risk, risk)} |\n"
+    board_rows += f"| Score de Validacion | {report.validation_score}/100 |\n"
+    board_rows += f"| Requiere Revision Humana | {'Si' if human_review else 'No'} |\n"
+
+    niif_sections = ""
+    account_names = {a.account_id: a.account_name for a in report.analysis_results}
+    for i, note in enumerate(report.niif_note_drafts, start=1):
+        affected = [account_names.get(aid, aid) for aid in note.affected_account_ids]
+        niif_sections += f"\n### Nota {i}: {note.title} ({note.niif_reference})\n\n{note.content}\n\n"
+        if affected:
+            niif_sections += f"*Cuentas afectadas: {', '.join(affected)}*\n"
+        niif_sections += "*Requiere revelacion obligatoria.*\n" if note.requires_disclosure else "*Nota informativa interna.*\n"
+
+    drivers_md = "".join(f"- {d}\n" for d in drivers[:8]) or "- Sin drivers materiales adicionales.\n"
+    recs_md = "".join(f"- {r}\n" for r in recommendations[:8]) or "- Mantener monitoreo periodico de riesgos, liquidez y concentracion.\n"
+    global_md = "".join(f"- {g}\n" for g in global_analysis[:10]) or "- Sin analisis global adicional disponible.\n"
+    table_md = "".join(
+        f"### {t.get('title', 'Tabla analizada')}\n\n{t.get('analysis', '')}\n\n"
+        for t in table_analyses
+    )
+
+    return (
+        f"<!-- CREDITIQ_REPORT\n"
+        f"{json.dumps(metadata, ensure_ascii=False, indent=2)}\n"
+        f"-->\n\n"
+        f"# {report.company_name} - Reporte Financiero CreditIQ\n\n"
+        f"*Periodo: {periods_str} | Generado: {report.generated_at.strftime('%Y-%m-%d %H:%M UTC')} "
+        f"| Score de Validacion: {report.validation_score}/100 | Riesgo Global: {_RISK_ES.get(risk, risk)}*\n\n"
+        f"---\n\n"
+        f"## Resumen Ejecutivo\n\n"
+        f"{report.executive_summary or '_Por generar_'}\n\n"
+        f"**Principales drivers del periodo:**\n\n"
+        f"{drivers_md}\n"
+        f"{anomaly_summary}\n\n"
+        f"---\n\n"
+        f"## Resumen para Junta Directiva\n\n"
+        f"{report.board_summary or '_Por generar_'}\n\n"
+        f"| Indicador | Resultado |\n"
+        f"|-----------|-----------|\n"
+        f"{board_rows}\n"
+        f"**Recomendaciones:**\n\n"
+        f"{recs_md}\n"
+        f"---\n\n"
+        f"## Analisis Global del Fondo\n\n"
+        f"{global_md}\n"
+        f"{table_md}"
+        f"---\n\n"
+        f"{_render_risk_section(report)}"
+        f"## Analisis de Variaciones por Cuenta\n\n"
+        f"| Cuenta | Valor Actual (COP MM) | Valor Anterior (COP MM) | Variacion % | Materialidad | Riesgo | Analisis ejecutivo |\n"
+        f"|--------|----------------------:|------------------------:|------------:|:------------:|:------:|--------------------|\n"
+        f"{accounts_rows or '_Sin cuentas analizadas_'}\n"
+        f"**Anomalias detectadas:** {anomaly_summary}\n\n"
+        f"---\n\n"
+        f"## Notas NIIF Requeridas\n"
+        f"{niif_sections or '_Sin notas requeridas_'}\n\n"
+        f"---\n\n"
+        f"## Indicadores de Cumplimiento\n\n"
+        f"- **Score de validacion:** {report.validation_score}/100\n"
+        f"- **Salud financiera:** {_HEALTH_ES.get(health, health)}\n"
+        f"- **Riesgo global:** {_RISK_ES.get(risk, risk)}\n"
+        f"- **Requiere revision humana:** {'Si' if human_review else 'No'}\n"
+        f"- **Confianza del analisis:** {sections.get('analysis_confidence_label', 'Alta' if report.validation_score >= 80 else 'Media' if report.validation_score >= 60 else 'Baja')}\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 # S3 operations
 # ---------------------------------------------------------------------------
@@ -228,6 +385,31 @@ def save_report(
         Key=key,
         Body=serialize_to_markdown(report).encode("utf-8"),
         ContentType="text/markdown; charset=utf-8",
+    )
+    return key
+
+
+def save_pdf_report(
+    report: FinalReportOutput,
+    bucket: str,
+    *,
+    s3_client=None,
+    expected_tenant_id: str = None,
+) -> str:
+    """Uploads a dependency-free PDF rendering of the final report to S3."""
+    if expected_tenant_id:
+        assert_report_tenant(report, expected_tenant_id)
+
+    client = s3_client or boto3.client("s3")
+    company_slug = slugify(report.company_name)
+    key = build_pdf_s3_key(report.tenant_id, company_slug, report.generated_at, report.job_id)
+    markdown = serialize_to_markdown(report)
+    pdf_bytes = markdown_to_pdf_bytes(markdown, title=f"{report.company_name} - CreditIQ")
+    client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=pdf_bytes,
+        ContentType="application/pdf",
     )
     return key
 
