@@ -388,6 +388,62 @@ async def list_jobs():
     return JSONResponse(content={"jobs": jobs})
 
 
+# ── AI Market Pulse ─────────────────────────────────────────────────────────────
+# Real-time dashboard data. Distinct from the per-job analysis pipeline: a global,
+# tenant-shared snapshot refreshed on a schedule. Read routes only ever serve the
+# cached pulse (never hit GNews/yfinance/TE on the request path).
+
+@app.get("/market/pulse")
+@app.get("/market/news")
+@app.get("/market/overview")
+@app.get("/market/signals")
+async def market_read(request: Request):
+    from api.market_read.handler import lambda_handler
+    return _resp(lambda_handler(_event(request, None), None))
+
+
+@app.post("/market/refresh")
+async def market_refresh():
+    """Force an immediate ingest → interpret cycle (manual / debugging)."""
+    from api.market_read.handler import refresh
+    try:
+        pulse = refresh()
+        return JSONResponse(content={"status": "refreshed", "as_of": pulse.get("as_of")})
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(content={"status": "error", "error": str(exc)}, status_code=500)
+
+
+def _market_refresh_loop() -> None:
+    """Background refresher: ingest+interpret every MARKET_REFRESH_SECONDS.
+
+    Each cycle is fully isolated — a failed source or a thrown refresh never kills
+    the loop, it just logs and waits for the next tick. The read endpoints keep
+    serving the last-good pulse meanwhile.
+    """
+    import time
+    from api.market_read.handler import refresh
+
+    interval = int(os.environ.get("MARKET_REFRESH_SECONDS", "300"))
+    while True:
+        try:
+            refresh()
+        except Exception as exc:
+            print(f"[market] refresh failed: {exc}")
+        time.sleep(interval)
+
+
+@app.on_event("startup")
+async def _start_market_refresh() -> None:
+    # Opt-out via MARKET_AUTO_REFRESH=false (e.g. when running without API keys).
+    if os.environ.get("MARKET_AUTO_REFRESH", "true").lower() != "true":
+        print("[market] auto-refresh disabled (MARKET_AUTO_REFRESH=false)")
+        return
+    threading.Thread(target=_market_refresh_loop, daemon=True).start()
+    print("[market] background refresh started")
+
+
 @app.delete("/analyses/{analysis_id}")
 async def cancel_analysis(analysis_id: str):
     """Stop any running background thread and mark the job as cancelled in S3."""
