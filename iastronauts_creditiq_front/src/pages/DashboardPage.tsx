@@ -41,11 +41,12 @@ const MARKET_METRICS = [
   },
   {
     label: 'TES 10Y',
-    value: '10.15%',
-    change: '+0.18%',
-    sign: 'up' as const,
-    color: '#f87171',
-    points: [14, 13, 15, 12, 16, 14, 17, 13, 15, 16],
+    value: '11.50%',
+    change: '',
+    note: 'as of May 2026',
+    sign: 'stable' as const,
+    color: '#94a3b8',
+    points: [11.5, 11.5],
   },
   {
     label: 'COLCAP',
@@ -57,19 +58,21 @@ const MARKET_METRICS = [
   },
   {
     label: 'Inflación (COL)',
-    value: '5.16%',
-    change: '-0.08%',
-    sign: 'down' as const,
-    color: '#f87171',
-    points: [18, 17, 18, 16, 17, 15, 16, 14, 15, 13],
-  },
-  {
-    label: 'Tasa BanRep ↑',
-    value: '11.75%',
-    change: '0.00%',
+    value: '5.35%',
+    change: '',
+    note: 'as of Jan 2026 · DANE',
     sign: 'stable' as const,
     color: '#94a3b8',
-    points: [12, 12, 12, 12, 12, 12, 12, 12, 12, 12],
+    points: [5.35, 5.35],
+  },
+  {
+    label: 'Tasa BanRep',
+    value: '9.25%',
+    change: '',
+    note: 'as of Apr 2026 · BanRep',
+    sign: 'stable' as const,
+    color: '#94a3b8',
+    points: [9.25, 9.25],
   },
 ]
 
@@ -170,6 +173,7 @@ interface MarketMetric {
   label: string
   value: string
   change: string
+  note?: string
   sign: 'up' | 'down' | 'stable'
   color: string
   points: number[]
@@ -185,6 +189,7 @@ function mapMetric(raw: unknown): MarketMetric | null {
     label: String(o.label),
     value: String(o.value ?? ''),
     change: String(o.change ?? ''),
+    note: o.note ? String(o.note) : undefined,
     sign,
     color: (o.color as string) ?? '#94a3b8',
     points: Array.isArray(o.points) ? (o.points as number[]) : [],
@@ -380,7 +385,7 @@ export default function DashboardPage() {
           highlight="interest rates stay elevated."
           subtitle="Colombian fixed-income funds may experience moderate pressure during the next quarter due to persistent inflation and treasury yield volatility."
           metrics={[
-            { icon: '🏦', label: 'BanRep rate', sub: 'Unchanged at 11.75%', accent: 'rgba(251,146,60,0.28)' },
+            { icon: '🏦', label: 'BanRep rate', sub: 'Held at 9.25%', accent: 'rgba(251,146,60,0.28)' },
             { icon: '📈', label: 'COLCAP Index', sub: '+0.71% this week', accent: 'rgba(34,197,94,0.28)' },
             { icon: '⚡', label: 'USD/COP Volatility', sub: 'Increasing', accent: 'rgba(239,68,68,0.28)' },
           ]}
@@ -429,16 +434,15 @@ export default function DashboardPage() {
                 <p style={{ margin: '0 0 4px', fontSize: 22, fontWeight: 700, color: '#f1f5f9', letterSpacing: '-0.02em' }}>
                   {m.value}
                 </p>
-                <p
-                  style={{
-                    margin: '0 0 8px',
-                    fontSize: 12,
-                    fontWeight: 600,
-                    color: m.sign === 'up' ? '#4ade80' : m.sign === 'down' ? '#f87171' : '#94a3b8',
-                  }}
-                >
-                  {m.sign === 'up' ? '▲' : m.sign === 'down' ? '▼' : '—'} {m.change}
-                </p>
+                {m.change ? (
+                  <p style={{ margin: '0 0 8px', fontSize: 12, fontWeight: 600, color: m.sign === 'up' ? '#4ade80' : m.sign === 'down' ? '#f87171' : '#94a3b8' }}>
+                    {m.sign === 'up' ? '▲' : m.sign === 'down' ? '▼' : '—'} {m.change}
+                  </p>
+                ) : (
+                  <p style={{ margin: '0 0 8px', fontSize: 11, color: '#475569' }}>
+                    {m.note ?? ''}
+                  </p>
+                )}
                 <Sparkline points={m.points} color={m.color} />
               </div>
             ))}

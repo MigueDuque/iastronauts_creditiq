@@ -37,12 +37,10 @@ logger.setLevel(logging.INFO)
 # provider-specific lookup (yfinance ticker, or TE indicator name). Keeping this
 # as data means fixing a wrong symbol is a one-line edit, not a logic change.
 METRICS: list[dict[str, Any]] = [
-    {"key": "USDCOP", "label": "USD / COP",       "provider": "yfinance", "ref": "COP=X",   "unit": "COP", "decimals": 2},
-    {"key": "COLCAP", "label": "COLCAP",          "provider": "yfinance", "ref": "^COLCAP", "unit": "pts", "decimals": 2},
-    {"key": "TES10Y", "label": "TES 10Y",         "provider": "te", "ref": "government bond 10y", "unit": "%", "decimals": 2},
-    {"key": "INFL",   "label": "Inflación (COL)", "provider": "te", "ref": "inflation rate",      "unit": "%", "decimals": 2},
-    {"key": "BANREP", "label": "Tasa BanRep",     "provider": "te", "ref": "interest rate",       "unit": "%", "decimals": 2},
+    {"key": "USDCOP", "label": "USD / COP", "provider": "yfinance", "ref": "COP=X",   "unit": "COP", "decimals": 2},
+    {"key": "COLCAP", "label": "COLCAP",    "provider": "yfinance", "ref": "^COLCAP", "unit": "pts", "decimals": 2},
 ]
+# TES10Y / INFL / BANREP come from macro_colombia.py (maintained constants).
 
 _DEFAULT_NEWS_QUERY = (
     "BanRep OR inflación OR TES OR COLCAP OR tasa de interés OR mercados"
@@ -202,6 +200,13 @@ def ingest() -> dict[str, Any]:
         except Exception as exc:
             logger.warning("ingest metric %s failed: %s", spec["key"], exc)
             errors.append({"key": spec["key"], "reason": f"{type(exc).__name__}: {exc}"})
+
+    # Macro indicators (TES10Y, INFL, BANREP) — maintained constants, never raises.
+    try:
+        from agents.market_ingestion.macro_colombia import fetch_macro_metrics
+        metrics.extend(fetch_macro_metrics())
+    except Exception as exc:
+        logger.warning("macro_colombia failed: %s", exc)
 
     news: list[dict[str, Any]] = []
     try:

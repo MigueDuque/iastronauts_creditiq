@@ -84,6 +84,21 @@ def _classify(change_pct: float) -> tuple[str, str]:
     return "down", _RED
 
 
+_MONTHS = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _as_of_note(as_of: str, source: str) -> str:
+    """Format 'as of Apr 2026 · BanRep' from an ISO date and source name."""
+    parts = as_of.split("-")
+    try:
+        label = f"{_MONTHS[int(parts[1])]} {parts[0]}" if len(parts) >= 2 else as_of
+    except (IndexError, ValueError):
+        label = as_of
+    src = source.split(" (")[0].strip()
+    return f"as of {label} · {src}" if src else f"as of {label}"
+
+
 # ── Deterministic pass ───────────────────────────────────────────────────────────
 
 def _build_overview(
@@ -105,12 +120,22 @@ def _build_overview(
         if m:
             change_pct = m["change_pct"]
             sign, color = _classify(change_pct)
+            # Constant-backed macro cards carry an as_of date; show it as a note
+            # instead of a misleading "+0.00%" change line.
+            as_of = m.get("as_of")
+            if as_of and as_of != "live":
+                note = _as_of_note(as_of, m.get("source", ""))
+                change_str = ""
+            else:
+                note = ""
+                change_str = f"{change_pct:+.2f}%"
             card = {
                 "key": m["key"],
                 "label": m["label"],
                 "value": _fmt_value(m["value"], m["unit"]),
                 "raw": m["value"],
-                "change": f"{change_pct:+.2f}%",
+                "change": change_str,
+                "note": note,
                 "change_pct": change_pct,
                 "sign": sign,
                 "color": color,

@@ -393,6 +393,12 @@ async def list_jobs():
 # tenant-shared snapshot refreshed on a schedule. Read routes only ever serve the
 # cached pulse (never hit GNews/yfinance/TE on the request path).
 
+@app.get("/market/data")
+async def market_data(request: Request):
+    from api.market_data.handler import lambda_handler
+    return _resp(lambda_handler(_event(request, None), None))
+
+
 @app.get("/market/pulse")
 @app.get("/market/news")
 @app.get("/market/overview")
