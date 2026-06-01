@@ -127,8 +127,7 @@ export default function Sidebar({ mobileOpen, onClose, onUploadClick }: SidebarP
       {/* Nav items */}
       <nav style={{ flex: 1 }}>
         {NAV_ITEMS.map((item) => {
-          // treat /markets, /watchlist, /alerts, /settings as placeholder (no real route)
-          const isPlaceholder = !['/','analysis'].some(p => item.path === p || item.path === '/analysis')
+          const isPlaceholder = !['/', '/analysis', '/markets'].includes(item.path)
           const active = pathname === item.path
 
           const content = (
@@ -233,25 +232,25 @@ export default function Sidebar({ mobileOpen, onClose, onUploadClick }: SidebarP
             border: '1px solid rgba(59,130,246,0.2)',
             background: 'rgba(59,130,246,0.06)',
             color: '#94a3b8',
-            fontSize: 13,
+            fontSize: 15,
             fontWeight: 500,
             cursor: 'pointer',
             fontFamily: 'inherit',
             transition: 'all 0.15s',
           }}
           onMouseEnter={(e) => {
-            ;(e.currentTarget as HTMLButtonElement).style.background = 'rgba(59,130,246,0.12)'
-            ;(e.currentTarget as HTMLButtonElement).style.color = '#e2e8f0'
+            ; (e.currentTarget as HTMLButtonElement).style.background = 'rgba(59,130,246,0.12)'
+              ; (e.currentTarget as HTMLButtonElement).style.color = '#e2e8f0'
           }}
           onMouseLeave={(e) => {
-            ;(e.currentTarget as HTMLButtonElement).style.background = 'rgba(59,130,246,0.06)'
-            ;(e.currentTarget as HTMLButtonElement).style.color = '#94a3b8'
+            ; (e.currentTarget as HTMLButtonElement).style.background = 'rgba(59,130,246,0.06)'
+              ; (e.currentTarget as HTMLButtonElement).style.color = '#94a3b8'
           }}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style={{ color: '#38bdf8' }}>
             <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
           </svg>
-          Ask AI anything
+          Upload File
         </button>
       </Box>
     </Box>

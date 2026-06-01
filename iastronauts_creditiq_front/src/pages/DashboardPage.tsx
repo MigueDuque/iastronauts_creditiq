@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
+import EarthIntelligenceCard from '../components/EarthIntelligenceCard'
 
 /* ─── tiny sparkline component ─────────────────────────────────────────────── */
 function Sparkline({
@@ -40,11 +41,12 @@ const MARKET_METRICS = [
   },
   {
     label: 'TES 10Y',
-    value: '10.15%',
-    change: '+0.18%',
-    sign: 'up' as const,
-    color: '#f87171',
-    points: [14, 13, 15, 12, 16, 14, 17, 13, 15, 16],
+    value: '11.50%',
+    change: '',
+    note: 'as of May 2026',
+    sign: 'stable' as const,
+    color: '#94a3b8',
+    points: [11.5, 11.5],
   },
   {
     label: 'COLCAP',
@@ -56,19 +58,21 @@ const MARKET_METRICS = [
   },
   {
     label: 'Inflación (COL)',
-    value: '5.16%',
-    change: '-0.08%',
-    sign: 'down' as const,
-    color: '#f87171',
-    points: [18, 17, 18, 16, 17, 15, 16, 14, 15, 13],
-  },
-  {
-    label: 'Tasa BanRep ↑',
-    value: '11.75%',
-    change: '0.00%',
+    value: '5.35%',
+    change: '',
+    note: 'as of Jan 2026 · DANE',
     sign: 'stable' as const,
     color: '#94a3b8',
-    points: [12, 12, 12, 12, 12, 12, 12, 12, 12, 12],
+    points: [5.35, 5.35],
+  },
+  {
+    label: 'Tasa BanRep',
+    value: '9.25%',
+    change: '',
+    note: 'as of Apr 2026 · BanRep',
+    sign: 'stable' as const,
+    color: '#94a3b8',
+    points: [9.25, 9.25],
   },
 ]
 
@@ -112,6 +116,85 @@ const AI_SIGNALS = [
     cta: 'View insight →',
   },
 ]
+
+/* ─── AI signal icons by impact category ─────────────────────────────────────── */
+// Backend returns a `category` (Monetary Policy | Fixed Income | Global Outlook);
+// the JSX icon + accent colors live here on the client (they can't cross the wire).
+const TREND_ICON = (
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="22 7 13.5 15.5 8.5 10.5 2 17" />
+    <polyline points="16 7 22 7 22 13" />
+  </svg>
+)
+const SHIELD_ICON = (
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+  </svg>
+)
+const GLOBE_ICON = (
+  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="3" />
+    <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
+  </svg>
+)
+
+const SIGNAL_STYLE_BY_CATEGORY: Record<string, { icon: ReactNode; bg: string; color: string }> = {
+  'Fixed Income': { icon: TREND_ICON, bg: 'rgba(251, 146, 60, 0.15)', color: '#fb923c' },
+  'Monetary Policy': { icon: SHIELD_ICON, bg: 'rgba(34, 197, 94, 0.15)', color: '#22c55e' },
+  'Global Outlook': { icon: GLOBE_ICON, bg: 'rgba(99, 102, 241, 0.18)', color: '#818cf8' },
+}
+
+interface Signal {
+  icon: ReactNode
+  bg: string
+  color: string
+  title: string
+  desc: string
+  cta: string
+}
+
+/** Map a backend pulse signal onto a render-ready card (injects icon by category). */
+function mapSignal(raw: unknown): Signal | null {
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  const title = o.title as string | undefined
+  if (!title) return null
+  const category = (o.category as string) ?? 'Global Outlook'
+  const style = SIGNAL_STYLE_BY_CATEGORY[category] ?? SIGNAL_STYLE_BY_CATEGORY['Global Outlook']
+  return {
+    ...style,
+    title,
+    desc: (o.desc as string) ?? '',
+    cta: 'View insight →',
+  }
+}
+
+interface MarketMetric {
+  label: string
+  value: string
+  change: string
+  note?: string
+  sign: 'up' | 'down' | 'stable'
+  color: string
+  points: number[]
+}
+
+/** Map a backend overview card onto our MarketMetric shape (already near-identical). */
+function mapMetric(raw: unknown): MarketMetric | null {
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  if (!o.label) return null
+  const sign = o.sign === 'up' || o.sign === 'down' ? o.sign : 'stable'
+  return {
+    label: String(o.label),
+    value: String(o.value ?? ''),
+    change: String(o.change ?? ''),
+    note: o.note ? String(o.note) : undefined,
+    sign,
+    color: (o.color as string) ?? '#94a3b8',
+    points: Array.isArray(o.points) ? (o.points as number[]) : [],
+  }
+}
 
 interface NewsItem {
   thumb?: string
@@ -194,22 +277,35 @@ export default function DashboardPage() {
     return () => clearInterval(t)
   }, [])
 
-  // Live market news (real-time, unlike the date-anchored news used during analysis).
-  // Falls back to FALLBACK_NEWS when no endpoint is configured or the request fails.
+  // Live Market Pulse: one /market/pulse call drives all three cards (overview,
+  // AI signals, news). The hardcoded arrays remain the fallback when no endpoint
+  // is configured, the request fails, or the backend has no cached pulse yet.
+  const [overview, setOverview] = useState<MarketMetric[]>(MARKET_METRICS)
+  const [signals, setSignals] = useState<Signal[]>(AI_SIGNALS)
   const [news, setNews] = useState<NewsItem[]>(FALLBACK_NEWS)
   useEffect(() => {
     if (!API) return
     let alive = true
     const load = async () => {
       try {
-        const res = await fetch(`${API}/market/news`)
+        const res = await fetch(`${API}/market/pulse`)
+        // 503 = no cached pulse yet → keep showing fallback data.
         if (!res.ok || !alive) return
         const data = await res.json()
-        const raw: unknown[] = Array.isArray(data) ? data : data?.news ?? data?.articles ?? []
-        const items = raw.map(normalizeNews).filter((n): n is NewsItem => n !== null).slice(0, 3)
+
+        const metrics = (Array.isArray(data?.overview) ? data.overview : [])
+          .map(mapMetric).filter((m: MarketMetric | null): m is MarketMetric => m !== null)
+        if (alive && metrics.length) setOverview(metrics)
+
+        const sigs = (Array.isArray(data?.signals) ? data.signals : [])
+          .map(mapSignal).filter((s: Signal | null): s is Signal => s !== null)
+        if (alive && sigs.length) setSignals(sigs)
+
+        const rawNews: unknown[] = Array.isArray(data?.news) ? data.news : []
+        const items = rawNews.map(normalizeNews).filter((n): n is NewsItem => n !== null).slice(0, 3)
         if (alive && items.length) setNews(items)
       } catch (e) {
-        console.error('[news]', e)
+        console.error('[pulse]', e)
       }
     }
     load()
@@ -281,165 +377,19 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* ── HERO CARD ────────────────────────────────────────────────────────── */}
+      {/* ── HERO CARD (Earth-anchored financial command center) ─────────────── */}
       <div style={{ padding: '20px 32px 0' }}>
-        <div
-          style={{
-            borderRadius: 16,
-            overflow: 'hidden',
-            position: 'relative',
-            minHeight: 320,
-            background: 'linear-gradient(135deg, #0d1635 0%, #0a1528 60%, #071020 100%)',
-            border: '1px solid rgba(59,130,246,0.14)',
-            display: 'flex',
-          }}
-        >
-          {/* subtle grid overlay */}
-          <div
-            style={{
-              position: 'absolute',
-              inset: 0,
-              backgroundImage:
-                'linear-gradient(rgba(59,130,246,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(59,130,246,0.03) 1px, transparent 1px)',
-              backgroundSize: '40px 40px',
-              pointerEvents: 'none',
-            }}
-          />
-
-          {/* LEFT content */}
-          <div style={{ flex: 1, padding: '36px 40px', position: 'relative', zIndex: 2, maxWidth: 620 }}>
-            {/* Badge */}
-            <div
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 6,
-                fontSize: 11,
-                fontWeight: 600,
-                letterSpacing: '0.1em',
-                textTransform: 'uppercase',
-                color: '#38bdf8',
-                marginBottom: 16,
-              }}
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-              </svg>
-              AI MARKET PULSE
-            </div>
-
-            {/* Headline */}
-            <h1
-              style={{
-                fontSize: 'clamp(26px, 3.5vw, 40px)',
-                fontWeight: 800,
-                lineHeight: 1.15,
-                margin: '0 0 8px',
-                color: '#f8fafc',
-                letterSpacing: '-0.02em',
-              }}
-            >
-              Global markets remain cautious
-              <br />
-              as{' '}
-              <span style={{ color: '#38bdf8' }}>interest rates stay elevated.</span>
-            </h1>
-
-            {/* Sub */}
-            <p style={{ fontSize: 14, color: '#94a3b8', lineHeight: 1.65, maxWidth: 480, marginBottom: 28 }}>
-              Colombian fixed-income funds may experience moderate pressure during the next quarter
-              due to persistent inflation and treasury yield volatility.
-            </p>
-
-            {/* Mini metric pills — always 3 in a row */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
-              {[
-                { icon: '🏦', label: 'BanRep rate', sub: 'Unchanged at 11.75%', color: 'rgba(251,146,60,0.12)', border: 'rgba(251,146,60,0.25)' },
-                { icon: '📈', label: 'COLCAP Index', sub: '+0.71% this week', color: 'rgba(34,197,94,0.1)', border: 'rgba(34,197,94,0.25)' },
-                { icon: '⚡', label: 'USD/COP Volatility', sub: 'Increasing', color: 'rgba(239,68,68,0.1)', border: 'rgba(239,68,68,0.25)' },
-              ].map((p) => (
-                <div
-                  key={p.label}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 10,
-                    padding: '10px 14px',
-                    borderRadius: 10,
-                    background: p.color,
-                    border: `1px solid ${p.border}`,
-                  }}
-                >
-                  <span style={{ fontSize: 18, flexShrink: 0 }}>{p.icon}</span>
-                  <div style={{ minWidth: 0 }}>
-                    <p style={{ margin: 0, fontSize: 12, fontWeight: 600, color: '#e2e8f0', whiteSpace: 'nowrap' }}>{p.label}</p>
-                    <p style={{ margin: 0, fontSize: 11, color: '#94a3b8', whiteSpace: 'nowrap' }}>{p.sub}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Earth globe — tucked into the bottom-right corner. Only ~a quarter
-              is visible; the rest is clipped by the card (overflow:hidden) and sits
-              BEHIND the content (zIndex 1 < content zIndex 2), never in front.
-              Tune position with `right` (gap from edge) and `bottom` (how much shows). */}
-          <div
-            style={{
-              position: 'absolute',
-              right: 10,        // small gap — "a bit separate from the right side"
-              bottom: -200,     // sink ~3/4 of the sphere below the card, leaving a quarter
-              width: 440,
-              height: 440,
-              zIndex: 1,
-              pointerEvents: 'none',
-            }}
-          >
-            {/* Atmospheric limb glow */}
-            <div
-              style={{
-                position: 'absolute',
-                inset: '-10%',
-                borderRadius: '50%',
-                background:
-                  'radial-gradient(circle at 50% 36%, rgba(96,165,250,0.22) 0%, rgba(56,189,248,0.10) 42%, transparent 66%)',
-                filter: 'blur(36px)',
-              }}
-            />
-
-            {/* Earth */}
-            <div
-              style={{
-                position: 'absolute',
-                inset: 0,
-                borderRadius: '50%',
-                overflow: 'hidden',
-                filter:
-                  'drop-shadow(0 30px 50px rgba(0,0,0,0.5)) drop-shadow(-6px 10px 30px rgba(14,165,233,0.14))',
-                animation: 'globeFloat 9s ease-in-out infinite',
-              }}
-            >
-              <img
-                src="/earth_globe.png"
-                alt="Earth globe"
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'cover',
-                  display: 'block',
-                  filter: 'brightness(0.92) saturate(1.05) contrast(1.7)',
-                }}
-              />
-            </div>
-
-            <style>{`
-              @keyframes globeFloat {
-                0%, 100% { transform: translateY(0px); }
-                50% { transform: translateY(-10px); }
-              }
-            `}</style>
-          </div>
-        </div>
+        <EarthIntelligenceCard
+          eyebrow="AI MARKET PULSE"
+          title="Global markets remain cautious as"
+          highlight="interest rates stay elevated."
+          subtitle="Colombian fixed-income funds may experience moderate pressure during the next quarter due to persistent inflation and treasury yield volatility."
+          metrics={[
+            { icon: '🏦', label: 'BanRep rate', sub: 'Held at 9.25%', accent: 'rgba(251,146,60,0.28)' },
+            { icon: '📈', label: 'COLCAP Index', sub: '+0.71% this week', accent: 'rgba(34,197,94,0.28)' },
+            { icon: '⚡', label: 'USD/COP Volatility', sub: 'Increasing', accent: 'rgba(239,68,68,0.28)' },
+          ]}
+        />
       </div>
 
       {/* ── MARKET OVERVIEW STRIP ────────────────────────────────────────────── */}
@@ -470,12 +420,12 @@ export default function DashboardPage() {
               gap: 0,
             }}
           >
-            {MARKET_METRICS.map((m, i) => (
+            {overview.map((m, i) => (
               <div
                 key={m.label}
                 style={{
                   padding: '16px 28px',
-                  borderRight: i < MARKET_METRICS.length - 1 ? '1px solid rgba(59,130,246,0.07)' : 'none',
+                  borderRight: i < overview.length - 1 ? '1px solid rgba(59,130,246,0.07)' : 'none',
                 }}
               >
                 <p style={{ margin: '0 0 4px', fontSize: 11, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
@@ -484,16 +434,15 @@ export default function DashboardPage() {
                 <p style={{ margin: '0 0 4px', fontSize: 22, fontWeight: 700, color: '#f1f5f9', letterSpacing: '-0.02em' }}>
                   {m.value}
                 </p>
-                <p
-                  style={{
-                    margin: '0 0 8px',
-                    fontSize: 12,
-                    fontWeight: 600,
-                    color: m.sign === 'up' ? '#4ade80' : m.sign === 'down' ? '#f87171' : '#94a3b8',
-                  }}
-                >
-                  {m.sign === 'up' ? '▲' : m.sign === 'down' ? '▼' : '—'} {m.change}
-                </p>
+                {m.change ? (
+                  <p style={{ margin: '0 0 8px', fontSize: 12, fontWeight: 600, color: m.sign === 'up' ? '#4ade80' : m.sign === 'down' ? '#f87171' : '#94a3b8' }}>
+                    {m.sign === 'up' ? '▲' : m.sign === 'down' ? '▼' : '—'} {m.change}
+                  </p>
+                ) : (
+                  <p style={{ margin: '0 0 8px', fontSize: 11, color: '#475569' }}>
+                    {m.note ?? ''}
+                  </p>
+                )}
                 <Sparkline points={m.points} color={m.color} />
               </div>
             ))}
@@ -517,7 +466,7 @@ export default function DashboardPage() {
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, flex: 1 }}>
-            {AI_SIGNALS.map((s) => (
+            {signals.map((s) => (
               <div
                 key={s.title}
                 style={{
