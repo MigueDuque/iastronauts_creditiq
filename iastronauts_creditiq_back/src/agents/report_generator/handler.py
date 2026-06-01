@@ -8,7 +8,7 @@ from datetime import datetime
 
 import boto3
 
-from shared.job_store import REPORT_GENERATOR, save as job_save, save_bytes as job_save_bytes
+from shared.job_store import EXTRACTOR, REPORT_GENERATOR, save as job_save, save_bytes as job_save_bytes, load as job_load
 from shared.llm_provider import LLMProvider
 from shared.models import ScorerOutput, FinalReportOutput, NiifNoteDraft
 from shared.s3_instructions import load_text
@@ -129,6 +129,142 @@ def _build_niif_notes(payload: ScorerOutput) -> list[NiifNoteDraft]:
 _PLACEHOLDER_RE = re.compile(r"\{\{([A-Z0-9_]+)\}\}")
 # Instruction markers ~~text~~ are stripped from the final document deterministically.
 _INSTRUCTION_RE = re.compile(r"~~.+?~~", re.DOTALL)
+# Detects row-based placeholder tables: PREFIX_Rn_Cm
+_ROW_PH_RE = re.compile(r"\{\{([A-Z0-9]+)_R(\d+)_C\d+\}\}")
+# Hard cap: never expand a table beyond this many data rows.
+_MAX_TABLE_ROWS = 30
+
+_INCOME_KW = ("ingreso", "gasto", "costo", "utilidad", "resultado", "pérdida", "perdida", "comisi")
+
+
+# ---------------------------------------------------------------------------
+# Extractor output helpers
+# ---------------------------------------------------------------------------
+
+def _classify_extractor_account(acc: dict) -> str:
+    """Classify a raw extractor account dict as balance_sheet or income_statement."""
+    cat = (acc.get("category") or "").lower()
+    if cat in ("revenue", "expense"):
+        return "income_statement"
+    name = (acc.get("normalized_account_name") or acc.get("raw_account_name") or "").lower()
+    if any(k in name for k in _INCOME_KW):
+        return "income_statement"
+    return "balance_sheet"
+
+
+def _compute_row_needs(extractor_accounts: list[dict]) -> dict[str, int]:
+    """Return how many rows each dynamic table needs, based on raw extractor accounts."""
+    bs = [a for a in extractor_accounts
+          if _classify_extractor_account(a) == "balance_sheet" and not a.get("is_total")]
+    is_ = [a for a in extractor_accounts
+           if _classify_extractor_account(a) == "income_statement" and not a.get("is_total")]
+    inv = [a for a in extractor_accounts
+           if a.get("investment_type") or "invers" in (a.get("normalized_account_name") or "").lower()]
+    return {
+        "BS":       max(6,  len(bs)),
+        "IS_ACC":   max(8,  len(is_)),
+        "IS_Q2":    max(8,  len(is_)),
+        "PORTFOLIO": max(10, len(inv)),
+    }
+
+
+def _load_extractor_accounts(job_id: str) -> list[dict]:
+    """Load Agent 1 output from S3 and return the accounts list. Empty list on any error."""
+    try:
+        raw = job_load(job_id, EXTRACTOR)
+        accounts = raw.get("accounts") or []
+        logger.info("extractor_accounts | job=%s count=%d", job_id, len(accounts))
+        return accounts
+    except Exception as exc:
+        logger.warning("extractor_accounts | job=%s load_failed=%s", job_id, exc)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Dynamic table-row expansion
+# ---------------------------------------------------------------------------
+
+def _detect_table_row_info(table) -> tuple[str, int] | None:
+    """Return (prefix, max_row_in_template) if the table uses PREFIX_Rn_Cm placeholders."""
+    prefix: str | None = None
+    max_row = 0
+    for row in table.rows:
+        for cell in row.cells:
+            for para in cell.paragraphs:
+                full = "".join(r.text for r in para.runs)
+                for m in _ROW_PH_RE.finditer(full):
+                    p, rn = m.group(1), int(m.group(2))
+                    if prefix is None:
+                        prefix = p
+                    if rn > max_row:
+                        max_row = rn
+    return (prefix, max_row) if prefix and max_row > 0 else None
+
+
+def _expand_docx_table(table, current_n: int, target_n: int, prefix: str) -> None:
+    """Clone the last data row of *table* until the table has *target_n* data rows.
+
+    The last row that contains ``{{PREFIX_R{current_n}_Cx}}`` is treated as the
+    template row. Each clone renames those placeholders to the next row number
+    so the field-map can fill every row deterministically.
+    """
+    import copy
+    _W_T = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"
+
+    # Find the tr element that anchors the last template row.
+    anchor_tr = None
+    for row in table.rows:
+        texts = ["".join(r.text for r in para.runs)
+                 for cell in row.cells for para in cell.paragraphs]
+        if any(f"{prefix}_R{current_n}_" in t for t in texts):
+            anchor_tr = row._tr
+            break
+
+    if anchor_tr is None:
+        logger.warning("expand_table | prefix=%s anchor R%d not found", prefix, current_n)
+        return
+
+    old_marker = f"{prefix}_R{current_n}_"
+    for new_r in range(current_n + 1, target_n + 1):
+        new_tr = copy.deepcopy(anchor_tr)
+        new_marker = f"{prefix}_R{new_r}_"
+        for t_elem in new_tr.iter(_W_T):
+            if t_elem.text and old_marker in t_elem.text:
+                t_elem.text = t_elem.text.replace(old_marker, new_marker)
+        table._tbl.append(new_tr)
+
+
+def _expand_all_tables(docx_bytes: bytes, row_needs: dict[str, int]) -> bytes:
+    """Return docx bytes with every PREFIX_Rn_Cm table expanded to meet *row_needs*."""
+    try:
+        from docx import Document as _DocxDoc
+    except ImportError:
+        return docx_bytes
+
+    if not row_needs:
+        return docx_bytes
+
+    doc = _DocxDoc(io.BytesIO(docx_bytes))
+
+    def _process(table):
+        info = _detect_table_row_info(table)
+        if info:
+            prefix, current_n = info
+            target_n = min(row_needs.get(prefix, 0), _MAX_TABLE_ROWS)
+            if target_n > current_n:
+                logger.info("expand_table | prefix=%s rows %d→%d", prefix, current_n, target_n)
+                _expand_docx_table(table, current_n, target_n, prefix)
+        for row in table.rows:
+            for cell in row.cells:
+                for nested in cell.tables:
+                    _process(nested)
+
+    for table in doc.tables:
+        _process(table)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
 
 
 def _extract_placeholders(docx_bytes: bytes) -> list[str]:
@@ -336,7 +472,7 @@ def _get_system_prompt() -> str:
 # LLM field generation
 # ---------------------------------------------------------------------------
 
-def _build_llm_digest(payload: ScorerOutput, historical: list) -> str:
+def _build_llm_digest(payload: ScorerOutput, historical: list, extractor_accounts: list[dict] | None = None) -> str:
     """Build a compact text digest for the LLM (~3000 tokens max)."""
     risk = _enum(payload.overall_risk_score)
     health = _enum(payload.overall_financial_health)
@@ -472,6 +608,36 @@ def _build_llm_digest(payload: ScorerOutput, historical: list) -> str:
             lines.append(f"- {r}")
         lines.append("")
 
+    # Extractor accounts grouped by source_sheet — gives the LLM the raw sheet
+    # structure that the Word template tables directly mirror (e.g. Inversiones,
+    # Balance, Resultados). Capped per sheet to stay within token budget.
+    if extractor_accounts:
+        from collections import defaultdict as _dd
+        by_sheet: dict[str, list] = _dd(list)
+        for acc in extractor_accounts:
+            sheet = acc.get("source_sheet") or "Sin hoja"
+            by_sheet[sheet].append(acc)
+        lines.append("## CUENTAS POR HOJA (EXTRACTOR)")
+        for sheet, accs in sorted(by_sheet.items()):
+            lines.append(f"### Hoja: {sheet} ({len(accs)} cuentas)")
+            for acc in accs[:20]:  # cap per sheet
+                cur = acc.get("current_value")
+                prev = acc.get("previous_value")
+                name = acc.get("normalized_account_name") or acc.get("raw_account_name") or "—"
+                inv_type = acc.get("investment_type") or ""
+                issuer = acc.get("issuer_name") or ""
+                label = f"{name}"
+                if issuer:
+                    label += f" ({issuer})"
+                if inv_type:
+                    label += f" [{inv_type}]"
+                cur_s = f"{float(cur):,.1f}" if cur is not None else "N/D"
+                prev_s = f"{float(prev):,.1f}" if prev is not None else "N/D"
+                lines.append(f"- {label}: {cur_s} / {prev_s}")
+            if len(accs) > 20:
+                lines.append(f"  … y {len(accs) - 20} más")
+        lines.append("")
+
     return "\n".join(lines)
 
 
@@ -546,23 +712,33 @@ def lambda_handler(event: dict, context) -> dict:
         bucket=bucket,
     )
 
-    digest = _build_llm_digest(payload, historical)
+    # Load Agent 1 raw accounts to drive dynamic table expansion and richer LLM context.
+    extractor_accounts = _load_extractor_accounts(payload.job_id)
+    row_needs = _compute_row_needs(extractor_accounts) if extractor_accounts else {}
+
+    digest = _build_llm_digest(payload, historical, extractor_accounts=extractor_accounts)
 
     # ── .docx template flow ──────────────────────────────────────────────────
     docx_s3_url: str | None = None
     template_bytes = load_docx_template(bucket)
 
     if template_bytes:
+        # Expand tables that have fewer rows than the extractor found accounts for.
+        # This must happen BEFORE placeholder extraction so the new rows are discovered.
+        if row_needs:
+            template_bytes = _expand_all_tables(template_bytes, row_needs)
+
         placeholders = _extract_placeholders(template_bytes)
         narrative = [p for p in placeholders if is_narrative_field(p)]
         logger.info(
-            "docx_template | job=%s placeholders=%d narrative=%d",
-            payload.job_id, len(placeholders), len(narrative),
+            "docx_template | job=%s placeholders=%d narrative=%d row_needs=%s",
+            payload.job_id, len(placeholders), len(narrative), row_needs,
         )
 
         # 1. Deterministic calculated cells — the bulk of the template (tables, KPIs).
         det_map = build_deterministic_fields(
-            payload, generated_at=reference_date, job_id=payload.job_id
+            payload, generated_at=reference_date, job_id=payload.job_id,
+            row_needs=row_needs,
         )
         # 2. Deterministic narrative fallbacks — used if the LLM omits/fails a field.
         fallback_map = build_narrative_fallbacks(payload)

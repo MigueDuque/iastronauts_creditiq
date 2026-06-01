@@ -236,10 +236,18 @@ def build_deterministic_fields(
     *,
     generated_at: datetime | None = None,
     job_id: str | None = None,
+    row_needs: dict[str, int] | None = None,
 ) -> dict[str, str]:
-    """Return every deterministic (calculated) placeholder → string value."""
+    """Return every deterministic (calculated) placeholder → string value.
+
+    *row_needs* maps table prefix → number of data rows actually needed (derived
+    from Agent 1 extractor output).  When provided the table-filling functions use
+    it instead of their hardcoded defaults, so every row that was added dynamically
+    by ``_expand_all_tables`` gets a real value rather than remaining blank.
+    """
     generated_at = generated_at or datetime.utcnow()
     job_id = job_id or _attr(payload, "job_id") or ""
+    rn = row_needs or {}
     fields: dict[str, str] = {}
 
     cur_p, prev_p = _periods(payload)
@@ -252,9 +260,9 @@ def build_deterministic_fields(
     _cover(fields, payload, cur_p, prev_p, gen_date, is_fund, health, val_score, job_id)
     _entity_info(fields, payload, cur_p, is_fund, risk, health)
     _macro(fields, payload)
-    _balance(fields, payload)
-    _income(fields, payload)
-    _portfolio(fields, payload)
+    _balance(fields, payload, rn.get("BS", 6))
+    _income(fields, payload, rn.get("IS_ACC", 8))
+    _portfolio(fields, payload, rn.get("PORTFOLIO", 10))
     _fair_value(fields)
     _nav(fields, payload)
     _findings_meta(fields, payload)
@@ -311,11 +319,11 @@ def _macro(fields, payload):
     cell("fx_usdcop", "KPI_TRM")
 
 
-def _balance(fields, payload):
+def _balance(fields, payload, n_rows: int = 6):
     accounts = _accounts(payload, "balance_sheet")
     accounts.sort(key=lambda a: (1 if _attr(a, "is_total") else 0, -(_f(_attr(a, "impact_score")) or 0)))
     _fill_rows(
-        fields, "BS", 6, 6, accounts,
+        fields, "BS", n_rows, 6, accounts,
         lambda a: [
             _attr(a, "account_name") or ND,
             _miles(_attr(a, "current_value")),
@@ -327,11 +335,11 @@ def _balance(fields, payload):
     )
 
 
-def _income(fields, payload):
+def _income(fields, payload, n_rows: int = 8):
     accounts = _accounts(payload, "income_statement")
     accounts.sort(key=lambda a: (1 if _attr(a, "is_total") else 0, -(_f(_attr(a, "impact_score")) or 0)))
     _fill_rows(
-        fields, "IS_ACC", 8, 5, accounts,
+        fields, "IS_ACC", n_rows, 5, accounts,
         lambda a: [
             _attr(a, "account_name") or ND,
             _miles(_attr(a, "current_value")),
@@ -342,12 +350,12 @@ def _income(fields, payload):
     )
     # Quarterly split is not produced upstream — keep concept labels, mark values N/D.
     _fill_rows(
-        fields, "IS_Q2", 8, 5, accounts,
+        fields, "IS_Q2", n_rows, 5, accounts,
         lambda a: [_attr(a, "account_name") or ND, ND, ND, ND, ND],
     )
 
 
-def _portfolio(fields, payload):
+def _portfolio(fields, payload, n_rows: int = 10):
     sc = _attr(payload, "sheet_concentration") or {}
     breakdown = sc.get("instrument_breakdown") or []
     totals = (_attr(payload, "financial_ratios") or {}).get("totals") or {}
@@ -368,15 +376,13 @@ def _portfolio(fields, payload):
 
     holdings = [h for h in _accounts(payload, with_investment=True) if not _attr(h, "is_total")]
     if not holdings:
-        # Fallback when investment_type is not populated: pick accounts that look
-        # like investment positions by name.
         holdings = [
             h for h in _accounts(payload)
             if not _attr(h, "is_total") and "invers" in (_attr(h, "account_name") or "").lower()
         ]
     holdings.sort(key=lambda a: -(_f(_attr(a, "current_value")) or 0))
     _fill_rows(
-        fields, "PORTFOLIO", 10, 6, holdings,
+        fields, "PORTFOLIO", n_rows, 6, holdings,
         lambda a: [
             _attr(a, "issuer_name") or _attr(a, "account_name") or ND,
             _INSTRUMENT_ES.get(str(_attr(a, "investment_type")), str(_attr(a, "investment_type") or ND)),
