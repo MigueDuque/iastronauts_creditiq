@@ -1,4 +1,4 @@
-import { useEffect, useRef, type CSSProperties } from 'react';
+import { useEffect, useRef, type CSSProperties, type RefObject } from 'react';
 
 /**
  * EarthIntelligenceCard — the "AI MARKET PULSE" hero card.
@@ -85,14 +85,14 @@ export default function EarthIntelligenceCard({
   earthMinSize = 300,
   earthMaxSize = 500,
   earthViewportWidth = 150,
-  rotation = 0,
+  rotation = 45,
   imageSrc = '/earth_globe.png',
   overlayOpacity = 1.7,
   overlayBlur = 0,
   overlayDirection = 'to top right',
 }: EarthIntelligenceCardProps) {
   const cardRef = useRef<HTMLDivElement>(null);
-  const earthRef = useRef<HTMLDivElement>(null);
+  const earthRef = useRef<HTMLImageElement>(null);
   const rafRef = useRef<number>(0);
   const startRef = useRef<number>(0);
   /** Latest clamped horizontal offset (px). Held in a ref so the rAF loop
@@ -161,33 +161,29 @@ export default function EarthIntelligenceCard({
 
   // Earth anchored at the card's horizontal center; the dynamic translateX then
   // pushes it toward the right, where it is partially clipped by the edge.
-  // Responsive sizing: width = clamp(min, Nvw, max) so the Earth shrinks on
-  // narrow screens and is capped on wide ones; aspect-ratio keeps it circular.
+  // Using an <img> (replaced element) guarantees intrinsic dimensions are
+  // respected — a background-image div with height:auto can collapse to 0.
+  const earthSizeClamp = `clamp(${earthMinSize}px, ${earthViewportWidth}vw, ${earthMaxSize}px)`;
   const earthStyle: CSSProperties = {
     position: 'absolute',
     top: '50%',
     left: '50%',
-    width: `clamp(${earthMinSize}px, ${earthViewportWidth}vw, ${earthMaxSize}px)`,
-    height: 'auto',
-    aspectRatio: '1 / 1',
+    width: earthSizeClamp,
+    height: earthSizeClamp,
     borderRadius: '50%',
+    objectFit: 'cover',
     transform: `translate(-50%, -50%) rotate(${rotation}deg)`,
     willChange: 'transform',
-    backgroundImage: `url(${imageSrc})`,
-    backgroundSize: 'contain', // proportional scaling, like object-fit: contain
-    backgroundRepeat: 'no-repeat',
-    backgroundPosition: 'center',
-    // Vivid Earth: boosted saturation/contrast + a layered dark-blue blur halo
-    // (inner navy + outer electric blue) so it reads luminous, lit from space.
     filter: [
       'saturate(1.35)',
       'contrast(1.08)',
       'brightness(1.06)',
-      'drop-shadow(0 0 18px rgba(13, 40, 84, 0.5))', // subtle dark-blue halo, softens edges
-      'drop-shadow(0 0 40px rgba(56, 132, 226, 0.18))', // faint outer electric-blue glow
+      'drop-shadow(0 0 18px rgba(13, 40, 84, 0.5))',
+      'drop-shadow(0 0 40px rgba(56, 132, 226, 0.18))',
     ].join(' '),
     zIndex: 0,
     pointerEvents: 'none',
+    display: 'block',
   };
 
   // Diagonal gradient: near-black in the bottom-left (where the text sits),
@@ -221,7 +217,13 @@ export default function EarthIntelligenceCard({
   return (
     <div ref={cardRef} style={cardStyle}>
       {/* Floating, clipped Earth */}
-      <div ref={earthRef} style={earthStyle} aria-hidden="true" />
+      <img
+        ref={earthRef as RefObject<HTMLImageElement>}
+        src={imageSrc}
+        alt=""
+        aria-hidden="true"
+        style={earthStyle}
+      />
 
       {/* Gradient blur/darkening overlay for depth + text readability */}
       <div style={overlayStyle} aria-hidden="true" />

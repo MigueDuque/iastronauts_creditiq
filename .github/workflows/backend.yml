@@ -2,12 +2,12 @@ name: Backend — Build & Deploy
 
 on:
   push:
-    branches: [main, uat]
+    branches: [main, uat, master]
     paths:
       - 'iastronauts_creditiq_back/**'
       - '.github/workflows/backend.yml'
   pull_request:
-    branches: [main, uat]
+    branches: [main, uat, master]
     paths:
       - 'iastronauts_creditiq_back/**'
 
@@ -47,6 +47,12 @@ jobs:
           STAGE: test
           MAIN_BUCKET: test-bucket
           WORKFLOW_ARN: arn:aws:states:us-east-1:000000000000:stateMachine:test
+          AWS_ACCOUNT_ID: "000000000000"
+          ANTHROPIC_API_KEY_SECRET_ARN: arn:aws:secretsmanager:us-east-1:000000000000:secret:test
+          RUNNER_FUNCTION_NAME: test-runner
+          ANALYZER_FUNCTION_NAME: test-analyzer
+          RISK_SCORER_FUNCTION_NAME: test-scorer
+          REPORT_GENERATOR_FUNCTION_NAME: test-report-gen
 
   # ── BUILD ─────────────────────────────────────────────────────────────────
   build:
@@ -85,7 +91,7 @@ jobs:
     name: Deploy → dev
     runs-on: ubuntu-latest
     needs: build
-    if: github.ref == 'refs/heads/uat' || github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/uat' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     environment: dev
 
     steps:

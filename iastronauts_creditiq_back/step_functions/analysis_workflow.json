@@ -32,8 +32,11 @@
           "task_token.$":  "$$.Task.Token"
         }
       },
-      "HeartbeatSeconds": 86400,
-      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "WorkflowFailed", "ResultPath": "$.error"}],
+      "HeartbeatSeconds": ${PauseHeartbeatSeconds},
+      "Catch": [
+        {"ErrorEquals": ["States.HeartbeatTimeout"], "Next": "ReviewExpired", "ResultPath": "$.error"},
+        {"ErrorEquals": ["States.ALL"], "Next": "WorkflowFailed", "ResultPath": "$.error"}
+      ],
       "Next": "FinancialAnalyzer"
     },
 
@@ -67,8 +70,11 @@
           "task_token.$":  "$$.Task.Token"
         }
       },
-      "HeartbeatSeconds": 86400,
-      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "WorkflowFailed", "ResultPath": "$.error"}],
+      "HeartbeatSeconds": ${PauseHeartbeatSeconds},
+      "Catch": [
+        {"ErrorEquals": ["States.HeartbeatTimeout"], "Next": "ReviewExpired", "ResultPath": "$.error"},
+        {"ErrorEquals": ["States.ALL"], "Next": "WorkflowFailed", "ResultPath": "$.error"}
+      ],
       "Next": "RiskScorer"
     },
 
@@ -87,6 +93,26 @@
         }
       ],
       "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "WorkflowFailed", "ResultPath": "$.error"}],
+      "Next": "WaitForScorerReview"
+    },
+
+    "WaitForScorerReview": {
+      "Comment": "Pause after Agent 3 — analyst reviews risk scoring before generating report",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "${PauseFunctionArn}",
+        "Payload": {
+          "job_id.$":      "$.job_id",
+          "pause_status":  "scoring_complete",
+          "task_token.$":  "$$.Task.Token"
+        }
+      },
+      "HeartbeatSeconds": ${PauseHeartbeatSeconds},
+      "Catch": [
+        {"ErrorEquals": ["States.HeartbeatTimeout"], "Next": "ReviewExpired", "ResultPath": "$.error"},
+        {"ErrorEquals": ["States.ALL"], "Next": "WorkflowFailed", "ResultPath": "$.error"}
+      ],
       "Next": "ReportGenerator"
     },
 
@@ -105,7 +131,51 @@
         }
       ],
       "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "WorkflowFailed", "ResultPath": "$.error"}],
+      "Next": "WaitForReportReview"
+    },
+
+    "WaitForReportReview": {
+      "Comment": "Pause after Agent 4 — analyst downloads the .docx report before triggering quality review",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "${PauseFunctionArn}",
+        "Payload": {
+          "job_id.$":      "$.job_id",
+          "pause_status":  "report_complete",
+          "task_token.$":  "$$.Task.Token"
+        }
+      },
+      "HeartbeatSeconds": ${PauseHeartbeatSeconds},
+      "Catch": [
+        {"ErrorEquals": ["States.HeartbeatTimeout"], "Next": "ReviewExpired", "ResultPath": "$.error"},
+        {"ErrorEquals": ["States.ALL"], "Next": "WorkflowFailed", "ResultPath": "$.error"}
+      ],
+      "Next": "RevisorInteligente"
+    },
+
+    "RevisorInteligente": {
+      "Type": "Task",
+      "Resource": "${RevisorFunctionArn}",
+      "TimeoutSeconds": 300,
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException","Lambda.AWSLambdaException","Lambda.SdkClientException","Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 2, "MaxAttempts": 3, "BackoffRate": 2.0
+        },
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 3, "MaxAttempts": 2, "BackoffRate": 1.5
+        }
+      ],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "WorkflowFailed", "ResultPath": "$.error"}],
       "End": true
+    },
+
+    "ReviewExpired": {
+      "Type": "Fail",
+      "Error": "ReviewExpired",
+      "Cause": "The analyst review window expired without a response. Restart the analysis to continue."
     },
 
     "WorkflowFailed": {

@@ -145,6 +145,33 @@ def exists(job_id: str, artifact: str, s3_client=None) -> bool:
             return False
 
 
+def save_bytes(
+    job_id: str,
+    artifact: str,
+    data: bytes,
+    content_type: str,
+    extension: str = "bin",
+    s3_client=None,
+) -> str:
+    """Upload raw bytes to the job's S3 folder (same date-based path as JSON artifacts).
+
+    Returns the S3 key written.  Use this for non-JSON deliverables (.docx, .pdf, etc.)
+    that must live alongside the agent JSON outputs.
+    """
+    client = s3_client or boto3.client("s3")
+    date = _job_date_cache.get(job_id) or _date_for(job_id)
+    key = f"jobs/{date}/{job_id}/{artifact}.{extension}"
+    client.put_object(
+        Bucket=BUCKET,
+        Key=key,
+        Body=data,
+        ContentType=content_type,
+    )
+    _job_date_cache.setdefault(job_id, date)
+    logger.info("job_store.save_bytes | job=%s artifact=%s key=%s", job_id, artifact, key)
+    return key
+
+
 def _get(client, key: str) -> dict:
     obj = client.get_object(Bucket=BUCKET, Key=key)
     return json.loads(obj["Body"].read())

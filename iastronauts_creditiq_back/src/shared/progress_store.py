@@ -17,7 +17,8 @@ AGENT_DEFS = [
     {"index": 1, "label": "Agent 1", "title": "Document Ingestion & OCR",  "detail": "Textract PDF · pandas Excel"},
     {"index": 2, "label": "Agent 2", "title": "Financial Analysis & NIIF", "detail": "Account classification · variance"},
     {"index": 3, "label": "Agent 3", "title": "Risk Scoring",              "detail": "Materiality · anomaly detection"},
-    {"index": 4, "label": "Agent 4", "title": "Report Generation",         "detail": "LLM narrative · NIIF notes draft"},
+    {"index": 4, "label": "Agent 4", "title": "Report Generation",         "detail": "LLM narrative · .docx fill"},
+    {"index": 5, "label": "Agent 5", "title": "Intelligent Review",         "detail": "6-category validation · QA score"},
 ]
 
 

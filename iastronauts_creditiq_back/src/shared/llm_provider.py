@@ -106,7 +106,7 @@ class LLMProvider:
         # Per-agent override: callers can pass model=... (e.g. a cheaper model for
         # the mechanical extraction agent) to avoid paying premium rates on every
         # call. Falls back to the global LLM_MODEL env when not specified.
-        self.model = model or os.getenv("LLM_MODEL", "claude-sonnet-4-6")
+        self.model = model or os.getenv("LLM_MODEL", "claude-haiku-4-5-20251001")
         # Language for client-facing prose. Defaults to Spanish (es) — the clients
         # are Spanish-speaking even though the data contract stays in English.
         self.report_language = os.getenv("REPORT_LANGUAGE", "es").lower()
@@ -135,7 +135,7 @@ class LLMProvider:
             
             # Bedrock usa un formato de modelo distinto. Usamos 'us.' para Cross-Region Inference Profiles.
             # Un model explícito (override por agente) tiene prioridad sobre BEDROCK_MODEL.
-            self.model = model or os.getenv("BEDROCK_MODEL", "us.anthropic.claude-sonnet-4-5-20251001")
+            self.model = model or os.getenv("BEDROCK_MODEL", "us.anthropic.claude-haiku-4-5-20251001")
         else:
             raise ValueError(f"Proveedor LLM no soportado: {self.provider}")
 

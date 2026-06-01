@@ -1,4 +1,6 @@
 import json
+import logging
+import os
 import re
 from datetime import datetime, timezone
 
@@ -11,6 +13,48 @@ from shared.models.revisor import (
     ValidationFlag,
     ValidationSeverity,
 )
+from shared.s3_instructions import load_text
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Narrative system prompt — S3 → local → inline fallback
+# ---------------------------------------------------------------------------
+
+_PROMPT_S3_KEY = "instructions/prompts/05_prompt_agent_revisor-inteligente.md"
+_LOCAL_PROMPT_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "system_pompts",
+                 "05_prompt_agent_revisor-inteligente.md")
+)
+_INLINE_FALLBACK = (
+    "Eres un revisor de calidad de reportes financieros en español. "
+    "Verifica coherencia entre narrativa y datos. Devuelve un JSON array de flags."
+)
+_prompt_cache: str | None = None
+
+
+def _get_narrative_prompt() -> str:
+    global _prompt_cache
+    if _prompt_cache is not None:
+        return _prompt_cache
+    s3_text = load_text(_PROMPT_S3_KEY, fallback="")
+    if s3_text:
+        _prompt_cache = s3_text
+        logger.info("revisor_prompt | source=s3 chars=%d", len(s3_text))
+        return _prompt_cache
+    try:
+        with open(_LOCAL_PROMPT_PATH, encoding="utf-8") as f:
+            local_text = f.read()
+        if len(local_text) > 100:
+            _prompt_cache = local_text
+            logger.info("revisor_prompt | source=local chars=%d", len(local_text))
+            return _prompt_cache
+    except OSError:
+        pass
+    logger.warning("revisor_prompt | source=inline_fallback")
+    _prompt_cache = _INLINE_FALLBACK
+    return _prompt_cache
+
 
 _PENALTY_ERROR = 10
 _PENALTY_WARNING = 3
@@ -30,7 +74,7 @@ def _check_structural(report: FinalReportOutput) -> list[ValidationFlag]:
         ("company_name", report.company_name),
         ("executive_summary", report.executive_summary),
         ("board_summary", report.board_summary),
-        ("markdown_report_url", report.markdown_report_url),
+        ("docx_report_url", report.docx_report_url),
     ]
     for field_name, value in required_strings:
         if not value or not value.strip():
@@ -402,7 +446,7 @@ def _check_business_logic(report: FinalReportOutput) -> list[ValidationFlag]:
 # ---------------------------------------------------------------------------
 
 _REPORT_URL_RE = re.compile(
-    r"^reports/[^/]+/[^/]+/\d{4}/\d{2}/report_[^/]+\.md$"
+    r"^s3://[^/]+/jobs/\d{4}-\d{2}-\d{2}/[^/]+/.+\.docx$"
 )
 
 
@@ -419,18 +463,18 @@ def _check_consistency(report: FinalReportOutput) -> list[ValidationFlag]:
             affected_field="analysis_results",
         ))
 
-    # 5.4 markdown_report_url follows expected S3 key pattern
-    if not _REPORT_URL_RE.match(report.markdown_report_url):
+    # 5.4 docx_report_url follows expected S3 URL pattern
+    if report.docx_report_url and not _REPORT_URL_RE.match(report.docx_report_url):
         flags.append(ValidationFlag(
             check_id="5.4",
             category=ValidationCategory.CONSISTENCY,
             severity=ValidationSeverity.WARNING,
             message=(
-                "markdown_report_url no sigue el patrón esperado: "
-                "reports/{tenant_id}/{company_slug}/{YYYY}/{MM}/report_{job_id}.md"
+                "docx_report_url no sigue el patrón esperado: "
+                "s3://{bucket}/jobs/{YYYY-MM-DD}/{job_id}/{nombre}.docx"
             ),
-            affected_field="markdown_report_url",
-            actual_value=report.markdown_report_url,
+            affected_field="docx_report_url",
+            actual_value=report.docx_report_url,
         ))
 
     return flags
@@ -439,33 +483,6 @@ def _check_consistency(report: FinalReportOutput) -> list[ValidationFlag]:
 # ---------------------------------------------------------------------------
 # Category 6 — Narrative quality (LLM)
 # ---------------------------------------------------------------------------
-
-_NARRATIVE_SYSTEM_PROMPT = """
-Eres un revisor de calidad de reportes financieros en español.
-Recibirás el JSON de un reporte y debes verificar la coherencia entre los textos
-narrativos y los datos numéricos.
-
-Devuelve un JSON array de objetos. Cada objeto tiene:
-- "check_id": "6.1" | "6.2" | "6.3" | "6.4" | "6.5" | "6.6"
-- "severity": "ERROR" | "WARNING" | "INFO"
-- "message": descripción clara del problema, en español
-- "affected_field": campo específico con el problema
-
-Si no hay problemas, devuelve un array vacío: []
-
-Reglas:
-6.1 - Las cifras en executive_summary y board_summary deben coincidir con
-      analysis_results (tolerancia ±1% por redondeo). Cada discrepancia es un flag.
-6.2 - executive_summary debe ser ≤3 oraciones y no puede estar vacío.
-6.3 - board_summary debe ser notablemente más detallado que executive_summary.
-6.4 - Cada executive_insight debe ser coherente con la variation_pct de su cuenta.
-      (ej: "ligero incremento" para +466% es ERROR; "contracción" para +50% es WARNING)
-6.5 - Cada nota NIIF con requires_disclosure=true debe tener ≥2 oraciones con
-      referencia explícita a la norma específica.
-6.6 - Las possible_causes de cada cuenta deben ser plausibles para el tipo de
-      empresa descrita en company_name.
-"""
-
 
 def _check_narrative(report: FinalReportOutput, llm: LLMProvider) -> list[ValidationFlag]:
     flags: list[ValidationFlag] = []
@@ -524,7 +541,7 @@ def _check_narrative(report: FinalReportOutput, llm: LLMProvider) -> list[Valida
     }
 
     raw = llm.generate_json(
-        system_prompt=_NARRATIVE_SYSTEM_PROMPT,
+        system_prompt=_get_narrative_prompt(),
         user_prompt=json.dumps(report_subset, ensure_ascii=False, indent=2),
         temperature=0.1,
         tenant_id=report.tenant_id,

@@ -29,6 +29,17 @@ app = FastAPI(title="CreditIQ Local Dev")
 _cancelled_jobs: set[str] = set()
 # Job IDs with an actively-running background thread.
 _running_jobs: set[str] = set()
+# Per-job write locks — prevents last-writer-wins races on status.json when
+# multiple agent threads progress at the same time (e.g. reanalyze then continue).
+_status_write_locks: dict[str, threading.Lock] = {}
+_status_write_locks_meta = threading.Lock()
+
+
+def _get_status_lock(job_id: str) -> threading.Lock:
+    with _status_write_locks_meta:
+        if job_id not in _status_write_locks:
+            _status_write_locks[job_id] = threading.Lock()
+        return _status_write_locks[job_id]
 
 app.add_middleware(
     CORSMiddleware,
@@ -157,6 +168,17 @@ async def get_scorer(analysis_id: str):
         return JSONResponse(content={}, status_code=404)
 
 
+@app.get("/analyses/{analysis_id}/revisor")
+async def get_revisor(analysis_id: str):
+    """Return the raw RevisorInteligente output JSON for Agent 5 quality review view."""
+    from shared.job_store import load as job_load, REVISOR
+    try:
+        data = job_load(analysis_id, REVISOR)
+        return JSONResponse(content=data)
+    except Exception:
+        return JSONResponse(content={}, status_code=404)
+
+
 # ── Progress helpers ───────────────────────────────────────────────────────────
 
 def _save_status(job_id: str, status: str, error: str | None = None, progress: dict | None = None) -> None:
@@ -166,7 +188,8 @@ def _save_status(job_id: str, status: str, error: str | None = None, progress: d
         body["error"] = error
     if progress is not None:
         body["progress"] = progress
-    job_save(job_id, STATUS, body)
+    with _get_status_lock(job_id):
+        job_save(job_id, STATUS, body)
 
 
 def _extractor_summary(job_id: str) -> str:
@@ -271,9 +294,12 @@ def _run_agent3(job_id: str) -> None:
         _running_jobs.discard(job_id)
 
 
-def _run_agent4(job_id: str) -> None:
-    """Run ReportGenerator (Agent 4) through to completed."""
-    from shared.job_store import load as job_load, save as job_save, RISK_SCORER, REPORT_GENERATOR
+def _run_agent4(job_id: str, llm_model: str | None = None) -> None:
+    """Run ReportGenerator (Agent 4) and pause at report_complete."""
+    from shared.job_store import (
+        load as job_load, save as job_save,
+        RISK_SCORER, REPORT_GENERATOR,
+    )
     from shared.progress_store import build_progress
 
     if job_id in _cancelled_jobs:
@@ -284,14 +310,18 @@ def _run_agent4(job_id: str) -> None:
     done_123 = {1: agent1_step, 2: "Analysis complete", 3: "Risk scored"}
 
     try:
+        model_label = f" ({llm_model})" if llm_model else ""
         _save_status(job_id, "processing", progress=build_progress(
-            running_agent=4, current_step="Generating report narrative",
+            running_agent=4, current_step=f"Generating intelligence report{model_label}",
             done_agents=[1, 2, 3], done_steps=done_123,
         ))
         if job_id in _cancelled_jobs:
             return
 
         payload = job_load(job_id, RISK_SCORER)
+        if llm_model:
+            payload["llm_model"] = llm_model
+
         from agents.report_generator.handler import lambda_handler as report_gen
         if job_id in _cancelled_jobs:
             return
@@ -299,10 +329,57 @@ def _run_agent4(job_id: str) -> None:
         job_save(job_id, REPORT_GENERATOR, result)
 
         if job_id not in _cancelled_jobs:
+            _save_status(job_id, "report_complete", progress=build_progress(
+                running_agent=None, current_step=None,
+                done_agents=[1, 2, 3, 4], done_steps={**done_123, 4: "Report generated"},
+            ))
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        _save_status(job_id, "failed", str(exc))
+    finally:
+        _running_jobs.discard(job_id)
+
+
+def _run_agent5(job_id: str) -> None:
+    """Run RevisorInteligente (Agent 5) — quality review gate."""
+    from shared.job_store import (
+        load as job_load, save as job_save,
+        REPORT_GENERATOR, REVISOR,
+    )
+    from shared.progress_store import build_progress
+
+    if job_id in _cancelled_jobs:
+        return
+    _running_jobs.add(job_id)
+
+    agent1_step = _extractor_summary(job_id)
+    done_1234 = {1: agent1_step, 2: "Analysis complete", 3: "Risk scored", 4: "Report generated"}
+
+    try:
+        _save_status(job_id, "processing", progress=build_progress(
+            running_agent=5, current_step="Reviewing report quality",
+            done_agents=[1, 2, 3, 4], done_steps=done_1234,
+        ))
+        if job_id in _cancelled_jobs:
+            return
+
+        payload = job_load(job_id, REPORT_GENERATOR)
+        from agents.revisor_inteligente.handler import lambda_handler as revisor
+        if job_id in _cancelled_jobs:
+            return
+        revised = revisor(payload, None)
+        job_save(job_id, REVISOR, revised)
+
+        if job_id not in _cancelled_jobs:
+            review_step = (
+                f"QA {revised.get('validation_score')}/100 · "
+                f"{revised.get('errors_count', 0)}E/{revised.get('warnings_count', 0)}W"
+            )
             _save_status(job_id, "completed", progress=build_progress(
                 running_agent=None, current_step=None,
-                done_agents=[1, 2, 3, 4],
-                done_steps={**done_123, 4: "Report generated"},
+                done_agents=[1, 2, 3, 4, 5],
+                done_steps={**done_1234, 5: review_step},
             ))
     except Exception as exc:
         import traceback
@@ -476,25 +553,62 @@ async def reanalyze_scorer(analysis_id: str):
     return JSONResponse(content={"analysis_id": analysis_id, "status": "processing"}, status_code=202)
 
 
+@app.post("/analyses/{analysis_id}/reanalyze-report")
+async def reanalyze_report(analysis_id: str, request: Request):
+    """Force-run Agent 4 (ReportGenerator) regardless of current pipeline status."""
+    llm_model: str | None = None
+    try:
+        body_bytes = await request.body()
+        if body_bytes:
+            llm_model = json.loads(body_bytes).get("llm_model") or None
+    except Exception:
+        pass
+    _cancelled_jobs.discard(analysis_id)
+    thread = threading.Thread(
+        target=_run_agent4, args=(analysis_id,), kwargs={"llm_model": llm_model}, daemon=True
+    )
+    thread.start()
+    return JSONResponse(content={"analysis_id": analysis_id, "status": "processing"}, status_code=202)
+
+
 @app.post("/analyses/{analysis_id}/continue")
-async def continue_analysis(analysis_id: str):
+async def continue_analysis(analysis_id: str, request: Request):
     """
     Smart continue: reads current status from S3 and routes to the right stage.
       extraction_complete  → run Agent 2 → analysis_complete
       analysis_complete    → run Agent 3 → scoring_complete
       scoring_complete     → run Agent 4 → completed
+
+    Optional body: { "llm_model": "claude-opus-4-7" }  (Agent 4 only)
     """
     from shared.job_store import load as job_load, STATUS
+
+    llm_model: str | None = None
+    try:
+        body_bytes = await request.body()
+        if body_bytes:
+            body = json.loads(body_bytes)
+            llm_model = body.get("llm_model") or None
+    except Exception:
+        pass
+
     try:
         current_status = job_load(analysis_id, STATUS).get("status", "")
     except Exception:
         current_status = ""
 
-    fn = (
-        _run_agent4 if current_status == "scoring_complete" else
-        _run_agent3 if current_status == "analysis_complete" else
-        _run_agent2
-    )
-    thread = threading.Thread(target=fn, args=(analysis_id,), daemon=True)
+    _cancelled_jobs.discard(analysis_id)
+
+    if current_status == "scoring_complete":
+        thread = threading.Thread(
+            target=_run_agent4, args=(analysis_id,), kwargs={"llm_model": llm_model}, daemon=True
+        )
+    elif current_status == "report_complete":
+        thread = threading.Thread(target=_run_agent5, args=(analysis_id,), daemon=True)
+    elif current_status == "analysis_complete":
+        thread = threading.Thread(target=_run_agent3, args=(analysis_id,), daemon=True)
+    else:
+        thread = threading.Thread(target=_run_agent2, args=(analysis_id,), daemon=True)
+
     thread.start()
     return JSONResponse(content={"analysis_id": analysis_id, "status": "processing"}, status_code=202)

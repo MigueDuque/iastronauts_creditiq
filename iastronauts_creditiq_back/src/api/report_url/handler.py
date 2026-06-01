@@ -10,15 +10,17 @@ from shared.job_store import load_first as job_load_first, FINANCIAL_ANALYZER, E
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+
 def _sfn_client():
     kwargs = {}
     if url := os.environ.get("SFN_ENDPOINT_URL"):
         kwargs["endpoint_url"] = url
     return boto3.client("stepfunctions", **kwargs)
 
+
 s3 = boto3.client("s3")
 BUCKET = os.environ["MAIN_BUCKET"]
-EXPIRATION = 3600  # 1 hora
+EXPIRATION = 3600  # 1 hour
 
 
 def _execution_arn(analysis_id: str) -> str:
@@ -28,45 +30,51 @@ def _execution_arn(analysis_id: str) -> str:
     return f"arn:aws:states:{region}:{account_id}:execution:creditiq-analysis-workflow-{stage}:{analysis_id}"
 
 
+def _presign(s3_url: str | None) -> str | None:
+    """Convert an s3://bucket/key URL to a presigned GET URL. Returns None on failure."""
+    if not s3_url or not s3_url.startswith("s3://"):
+        return None
+    key = s3_url.removeprefix(f"s3://{BUCKET}/")
+    try:
+        return s3.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": BUCKET, "Key": key},
+            ExpiresIn=EXPIRATION,
+        )
+    except Exception:
+        return None
+
+
+def _build_response_body(analysis_id: str, output: dict) -> dict:
+    """Build the API response body from a ReportGenerator output dict."""
+    return {
+        "analysis_id": analysis_id,
+        "docx_url": _presign(output.get("docx_report_url")),
+        "expires_in": EXPIRATION,
+    }
+
+
 def _s3_report_fallback(analysis_id: str) -> dict:
-    """
-    Return the most recent available agent output from S3.
-    Tries in precedence order: financial_analyzer → extractor.
-    Used in local dev when SFN execution doesn't exist.
-    """
+    """Load from S3 job store when SFN execution is unavailable (local dev)."""
     data = job_load_first(analysis_id, [REPORT_GENERATOR, FINANCIAL_ANALYZER, EXTRACTOR])
     if data:
-        markdown_url = data.get("markdown_report_url", "")
-        pdf_url = data.get("pdf_report_url", "")
-        if markdown_url.startswith("s3://"):
-            md_key = markdown_url.removeprefix(f"s3://{BUCKET}/")
-            body = {
+        docx_url = _presign(data.get("docx_report_url"))
+        if docx_url:
+            return _response(200, {
                 "analysis_id": analysis_id,
-                "markdown_url": s3.generate_presigned_url(
-                    "get_object",
-                    Params={"Bucket": BUCKET, "Key": md_key},
-                    ExpiresIn=EXPIRATION,
-                ),
-                "pdf_url": None,
+                "docx_url": docx_url,
                 "expires_in": EXPIRATION,
-            }
-            if pdf_url.startswith("s3://"):
-                pdf_key = pdf_url.removeprefix(f"s3://{BUCKET}/")
-                body["pdf_url"] = s3.generate_presigned_url(
-                    "get_object",
-                    Params={"Bucket": BUCKET, "Key": pdf_key},
-                    ExpiresIn=EXPIRATION,
-                )
-            return _response(200, body)
-        return _response(200, data)
+            })
+        return _response(404, {
+            "error": "El reporte .docx aún no ha sido generado para este análisis."
+        })
     return _response(409, {"error": "El análisis aún no está completo", "status": "processing"})
 
 
 def lambda_handler(event: dict, context) -> dict:
     """
     GET /analyses/{analysis_id}/report
-    Returns a presigned URL to download the generated markdown report.
-    The S3 key is extracted from the Step Functions execution output produced by ReportGenerator.
+    Returns a presigned URL to download the generated .docx report.
     """
     try:
         analysis_id = event.get("pathParameters", {}).get("analysis_id")
@@ -76,48 +84,30 @@ def lambda_handler(event: dict, context) -> dict:
         execution = _sfn_client().describe_execution(executionArn=_execution_arn(analysis_id))
 
         if execution["status"] == "RUNNING":
-            # Pipeline may be paused at a review gate — serve best available agent output from S3
             data = job_load_first(analysis_id, [REPORT_GENERATOR, FINANCIAL_ANALYZER, EXTRACTOR])
             if data:
-                return _response(200, data)
+                return _response(200, _build_response_body(analysis_id, data))
             return _response(409, {"error": "El análisis aún no está completo", "status": "processing"})
 
         if execution["status"] != "SUCCEEDED":
             return _response(409, {"error": "El análisis falló o fue cancelado", "status": "failed"})
 
-        # ReportGenerator output contains markdown_report_url: "s3://{bucket}/{key}"
         output = json.loads(execution.get("output", "{}"))
-        markdown_url = output.get("markdown_report_url", "")
-        pdf_url = output.get("pdf_report_url", "")
+        docx_url = _presign(output.get("docx_report_url"))
 
-        if not markdown_url.startswith("s3://"):
-            # Agents are stubs — serve best available output so the accounts table renders
+        if not docx_url:
             data = job_load_first(analysis_id, [REPORT_GENERATOR, FINANCIAL_ANALYZER, EXTRACTOR])
             if data:
-                return _response(200, data)
-            return _response(404, {"error": "No se encontró el reporte generado"})
-
-        # Strip "s3://{bucket}/" prefix to get the S3 key
-        s3_key = markdown_url.removeprefix(f"s3://{BUCKET}/")
-
-        presigned_url = s3.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": BUCKET, "Key": s3_key},
-            ExpiresIn=EXPIRATION,
-        )
-        pdf_presigned_url = None
-        if pdf_url.startswith("s3://"):
-            pdf_key = pdf_url.removeprefix(f"s3://{BUCKET}/")
-            pdf_presigned_url = s3.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": BUCKET, "Key": pdf_key},
-                ExpiresIn=EXPIRATION,
-            )
+                fallback_url = _presign(data.get("docx_report_url"))
+                if fallback_url:
+                    return _response(200, {"analysis_id": analysis_id, "docx_url": fallback_url, "expires_in": EXPIRATION})
+            return _response(404, {
+                "error": "El reporte .docx aún no ha sido generado para este análisis."
+            })
 
         return _response(200, {
             "analysis_id": analysis_id,
-            "markdown_url": presigned_url,
-            "pdf_url": pdf_presigned_url,
+            "docx_url": docx_url,
             "expires_in": EXPIRATION,
         })
 

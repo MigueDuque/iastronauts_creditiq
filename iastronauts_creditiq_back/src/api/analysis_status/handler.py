@@ -85,16 +85,28 @@ def lambda_handler(event: dict, context) -> dict:
 
         # When RUNNING, check S3 for a pause status written by PauseFunction.
         # This distinguishes "agent actively running" from "paused waiting for analyst".
+        _PAUSE_STATUSES = frozenset({
+            "extraction_complete", "analysis_complete", "scoring_complete", "report_complete"
+        })
         s3_progress: dict | None = None
         if sfn_status == "RUNNING":
             try:
                 s3_data = job_load(analysis_id, STATUS)
                 s3_status = s3_data.get("status", "processing")
-                # Only trust pause statuses from S3 — not "processing" written by /continue
-                status = s3_status if s3_status in ("extraction_complete", "analysis_complete") else "processing"
+                # Only trust recognised pause statuses from S3 — ignore "processing"
+                # written by /continue so we don't flash a stale pause state.
+                status = s3_status if s3_status in _PAUSE_STATUSES else "processing"
                 s3_progress = s3_data.get("progress")
             except ClientError:
                 status = "processing"
+        elif sfn_status == "FAILED" and execution.get("error") == "ReviewExpired":
+            # The analyst review window expired — surface a distinct status so the
+            # frontend can show a helpful message instead of a generic "failed".
+            status = "review_expired"
+            try:
+                s3_progress = job_load(analysis_id, STATUS).get("progress")
+            except ClientError:
+                pass
         else:
             status = _SFN_TO_STATUS.get(sfn_status, "unknown")
             try:

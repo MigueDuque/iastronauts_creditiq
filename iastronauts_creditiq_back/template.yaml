@@ -28,11 +28,24 @@ Parameters:
     Type: String
     NoEcho: true
     Default: ""
+  PauseHeartbeatSeconds:
+    Type: Number
+    Default: 86400
+    Description: >
+      Seconds before an analyst-review pause state times out and the execution
+      transitions to ReviewExpired. Default is 24 h. Raise for longer review
+      windows; lower (e.g. 3600) for tighter SLAs in production.
+  AlertsEmail:
+    Type: String
+    Default: ""
+    Description: Email address to receive CloudWatch alarm notifications (optional).
 
 Conditions:
   # Only provision the Anthropic secret + grant access when a key is supplied at
   # deploy time. Dev/bedrock deployments that pass no key skip it cleanly.
   HasAnthropicKey: !Not [!Equals [!Ref AnthropicApiKey, ""]]
+  # Only create the email SNS subscription when an address was supplied.
+  HasAlertsEmail: !Not [!Equals [!Ref AlertsEmail, ""]]
 
 Globals:
   Function:
@@ -234,6 +247,9 @@ Resources:
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource: !Ref AnthropicApiKeySecret
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt AgentRunnerDLQ.Arn
 
   # Rol para Lambdas de agentes (Step Functions)
   AgentLambdaRole:
@@ -316,6 +332,7 @@ Resources:
                   - !GetAtt AnalyzerFunction.Arn
                   - !GetAtt RiskScorerFunction.Arn
                   - !GetAtt ReportGeneratorFunction.Arn
+                  - !GetAtt RevisorInteligenteFunction.Arn
                   - !GetAtt PauseFunction.Arn
               - Effect: Allow
                 Action:
@@ -448,6 +465,9 @@ Resources:
       # invocation waits synchronously for the agent Lambda to finish.
       Timeout: 360
       MemorySize: 256
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt AgentRunnerDLQ.Arn
       Environment:
         Variables:
           ANALYZER_FUNCTION_NAME: !Ref AnalyzerFunction
@@ -545,7 +565,9 @@ Resources:
         AnalyzerFunctionArn: !GetAtt AnalyzerFunction.Arn
         RiskScorerFunctionArn: !GetAtt RiskScorerFunction.Arn
         ReportGeneratorFunctionArn: !GetAtt ReportGeneratorFunction.Arn
+        RevisorFunctionArn: !GetAtt RevisorInteligenteFunction.Arn
         PauseFunctionArn: !GetAtt PauseFunction.Arn
+        PauseHeartbeatSeconds: !Ref PauseHeartbeatSeconds
       Role: !GetAtt WorkflowRole.Arn
       Type: STANDARD
       Tracing:
@@ -611,6 +633,367 @@ Resources:
       Timeout: 300
       MemorySize: 512
 
+  RevisorInteligenteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "creditiq-revisor-inteligente-${Stage}"
+      CodeUri: src/
+      Handler: agents.revisor_inteligente.handler.lambda_handler
+      Role: !GetAtt AgentLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
+
+# ─────────────────────────────────────────────
+# MARKET DATA LAMBDAS
+# ─────────────────────────────────────────────
+
+  # GET /market/data — live market data snapshot (yfinance + GNews)
+  MarketDataFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "creditiq-market-data-${Stage}"
+      CodeUri: src/
+      Handler: api.market_data.handler.lambda_handler
+      Role: !GetAtt ApiLambdaRole.Arn
+      Timeout: 60
+      Events:
+        MarketDataEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /market/data
+            Method: GET
+
+  # GET /market/pulse, /market/news, /market/overview, /market/signals
+  # → serve the cached AI market pulse (no live fetching on request path)
+  MarketReadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "creditiq-market-read-${Stage}"
+      CodeUri: src/
+      Handler: api.market_read.handler.lambda_handler
+      Role: !GetAtt ApiLambdaRole.Arn
+      Timeout: 30
+      Events:
+        MarketPulseEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /market/pulse
+            Method: GET
+        MarketNewsEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /market/news
+            Method: GET
+        MarketOverviewEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /market/overview
+            Method: GET
+        MarketSignalsEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /market/signals
+            Method: GET
+
+  # EventBridge scheduled rule — refresh market pulse every 5 minutes in prod
+  MarketRefreshSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "creditiq-market-refresh-${Stage}"
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+        - Id: MarketDataTarget
+          Arn: !GetAtt MarketDataFunction.Arn
+
+  MarketRefreshPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt MarketDataFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt MarketRefreshSchedule.Arn
+
+# ─────────────────────────────────────────────
+# OBSERVABILITY — SNS, CloudWatch Alarms, DLQ, Dashboard
+# ─────────────────────────────────────────────
+
+  # SQS Dead Letter Queue for async AgentRunner invocations.
+  # Any event that fails all Lambda retries lands here for investigation.
+  AgentRunnerDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "creditiq-agent-runner-dlq-${Stage}"
+      MessageRetentionPeriod: 1209600   # 14 days
+
+  # Central SNS topic — subscribe an email (optional) or wire to PagerDuty/Slack.
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "creditiq-alerts-${Stage}"
+
+  AlertsEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertsEmail
+    Properties:
+      TopicArn: !Ref AlertsTopic
+      Protocol: email
+      Endpoint: !Ref AlertsEmail
+
+  # ── Lambda Error Alarms ────────────────────────────────────────────────────
+  # One alarm per critical Lambda: fires when ≥1 error occurs in a 5-min window.
+
+  AlarmExtractorErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "creditiq-${Stage}-extractor-errors"
+      AlarmDescription: Document Extractor Lambda errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ExtractorFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+  AlarmAnalyzerErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "creditiq-${Stage}-analyzer-errors"
+      AlarmDescription: Financial Analyzer Lambda errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AnalyzerFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+  AlarmRiskScorerErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "creditiq-${Stage}-risk-scorer-errors"
+      AlarmDescription: Risk Scorer Lambda errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref RiskScorerFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+  AlarmReportGeneratorErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "creditiq-${Stage}-report-generator-errors"
+      AlarmDescription: Report Generator Lambda errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ReportGeneratorFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+  AlarmRevisorErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "creditiq-${Stage}-revisor-errors"
+      AlarmDescription: Revisor Inteligente Lambda errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref RevisorInteligenteFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+  # ── Lambda Throttle Alarms ─────────────────────────────────────────────────
+  # Throttles on agent Lambdas indicate concurrency exhaustion — a hard blocker.
+
+  AlarmAgentThrottles:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "creditiq-${Stage}-agent-throttles"
+      AlarmDescription: Any agent Lambda is being throttled
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      # No FunctionName dimension — aggregates across ALL functions in the account.
+      # Filter to this stage via the alarm name convention; separate per-function
+      # alarms can be added if needed.
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+
+  # ── Step Functions Alarm ───────────────────────────────────────────────────
+
+  AlarmWorkflowFailed:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "creditiq-${Stage}-workflow-executions-failed"
+      AlarmDescription: Step Functions executions failed (pipeline error, not review expiration)
+      Namespace: AWS/States
+      MetricName: ExecutionsFailed
+      Dimensions:
+        - Name: StateMachineArn
+          Value: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:creditiq-analysis-workflow-${Stage}"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+      OKActions: [!Ref AlertsTopic]
+
+  # ── DLQ Depth Alarm ────────────────────────────────────────────────────────
+
+  AlarmAgentRunnerDLQ:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "creditiq-${Stage}-agent-runner-dlq-depth"
+      AlarmDescription: Messages in AgentRunner DLQ — async invocations failing after all retries
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt AgentRunnerDLQ.QueueName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertsTopic]
+
+  # ── CloudWatch Dashboard ───────────────────────────────────────────────────
+
+  CreditIQDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "CreditIQ-${Stage}"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "alarm",
+              "x": 0, "y": 0, "width": 24, "height": 2,
+              "properties": {
+                "title": "Alarm Status",
+                "alarms": [
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:creditiq-${Stage}-extractor-errors",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:creditiq-${Stage}-analyzer-errors",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:creditiq-${Stage}-risk-scorer-errors",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:creditiq-${Stage}-report-generator-errors",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:creditiq-${Stage}-revisor-errors",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:creditiq-${Stage}-workflow-executions-failed",
+                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:creditiq-${Stage}-agent-runner-dlq-depth"
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 2, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda Errors — Agents",
+                "view": "timeSeries",
+                "stat": "Sum",
+                "period": 300,
+                "metrics": [
+                  ["AWS/Lambda", "Errors", "FunctionName", "creditiq-extractor-${Stage}", {"label": "Extractor"}],
+                  ["AWS/Lambda", "Errors", "FunctionName", "creditiq-analyzer-${Stage}", {"label": "Analyzer"}],
+                  ["AWS/Lambda", "Errors", "FunctionName", "creditiq-risk-scorer-${Stage}", {"label": "RiskScorer"}],
+                  ["AWS/Lambda", "Errors", "FunctionName", "creditiq-report-generator-${Stage}", {"label": "ReportGen"}],
+                  ["AWS/Lambda", "Errors", "FunctionName", "creditiq-revisor-inteligente-${Stage}", {"label": "Revisor"}]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 2, "width": 12, "height": 6,
+              "properties": {
+                "title": "Step Functions Executions",
+                "view": "timeSeries",
+                "stat": "Sum",
+                "period": 300,
+                "metrics": [
+                  ["AWS/States", "ExecutionsStarted", "StateMachineArn", "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:creditiq-analysis-workflow-${Stage}", {"label": "Started"}],
+                  ["AWS/States", "ExecutionsSucceeded", "StateMachineArn", "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:creditiq-analysis-workflow-${Stage}", {"label": "Succeeded"}],
+                  ["AWS/States", "ExecutionsFailed", "StateMachineArn", "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:creditiq-analysis-workflow-${Stage}", {"label": "Failed", "color": "#d62728"}]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 8, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda Duration p99 — Agents (ms)",
+                "view": "timeSeries",
+                "stat": "p99",
+                "period": 300,
+                "metrics": [
+                  ["AWS/Lambda", "Duration", "FunctionName", "creditiq-extractor-${Stage}", {"label": "Extractor"}],
+                  ["AWS/Lambda", "Duration", "FunctionName", "creditiq-analyzer-${Stage}", {"label": "Analyzer"}],
+                  ["AWS/Lambda", "Duration", "FunctionName", "creditiq-risk-scorer-${Stage}", {"label": "RiskScorer"}],
+                  ["AWS/Lambda", "Duration", "FunctionName", "creditiq-report-generator-${Stage}", {"label": "ReportGen"}]
+                ]
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 8, "width": 12, "height": 6,
+              "properties": {
+                "title": "AgentRunner DLQ Depth",
+                "view": "timeSeries",
+                "stat": "Maximum",
+                "period": 300,
+                "metrics": [
+                  ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "creditiq-agent-runner-dlq-${Stage}", {"label": "Messages in DLQ", "color": "#d62728"}]
+                ]
+              }
+            }
+          ]
+        }
+
 # ─────────────────────────────────────────────
 # OUTPUTS
 # ─────────────────────────────────────────────
@@ -643,3 +1026,15 @@ Outputs:
   WorkflowLogGroup:
     Description: CloudWatch Log Group para el workflow
     Value: !Ref WorkflowLogGroup
+
+  AlertsTopicArn:
+    Description: SNS topic ARN for CloudWatch alarm notifications
+    Value: !Ref AlertsTopic
+
+  AgentRunnerDLQUrl:
+    Description: SQS DLQ URL for failed async AgentRunner invocations
+    Value: !Ref AgentRunnerDLQ
+
+  DashboardUrl:
+    Description: CloudWatch dashboard URL
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=CreditIQ-${Stage}"

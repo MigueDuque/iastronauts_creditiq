@@ -7,6 +7,7 @@ const STATUS_KEY = 'creditiq_status'
 const REPORT_KEY = 'creditiq_report'
 const ANALYZER_KEY = 'creditiq_analyzer_data'
 const SCORER_KEY = 'creditiq_scorer_data'
+const REVISOR_KEY = 'creditiq_revisor_data'
 const PHASE_KEY = 'creditiq_phase'
 const HEADERS = { 'x-tenant-id': 'demo' }
 
@@ -31,6 +32,40 @@ function stepState(idx: number, starts: readonly number[], elapsed: number): 'pe
   if (elapsed >= nextStart) return 'done'
   return 'active'
 }
+
+// ── Model selector ────────────────────────────────────────────────────────
+
+const MODELS = [
+  {
+    id: 'claude-haiku-4-5-20251001',
+    name: 'Haiku',
+    version: '4.5',
+    tagline: 'Fast & Economical',
+    description: 'Speed-optimized. Best for rapid iterations.',
+    color: '#56CCF2',
+    icon: 'bolt',
+    isDefault: true,
+  },
+  {
+    id: 'claude-sonnet-4-6',
+    name: 'Sonnet',
+    version: '4.6',
+    tagline: 'Balanced',
+    description: 'The recommended balance of intelligence and speed.',
+    color: '#A78BFA',
+    icon: 'tune',
+  },
+  {
+    id: 'claude-opus-4-7',
+    name: 'Opus',
+    version: '4.7',
+    tagline: 'Most Powerful',
+    description: 'Maximum intelligence. The strongest analytical foundation.',
+    color: '#56F2C1',
+    icon: 'diamond',
+    isFlagship: true,
+  },
+] as const
 
 // ── Color maps ────────────────────────────────────────────────────────────
 
@@ -67,7 +102,7 @@ const AGENT_COLOR: Record<string, string> = {
 // ── Types ──────────────────────────────────────────────────────────────────
 
 type ActiveView = 'agent1' | 'agent2' | 'agent3' | 'agent4'
-type ProcessingPhase = 'agent1' | 'agent2' | 'agent3' | 'agent4' | null
+type ProcessingPhase = 'agent1' | 'agent2' | 'agent3' | 'agent4' | 'agent5' | null
 
 interface JobSummary {
   job_id: string
@@ -87,9 +122,15 @@ interface PipelineProgress {
   agents: AgentProgressEntry[]
 }
 
+interface RevisorFlag { category: string; severity: string; message: string; field?: string }
+interface RevisorData {
+  validation_score: number; errors_count: number; warnings_count: number
+  validation_passed: boolean; validation_flags?: RevisorFlag[]
+}
+
 interface JobStatus {
   analysis_id?: string
-  status: 'pending' | 'processing' | 'extraction_complete' | 'analysis_complete' | 'scoring_complete' | 'completed' | 'failed' | 'cancelled'
+  status: 'pending' | 'processing' | 'extraction_complete' | 'analysis_complete' | 'scoring_complete' | 'report_complete' | 'completed' | 'failed' | 'cancelled'
   error?: string | null
   progress?: PipelineProgress
 }
@@ -218,7 +259,7 @@ interface ScorerOutput {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function initialView(status: string | null): ActiveView {
-  if (status === 'completed') return 'agent4'
+  if (status === 'completed' || status === 'report_complete') return 'agent4'
   if (status === 'scoring_complete') return 'agent3'
   if (status === 'analysis_complete') return 'agent2'
   return 'agent1'
@@ -240,6 +281,9 @@ export default function AnalysisPage() {
   const [scorerData, setScorerData] = useState<ScorerOutput | null>(() => {
     try { return JSON.parse(localStorage.getItem(SCORER_KEY) ?? 'null') } catch { return null }
   })
+  const [revisorData, setRevisorData] = useState<RevisorData | null>(() => {
+    try { return JSON.parse(localStorage.getItem(REVISOR_KEY) ?? 'null') } catch { return null }
+  })
   const [phase, setPhase] = useState<ProcessingPhase>(
     () => (localStorage.getItem(PHASE_KEY) as ProcessingPhase) ?? null
   )
@@ -255,6 +299,11 @@ export default function AnalysisPage() {
   const [jobFilter, setJobFilter] = useState('')
   const [showRestartDialog, setShowRestartDialog] = useState(false)
   const [restartIntent, setRestartIntent] = useState<'agent2' | 'agent3' | 'agent4' | null>(null)
+  const [selectedModel, setSelectedModel] = useState<string>('claude-haiku-4-5-20251001')
+  const [showModelDialog, setShowModelDialog] = useState(false)
+  const [docxUrl, setDocxUrl] = useState<string | null>(null)
+  const [fetchingDocx, setFetchingDocx] = useState(false)
+  const [docxError, setDocxError] = useState<string | null>(null)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // track previous data to detect new arrivals for auto-switching
@@ -288,6 +337,11 @@ export default function AnalysisPage() {
   }, [scorerData])
 
   useEffect(() => {
+    if (revisorData) localStorage.setItem(REVISOR_KEY, JSON.stringify(revisorData))
+    else localStorage.removeItem(REVISOR_KEY)
+  }, [revisorData])
+
+  useEffect(() => {
     if (phase) localStorage.setItem(PHASE_KEY, phase)
     else localStorage.removeItem(PHASE_KEY)
   }, [phase])
@@ -301,8 +355,8 @@ export default function AnalysisPage() {
       const id = (e as CustomEvent<{ jobId?: string }>).detail?.jobId
       if (!id) return
       if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
-      ;[STATUS_KEY, REPORT_KEY, ANALYZER_KEY, SCORER_KEY, PHASE_KEY].forEach(k => localStorage.removeItem(k))
-      setReport(null); setAnalyzerData(null); setScorerData(null); setJobStatus(null); setPhase(null)
+      ;[STATUS_KEY, REPORT_KEY, ANALYZER_KEY, SCORER_KEY, REVISOR_KEY, PHASE_KEY].forEach(k => localStorage.removeItem(k))
+      setReport(null); setAnalyzerData(null); setScorerData(null); setRevisorData(null); setJobStatus(null); setPhase(null)
       setElapsed(0); setCatFilter('all'); setActiveView('agent1'); setNewData(new Set())
       userNavigatedRef.current = false
       localStorage.setItem(STORAGE_KEY, id)
@@ -339,16 +393,18 @@ export default function AnalysisPage() {
   }, [scorerData])
 
   useEffect(() => {
-    if (jobStatus?.status === 'completed' && prevStatus.current !== 'completed') {
+    const cur = jobStatus?.status
+    const prev = prevStatus.current
+    if ((cur === 'completed' || cur === 'report_complete') && prev !== cur) {
       if (!userNavigatedRef.current) setActiveView('agent4')
-      else setNewData(prev => { const s = new Set(prev); s.add('agent4'); return s })
+      else setNewData(p => { const s = new Set(p); s.add('agent4'); return s })
     }
-    prevStatus.current = jobStatus?.status
+    prevStatus.current = cur
   }, [jobStatus?.status])
 
   // ── Main polling effect ────────────────────────────────────────────────
 
-  const TERMINAL = new Set(['completed', 'failed', 'extraction_complete', 'analysis_complete', 'scoring_complete'])
+  const TERMINAL = new Set(['completed', 'failed', 'extraction_complete', 'analysis_complete', 'scoring_complete', 'report_complete'])
 
   useEffect(() => {
     if (intervalRef.current) clearInterval(intervalRef.current)
@@ -402,10 +458,19 @@ export default function AnalysisPage() {
             }
           }
         }
-        if (data.status === 'scoring_complete' || data.status === 'completed') {
+        if (data.status === 'scoring_complete' || data.status === 'report_complete' || data.status === 'completed') {
           if (!scorerData) {
             const r = await fetch(`${API}/analyses/${jobId}/scorer`, { headers: HEADERS })
             if (r.ok && alive) setScorerData(await r.json())
+          }
+        }
+        if (data.status === 'completed') {
+          if (!revisorData) {
+            const r = await fetch(`${API}/analyses/${jobId}/revisor`, { headers: HEADERS })
+            if (r.ok && alive) {
+              const j = await r.json()
+              if (j?.errors_count !== undefined) setRevisorData(j)
+            }
           }
         }
       } catch (e) { console.error('[poll]', e) }
@@ -433,8 +498,8 @@ export default function AnalysisPage() {
 
   function _doClean() {
     if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
-    ;[STORAGE_KEY, STATUS_KEY, REPORT_KEY, ANALYZER_KEY, SCORER_KEY, PHASE_KEY].forEach(k => localStorage.removeItem(k))
-    setJobId(null); setJobStatus(null); setReport(null); setAnalyzerData(null); setScorerData(null)
+    ;[STORAGE_KEY, STATUS_KEY, REPORT_KEY, ANALYZER_KEY, SCORER_KEY, REVISOR_KEY, PHASE_KEY].forEach(k => localStorage.removeItem(k))
+    setJobId(null); setJobStatus(null); setReport(null); setAnalyzerData(null); setScorerData(null); setRevisorData(null)
     setPhase(null); setActiveView('agent1'); setElapsed(0); setShowCancelDialog(false)
     userNavigatedRef.current = false; setNewData(new Set())
   }
@@ -461,8 +526,8 @@ export default function AnalysisPage() {
 
   async function selectJob(job: JobSummary) {
     setShowJobPicker(false)
-      ;[STORAGE_KEY, STATUS_KEY, REPORT_KEY, ANALYZER_KEY, SCORER_KEY, PHASE_KEY].forEach(k => localStorage.removeItem(k))
-    setJobStatus(null); setReport(null); setAnalyzerData(null); setScorerData(null); setPhase(null); setElapsed(0)
+      ;[STORAGE_KEY, STATUS_KEY, REPORT_KEY, ANALYZER_KEY, SCORER_KEY, REVISOR_KEY, PHASE_KEY].forEach(k => localStorage.removeItem(k))
+    setJobStatus(null); setReport(null); setAnalyzerData(null); setScorerData(null); setRevisorData(null); setPhase(null); setElapsed(0)
     userNavigatedRef.current = false; setNewData(new Set())
     localStorage.setItem(STORAGE_KEY, job.job_id)
 
@@ -580,16 +645,38 @@ export default function AnalysisPage() {
 
   function handleRunAgent4Click() {
     if (!jobId) return
-    if (jobStatus?.status === 'completed') { setRestartIntent('agent4'); setShowRestartDialog(true); return }
-    _doRunAgent4()
+    setShowModelDialog(true)
   }
 
-  async function _doRunAgent4() {
+  async function _doRunAgent5() {
+    if (!jobId) return
+    userNavigatedRef.current = false; setNewData(new Set())
+    setPhase('agent5'); setRevisorData(null); setElapsed(0)
+    setActiveView('agent4')
+    await fetch(`${API}/analyses/${jobId}/continue`, { method: 'POST', headers: HEADERS })
+    _startPolling(async (data) => {
+      if (data.status === 'completed') {
+        const r = await fetch(`${API}/analyses/${jobId}/revisor`, { headers: HEADERS })
+        if (r.ok) {
+          const j = await r.json()
+          if (j?.errors_count !== undefined) setRevisorData(j)
+        }
+      }
+    })
+  }
+
+  async function _doRunAgent4(model?: string) {
     if (!jobId) return
     userNavigatedRef.current = false; setNewData(new Set())
     setPhase('agent4'); setElapsed(0)
     setActiveView('agent4')
-    await fetch(`${API}/analyses/${jobId}/continue`, { method: 'POST', headers: HEADERS })
+    setDocxUrl(null); setDocxError(null)
+    const chosenModel = model ?? selectedModel
+    await fetch(`${API}/analyses/${jobId}/reanalyze-report`, {
+      method: 'POST',
+      headers: { ...HEADERS, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ llm_model: chosenModel }),
+    })
     _startPolling(() => { })
   }
 
@@ -597,13 +684,34 @@ export default function AnalysisPage() {
     setShowRestartDialog(false)
     if (restartIntent === 'agent2') await _doRunAgent2()
     else if (restartIntent === 'agent3') await _doRunAgent3Forced()
-    else if (restartIntent === 'agent4') await _doRunAgent4()
+    else if (restartIntent === 'agent4') { setShowModelDialog(true); setRestartIntent(null); return }
     setRestartIntent(null)
   }
 
   function skipToAgent3() {
     setShowRestartDialog(false); setRestartIntent(null)
     _doRunAgent3Forced()
+  }
+
+  async function fetchAndDownloadReport() {
+    if (!jobId || fetchingDocx) return
+    setFetchingDocx(true)
+    setDocxError(null)
+    try {
+      const res = await fetch(`${API}/analyses/${jobId}/report`, { headers: HEADERS })
+      const data = await res.json()
+      const url = data.docx_url as string | undefined
+      if (!res.ok || !url) {
+        setDocxError(data.error || 'No .docx found — verify the template exists in S3 at instructions/CreditIQ_Template_EEFF.docx')
+        return
+      }
+      setDocxUrl(url)
+      window.open(url, '_blank', 'noopener')
+    } catch (e) {
+      setDocxError('Network error while fetching download link')
+      console.error('[report]', e)
+    }
+    finally { setFetchingDocx(false) }
   }
 
   // ── Derived state ──────────────────────────────────────────────────────
@@ -614,7 +722,7 @@ export default function AnalysisPage() {
   const runningView: ActiveView | null =
     phase === 'agent2' ? 'agent2' :
       phase === 'agent3' ? 'agent3' :
-        phase === 'agent4' ? 'agent4' :
+        (phase === 'agent4' || phase === 'agent5') ? 'agent4' :
           (st === 'processing' || st === 'pending') ? 'agent1' : null
 
   const isProcessing = st === 'processing' || st === 'pending'
@@ -636,7 +744,8 @@ export default function AnalysisPage() {
     }
     // agent4
     if (st === 'completed') return 'done'
-    return phase === 'agent4' ? 'running' : 'locked'
+    if (st === 'report_complete') return 'waiting'
+    return (phase === 'agent4' || phase === 'agent5') ? 'running' : 'locked'
   }
 
   const accounts = report?.accounts ?? []
@@ -657,8 +766,9 @@ export default function AnalysisPage() {
     phase === 'agent2' ? 'Agent 2 — Financial Analysis' :
       phase === 'agent3' ? 'Agent 3 — Risk Scoring' :
         phase === 'agent4' ? 'Agent 4 — Report Generation' :
-          st === 'pending' ? 'Queued — starting pipeline…' :
-            'Agent 1 — Document Extraction'
+          phase === 'agent5' ? 'Agent 5 — Quality Review' :
+            st === 'pending' ? 'Queued — starting pipeline…' :
+              'Agent 1 — Document Extraction'
 
   const companyName = report?.company_name ?? analyzerData?.company_name ?? scorerData?.company_name ?? null
 
@@ -1295,10 +1405,10 @@ export default function AnalysisPage() {
                         {/* Continue / re-run */}
                         {vs === 'waiting' && (
                           <ContinueBanner
-                            color="#A78BFA"
-                            icon="security"
-                            title="Agent 3 complete — review risk scoring"
-                            subtitle="Risk assessment looks correct? Continue to report generation."
+                            color="#56F2C1"
+                            icon="article"
+                            title="Agent 3 complete — ready for report generation"
+                            subtitle="Choose your AI model and generate the intelligence report."
                           >
                             <button
                               onClick={() => { setRestartIntent('agent3'); setShowRestartDialog(true) }}
@@ -1310,10 +1420,10 @@ export default function AnalysisPage() {
                             <button
                               onClick={handleRunAgent4Click}
                               className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95"
-                              style={{ background: '#A78BFA', color: '#050816' }}
+                              style={{ background: '#56F2C1', color: '#050816' }}
                             >
-                              <span className="material-symbols-outlined text-[16px]">play_arrow</span>
-                              Run Agent 4 — Report
+                              <span className="material-symbols-outlined text-[16px]">diamond</span>
+                              Generate Intelligence Report
                             </button>
                           </ContinueBanner>
                         )}
@@ -1341,11 +1451,73 @@ export default function AnalysisPage() {
                   <>
                     {vs === 'running' && (
                       <PulseSpinner
-                        label="Agent 4 — Report Generation"
+                        label={phase === 'agent5' ? 'Agent 5 — Quality Review' : 'Agent 4 — Report Generation'}
                         elapsed={elapsed}
-                        message="Generating report narrative…"
-                        hint="Report generation takes 15–60s · polling every 4s"
+                        message={phase === 'agent5' ? 'Running validation checks…' : 'Generating report narrative…'}
+                        hint={phase === 'agent5' ? 'Quality review takes 15–30s · polling every 4s' : 'Report generation takes 15–60s · polling every 4s'}
                       />
+                    )}
+
+                    {/* report_complete: report ready, awaiting Agent 5 confirmation */}
+                    {vs === 'waiting' && (
+                      <>
+                        <div className="bg-surface border rounded p-8 flex flex-col items-center gap-4 text-center"
+                          style={{ borderColor: '#56F2C1', background: 'rgba(86,242,193,0.04)' }}>
+                          <span className="material-symbols-outlined text-[48px]" style={{ color: '#56F2C1' }}>description</span>
+                          <div>
+                            <p className="text-body-md font-body-md font-semibold text-on-surface mb-1">Report generated</p>
+                            <p className="text-label-sm font-label-sm text-outline">Download and review the Word document, then run the quality review agent.</p>
+                          </div>
+
+                          <button
+                            onClick={fetchAndDownloadReport}
+                            disabled={fetchingDocx}
+                            className="flex items-center gap-2 px-6 py-3 rounded font-mono text-[13px] font-semibold transition-all hover:opacity-90 active:scale-95 disabled:opacity-50"
+                            style={{ background: '#56F2C1', color: '#050816' }}
+                          >
+                            <span className="material-symbols-outlined text-[18px]">
+                              {fetchingDocx ? 'autorenew' : 'download'}
+                            </span>
+                            {fetchingDocx ? 'Generating link…' : 'Download Report (.docx)'}
+                          </button>
+
+                          {docxUrl && (
+                            <p className="text-[10px] font-mono text-outline">
+                              Link valid for 1 h ·{' '}
+                              <a href={docxUrl} target="_blank" rel="noopener noreferrer"
+                                className="underline hover:text-on-surface transition-colors">open again</a>
+                            </p>
+                          )}
+                          {docxError && (
+                            <p className="text-[11px] font-mono text-center max-w-xs leading-snug" style={{ color: '#FF4D6D' }}>
+                              {docxError}
+                            </p>
+                          )}
+                        </div>
+
+                        <ContinueBanner
+                          color="#A78BFA"
+                          icon="fact_check"
+                          title="Ready for quality review"
+                          subtitle="Agent 5 validates math, cross-references, business logic and narrative consistency."
+                        >
+                          <button
+                            onClick={handleRunAgent4Click}
+                            className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors"
+                          >
+                            <span className="material-symbols-outlined text-[13px]">replay</span>
+                            Re-run Agent 4
+                          </button>
+                          <button
+                            onClick={_doRunAgent5}
+                            className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95"
+                            style={{ background: '#A78BFA', color: '#050816' }}
+                          >
+                            <span className="material-symbols-outlined text-[16px]">verified</span>
+                            Run Agent 5 — Quality Review
+                          </button>
+                        </ContinueBanner>
+                      </>
                     )}
 
                     {vs === 'done' && (
@@ -1355,9 +1527,35 @@ export default function AnalysisPage() {
                           <span className="material-symbols-outlined text-[48px]" style={{ color: '#56F2C1' }}>task_alt</span>
                           <div>
                             <p className="text-body-md font-body-md font-semibold text-on-surface mb-1">Pipeline complete</p>
-                            <p className="text-label-sm font-label-sm text-outline">Report saved to S3. All agents finished successfully.</p>
+                            <p className="text-label-sm font-label-sm text-outline">Report generated and reviewed. Download the Word document below.</p>
                           </div>
-                          <div className="flex gap-2 mt-2">
+
+                          <button
+                            onClick={fetchAndDownloadReport}
+                            disabled={fetchingDocx}
+                            className="flex items-center gap-2 px-6 py-3 rounded font-mono text-[13px] font-semibold transition-all hover:opacity-90 active:scale-95 disabled:opacity-50"
+                            style={{ background: '#56F2C1', color: '#050816' }}
+                          >
+                            <span className="material-symbols-outlined text-[18px]">
+                              {fetchingDocx ? 'autorenew' : 'download'}
+                            </span>
+                            {fetchingDocx ? 'Generating link…' : 'Download Report (.docx)'}
+                          </button>
+
+                          {docxUrl && (
+                            <p className="text-[10px] font-mono text-outline">
+                              Link valid for 1 h ·{' '}
+                              <a href={docxUrl} target="_blank" rel="noopener noreferrer"
+                                className="underline hover:text-on-surface transition-colors">open again</a>
+                            </p>
+                          )}
+                          {docxError && (
+                            <p className="text-[11px] font-mono text-center max-w-xs leading-snug" style={{ color: '#FF4D6D' }}>
+                              {docxError}
+                            </p>
+                          )}
+
+                          <div className="flex gap-2 mt-1">
                             <button onClick={() => { setRestartIntent('agent3'); setShowRestartDialog(true) }} className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors">
                               <span className="material-symbols-outlined text-[13px]">replay</span>Re-run Agent 3
                             </button>
@@ -1366,6 +1564,63 @@ export default function AnalysisPage() {
                             </button>
                           </div>
                         </div>
+
+                        {/* Agent 5 QA results */}
+                        {revisorData && (
+                          <div className="bg-surface border border-border rounded-lg overflow-hidden">
+                            <div className="px-5 py-3 border-b border-border bg-surface-container-low flex items-center gap-3">
+                              <span className="material-symbols-outlined text-[14px] text-outline">fact_check</span>
+                              <span className="text-[10px] font-mono text-on-surface-variant uppercase tracking-widest">Agent 5 — Quality Review</span>
+                              <span className={`ml-auto text-[9px] font-mono px-2 py-0.5 rounded ${revisorData.validation_passed ? 'text-[#56F2C1]' : 'text-[#FFB020]'}`}
+                                style={{ background: revisorData.validation_passed ? '#56F2C120' : '#FFB02020' }}>
+                                {revisorData.validation_passed ? 'PASSED' : 'WARNINGS'}
+                              </span>
+                            </div>
+                            <div className="grid grid-cols-3 divide-x divide-border">
+                              <div className="p-4 flex flex-col gap-1">
+                                <span className="text-[9px] font-mono text-outline uppercase">QA Score</span>
+                                <span className="text-[22px] font-mono font-bold"
+                                  style={{ color: revisorData.validation_score >= 75 ? '#56F2C1' : revisorData.validation_score >= 50 ? '#FFB020' : '#FF4D6D' }}>
+                                  {revisorData.validation_score}
+                                </span>
+                                <span className="text-[9px] font-mono text-outline">/100</span>
+                              </div>
+                              <div className="p-4 flex flex-col gap-1">
+                                <span className="text-[9px] font-mono text-outline uppercase">Errors</span>
+                                <span className="text-[22px] font-mono font-bold"
+                                  style={{ color: revisorData.errors_count > 0 ? '#FF4D6D' : '#56F2C1' }}>
+                                  {revisorData.errors_count}
+                                </span>
+                              </div>
+                              <div className="p-4 flex flex-col gap-1">
+                                <span className="text-[9px] font-mono text-outline uppercase">Warnings</span>
+                                <span className="text-[22px] font-mono font-bold"
+                                  style={{ color: revisorData.warnings_count > 0 ? '#FFB020' : '#56F2C1' }}>
+                                  {revisorData.warnings_count}
+                                </span>
+                              </div>
+                            </div>
+                            {revisorData.validation_flags && revisorData.validation_flags.length > 0 && (
+                              <div className="border-t border-border divide-y divide-border">
+                                {revisorData.validation_flags.slice(0, 8).map((f, i) => (
+                                  <div key={i} className="px-5 py-2.5 flex items-start gap-3">
+                                    <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded shrink-0 mt-0.5`}
+                                      style={{
+                                        color: f.severity === 'ERROR' ? '#FF4D6D' : '#FFB020',
+                                        background: f.severity === 'ERROR' ? '#FF4D6D15' : '#FFB02015',
+                                      }}>
+                                      {f.severity}
+                                    </span>
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-[11px] text-on-surface">{f.message}</p>
+                                      {f.field && <p className="text-[9px] font-mono text-outline mt-0.5">{f.category} · {f.field}</p>}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </>
                     )}
 
@@ -1487,6 +1742,95 @@ export default function AnalysisPage() {
               </>
             )
           })()}
+        </Modal>
+      )}
+
+      {/* Model selection dialog — Agent 4 */}
+      {showModelDialog && (
+        <Modal onClose={() => setShowModelDialog(false)} wide>
+          <div className="flex items-center gap-3 mb-5">
+            <span className="material-symbols-outlined text-[22px]" style={{ color: '#56F2C1' }}>psychology</span>
+            <div>
+              <p className="text-body-md font-body-md font-semibold text-on-surface">Choose the Intelligence Engine</p>
+              <p className="text-label-sm font-label-sm text-outline">This model will generate the final AI Financial Intelligence Report.</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3 mb-5">
+            {MODELS.map(m => {
+              const isSelected = selectedModel === m.id
+              return (
+                <button
+                  key={m.id}
+                  onClick={() => setSelectedModel(m.id)}
+                  className="relative text-left rounded-lg border transition-all p-4 flex flex-col gap-3"
+                  style={{
+                    borderColor: isSelected ? m.color : 'var(--color-border)',
+                    background: isSelected ? `${m.color}08` : 'var(--color-surface-container-low)',
+                    boxShadow: isSelected ? `0 0 0 1px ${m.color}30, 0 0 16px ${m.color}10` : 'none',
+                  }}
+                >
+                  {'isFlagship' in m && m.isFlagship && (
+                    <span className="absolute top-2.5 right-2.5 text-[9px] font-mono px-1.5 py-0.5 rounded"
+                      style={{ background: `${m.color}20`, color: m.color, border: `1px solid ${m.color}40` }}>
+                      FLAGSHIP
+                    </span>
+                  )}
+
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-lg flex items-center justify-center"
+                      style={{ background: isSelected ? `${m.color}20` : 'var(--color-surface-container)', border: `1px solid ${isSelected ? m.color + '40' : 'var(--color-border)'}` }}>
+                      <span className="material-symbols-outlined text-[18px]" style={{ color: isSelected ? m.color : '#475569' }}>
+                        {m.icon}
+                      </span>
+                    </div>
+                    <div>
+                      <p className="text-body-sm font-body-sm font-semibold" style={{ color: isSelected ? m.color : 'var(--color-on-surface)' }}>
+                        Claude {m.name}
+                      </p>
+                      <p className="text-[9px] font-mono text-outline">{m.version}</p>
+                    </div>
+                  </div>
+
+                  <div>
+                    <p className="text-[11px] font-mono font-semibold mb-1" style={{ color: isSelected ? m.color : '#94A3B8' }}>
+                      {m.tagline}
+                    </p>
+                    <p className="text-[10px] text-outline leading-snug">{m.description}</p>
+                  </div>
+
+                  {isSelected && (
+                    <div className="flex items-center gap-1">
+                      <span className="material-symbols-outlined text-[11px]" style={{ color: m.color }}>check_circle</span>
+                      <span className="text-[9px] font-mono" style={{ color: m.color }}>Selected</span>
+                    </div>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="flex items-center justify-between pt-3 border-t border-border">
+            <p className="text-[10px] font-mono text-outline">
+              Engine: <span style={{ color: MODELS.find(m => m.id === selectedModel)?.color }}>{selectedModel}</span>
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowModelDialog(false)}
+                className="px-4 py-2 rounded border border-border text-outline hover:text-on-surface text-[12px] font-mono transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { setShowModelDialog(false); _doRunAgent4() }}
+                className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold transition-all hover:opacity-90 active:scale-95"
+                style={{ background: MODELS.find(m => m.id === selectedModel)?.color ?? '#56F2C1', color: '#050816' }}
+              >
+                <span className="material-symbols-outlined text-[16px]">play_arrow</span>
+                Generate Report
+              </button>
+            </div>
+          </div>
         </Modal>
       )}
 

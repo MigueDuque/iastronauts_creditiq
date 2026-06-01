@@ -25,6 +25,7 @@ def _sfn_client():
 s3  = boto3.client("s3")
 WORKFLOW_ARN     = os.environ["WORKFLOW_ARN"]
 BUCKET           = os.environ["MAIN_BUCKET"]
+STAGE            = os.environ.get("STAGE", "dev")
 LOCAL_DEV_BYPASS = os.environ.get("LOCAL_DEV_BYPASS_SFN", "").lower() == "true"
 
 
@@ -250,10 +251,10 @@ def lambda_handler(event: dict, context) -> dict:
                 )
             except ClientError as e:
                 code = e.response["Error"]["Code"]
-                if code in ("StateMachineDoesNotExist", "AccessDeniedException"):
+                if code in ("StateMachineDoesNotExist", "AccessDeniedException") and STAGE == "dev":
                     from shared.progress_store import build_progress
                     logger.warning(
-                        "orchestrator | SFN not available (%s), running extractor locally. job_id=%s",
+                        "orchestrator | SFN not available (%s), running extractor locally (dev only). job_id=%s",
                         code, orchestrator_output.job_id,
                     )
                     _save_job_status(orchestrator_output.job_id, "processing", progress=build_progress(

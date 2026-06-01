@@ -26,12 +26,13 @@ class FinalReportOutput(BaseModel):
     validation_score: int = Field(ge=0, le=100)
     overall_risk_score: RiskLevel
     overall_financial_health: FinancialHealth
-    executive_summary: str
-    board_summary: str
+    executive_summary: str = ""
+    board_summary: str = ""
     analysis_results: list[AccountAnalysis]      # cuenta a cuenta — base para históricos
-    niif_note_drafts: list[NiifNoteDraft]
-    markdown_report_url: str
+    niif_note_drafts: list[NiifNoteDraft] = []
+    markdown_report_url: str = ""
     pdf_report_url: str | None = None
+    docx_report_url: str | None = None
     report_sections: dict = {}
     financial_ratios: dict = {}
     fund_analysis: dict = {}
