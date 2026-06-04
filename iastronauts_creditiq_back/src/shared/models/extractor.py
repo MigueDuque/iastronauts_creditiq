@@ -18,6 +18,7 @@ class ExtractedAccount(BaseModel):
     is_total: bool = False            # True when this row is a sum/subtotal/total — skip when re-summing categories
     investment_type: str | None = None  # equity | bond | sovereign_debt | trust_rights | futures | fund | cash | null
     issuer_name: str | None = None       # Emisor del instrumento financiero (ej. "Ecopetrol S.A.")
+    nominal_value: float | None = None   # Valor/cantidad nominal del instrumento ("Nominal YYYY"); None si no aplica
 
 
 class NiifValidationFlag(BaseModel):

@@ -1,5 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
+import katex from 'katex'
+import 'katex/dist/katex.min.css'
 import AiReasoningPipeline from '../components/AiReasoningPipeline'
+import ChatWithReviewer from '../components/ChatWithReviewer'
+import { apiFetch } from '../lib/apiClient'
 
 const API = import.meta.env.VITE_API_URL || ''
 const STORAGE_KEY = 'creditiq_analysis_id'
@@ -9,7 +14,6 @@ const ANALYZER_KEY = 'creditiq_analyzer_data'
 const SCORER_KEY = 'creditiq_scorer_data'
 const REVISOR_KEY = 'creditiq_revisor_data'
 const PHASE_KEY = 'creditiq_phase'
-const HEADERS = { 'x-tenant-id': 'demo' }
 
 // ── Processing step timings ────────────────────────────────────────────────
 
@@ -97,11 +101,12 @@ const AGENT_COLOR: Record<string, string> = {
   agent2: '#56CCF2',
   agent3: '#A78BFA',
   agent4: '#56F2C1',
+  agent5: '#6EE7B7',
 }
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-type ActiveView = 'agent1' | 'agent2' | 'agent3' | 'agent4'
+type ActiveView = 'agent1' | 'agent2' | 'agent3' | 'agent4' | 'agent5'
 type ProcessingPhase = 'agent1' | 'agent2' | 'agent3' | 'agent4' | 'agent5' | null
 
 interface JobSummary {
@@ -146,8 +151,89 @@ interface ExtractorOutput {
   extraction_confidence: number; extraction_warnings: string[]; accounts: Account[]
 }
 
+// Hover-dwell calculation breakdown shown on a KPI card. Mirrors the backend
+// `_computation_trace` shape: the numbers used (inputs), the equation (formula),
+// and the value produced (result). `note` is free text for tiles without an equation.
+interface CardTrace {
+  formula?: string
+  inputs?: Record<string, number | string | null | undefined>
+  result?: number | string
+  note?: string
+}
+
+// One {formula, inputs, result} entry from ratio_engine._computation_trace.
+interface RatioTraceEntry {
+  formula?: string
+  inputs?: Record<string, number | string | null | undefined>
+  result?: number | string
+}
+
 interface DashboardMetric {
   key: string; label: string; value: string; signal: 'positive' | 'neutral' | 'negative'
+  trace?: CardTrace
+}
+
+// Maps a dashboard card key → the ratio_engine trace key that explains it.
+// Used to recover a card's equation from financial_ratios._computation_trace
+// when the backend output predates dashboard_metrics[].trace.
+const KPI_RATIO_KEY: Record<string, string> = {
+  roe: 'roe_pct',
+  net_margin: 'margen_neto_pct',
+  ebitda_margin: 'margen_ebitda_pct',
+}
+
+// Resolve the trace shown on a financial KPI card: prefer the backend-attached
+// trace (with formula); otherwise reconstruct it from deterministic data already
+// in the analyzer output, so the equation matches the displayed value exactly.
+function resolveKpiTrace(m: DashboardMetric, data: AnalyzerOutput): CardTrace | undefined {
+  if (m.trace?.formula) return m.trace
+
+  // Funds override ROE with (investment_return / closing_nav); the generic
+  // ratio trace would not match the card's value, so rebuild it from the NAV.
+  if (m.key === 'roe') {
+    const nav = data.fund_analysis?.nav_reconciliation
+    if (data.fund_analysis?.is_investment_fund && nav && nav.investment_return != null && nav.closing_nav) {
+      return {
+        formula: '(investment_return / closing_nav) × 100',
+        inputs: { investment_return: nav.investment_return, closing_nav: nav.closing_nav },
+        result: m.value,
+        note: 'Fund ROE uses Utilidad del período ÷ NAV de cierre.',
+      }
+    }
+  }
+
+  // Fund / concentration cards have no _computation_trace entry. Reconstruct a
+  // SYMBOLIC equation (no substituted numbers) from the analyzer output so old
+  // jobs still render math; the value is shown in the pinned Resultado row. New
+  // jobs receive a full worked trace (formula + inputs) from the backend above.
+  if (m.key === 'net_flow' && data.fund_analysis?.nav_reconciliation) {
+    return { formula: 'contributions - redemptions', result: m.value }
+  }
+  if (m.key === 'aum_growth') {
+    return { formula: '(closing_nav - previous_aum) / previous_aum * 100', result: m.value }
+  }
+  if (m.key === 'concentration') {
+    return {
+      formula: 'top_position / total_portfolio * 100',
+      result: m.value,
+      note: data.portfolio_concentration?.top_account_name
+        ? `Mayor posición: ${data.portfolio_concentration.top_account_name}`
+        : undefined,
+    }
+  }
+
+  const ratioKey = KPI_RATIO_KEY[m.key]
+  const ct = data.financial_ratios?._computation_trace
+  const entry = ratioKey ? (ct?.ratios?.[ratioKey] ?? ct?.derived?.[ratioKey]) : undefined
+  if (entry?.formula) {
+    return {
+      formula: entry.formula,
+      inputs: entry.inputs ?? m.trace?.inputs,
+      result: entry.result ?? m.value,
+      note: m.trace?.note,
+    }
+  }
+  return m.trace  // may be undefined or formula-less (e.g. concentration/aum on old jobs)
 }
 
 interface InsightTier1 { signal: string; so_what: string; category: string }
@@ -198,6 +284,13 @@ interface AnalyzerOutput {
     totals: { total_assets: number; total_liabilities: number; total_equity: number; total_revenue: number; net_income: number; ebitda: number }
     ratios: { razon_corriente: number; endeudamiento_global: number; margen_neto_pct: number; margen_ebitda_pct: number; roe_pct: number; deuda_patrimonio: number }
     niif18?: { compliance?: { compliance_score: number; flags: string[] }; subtotals?: { resultado_operativo: number; resultado_neto: number; ebitda_niif18: number } }
+    // Deterministic per-formula audit trail emitted by ratio_engine. Present on
+    // every analyzer output (predates the dashboard_metrics[].trace field), so it
+    // serves as the fallback source for KPI card equations on older jobs.
+    _computation_trace?: {
+      ratios?: Record<string, RatioTraceEntry>
+      derived?: Record<string, RatioTraceEntry>
+    }
   }
   analysis_results: { account_id: string; account_name: string; variation_pct: number; materiality: string; risk_level: string; anomaly_detected: boolean }[]
 }
@@ -259,7 +352,8 @@ interface ScorerOutput {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function initialView(status: string | null): ActiveView {
-  if (status === 'completed' || status === 'report_complete') return 'agent4'
+  if (status === 'completed') return 'agent5'
+  if (status === 'report_complete') return 'agent4'
   if (status === 'scoring_complete') return 'agent3'
   if (status === 'analysis_complete') return 'agent2'
   return 'agent1'
@@ -395,9 +489,12 @@ export default function AnalysisPage() {
   useEffect(() => {
     const cur = jobStatus?.status
     const prev = prevStatus.current
-    if ((cur === 'completed' || cur === 'report_complete') && prev !== cur) {
-      if (!userNavigatedRef.current) setActiveView('agent4')
-      else setNewData(p => { const s = new Set(p); s.add('agent4'); return s })
+    if (cur === 'completed' && prev !== cur) {
+      if (!userNavigatedRef.current) setActiveView('agent5')
+      else setNewData(p => { const s = new Set(p); s.add('agent5'); return s })
+    } else if (cur === 'report_complete' && prev !== cur) {
+      if (!userNavigatedRef.current) setActiveView('agent5')
+      else setNewData(p => { const s = new Set(p); s.add('agent5'); return s })
     }
     prevStatus.current = cur
   }, [jobStatus?.status])
@@ -434,7 +531,7 @@ export default function AnalysisPage() {
     let alive = true
     const poll = async () => {
       try {
-        const res = await fetch(`${API}/analyses/${jobId}`, { headers: HEADERS })
+        const res = await apiFetch(`${API}/analyses/${jobId}`)
         if (!res.ok || !alive) return
         const data: JobStatus = await res.json()
         if (!alive) return
@@ -445,13 +542,13 @@ export default function AnalysisPage() {
         if (data.status === 'extraction_complete' || data.status === 'analysis_complete' ||
           data.status === 'scoring_complete' || data.status === 'completed') {
           if (!report) {
-            const r = await fetch(`${API}/analyses/${jobId}/extractor`, { headers: HEADERS })
+            const r = await apiFetch(`${API}/analyses/${jobId}/extractor`)
             if (r.ok && alive) setReport(await r.json())
           }
         }
         if (data.status === 'analysis_complete' || data.status === 'scoring_complete' || data.status === 'completed') {
           if (!analyzerData) {
-            const r = await fetch(`${API}/analyses/${jobId}/analyzer`, { headers: HEADERS })
+            const r = await apiFetch(`${API}/analyses/${jobId}/analyzer`)
             if (r.ok && alive) {
               const j = await r.json()
               if (j?.analysis_results) setAnalyzerData(j)
@@ -460,13 +557,13 @@ export default function AnalysisPage() {
         }
         if (data.status === 'scoring_complete' || data.status === 'report_complete' || data.status === 'completed') {
           if (!scorerData) {
-            const r = await fetch(`${API}/analyses/${jobId}/scorer`, { headers: HEADERS })
+            const r = await apiFetch(`${API}/analyses/${jobId}/scorer`)
             if (r.ok && alive) setScorerData(await r.json())
           }
         }
         if (data.status === 'completed') {
           if (!revisorData) {
-            const r = await fetch(`${API}/analyses/${jobId}/revisor`, { headers: HEADERS })
+            const r = await apiFetch(`${API}/analyses/${jobId}/revisor`)
             if (r.ok && alive) {
               const j = await r.json()
               if (j?.errors_count !== undefined) setRevisorData(j)
@@ -511,14 +608,14 @@ export default function AnalysisPage() {
   }
 
   async function confirmClear() {
-    if (jobId) { try { await fetch(`${API}/analyses/${jobId}`, { method: 'DELETE', headers: HEADERS }) } catch { } }
+    if (jobId) { try { await apiFetch(`${API}/analyses/${jobId}`, { method: 'DELETE' }) } catch { } }
     _doClean()
   }
 
   async function openJobPicker() {
     setShowJobPicker(true); setJobFilter(''); setLoadingJobs(true)
     try {
-      const res = await fetch(`${API}/jobs`, { headers: HEADERS })
+      const res = await apiFetch(`${API}/jobs`)
       if (res.ok) setPreviousJobs((await res.json()).jobs ?? [])
     } catch (e) { console.error('[jobs]', e) }
     finally { setLoadingJobs(false) }
@@ -533,20 +630,23 @@ export default function AnalysisPage() {
 
     const jid = job.job_id
 
-    // Always try all three endpoints — don't trust job.status which may be stale
-    const [extRes, anlRes, scoRes] = await Promise.allSettled([
-      fetch(`${API}/analyses/${jid}/extractor`, { headers: HEADERS }).then(r => r.ok ? r.json() : null),
-      fetch(`${API}/analyses/${jid}/analyzer`, { headers: HEADERS }).then(r => r.ok ? r.json() : null),
-      fetch(`${API}/analyses/${jid}/scorer`, { headers: HEADERS }).then(r => r.ok ? r.json() : null),
+    // Always try all four endpoints — don't trust job.status which may be stale
+    const [extRes, anlRes, scoRes, revRes] = await Promise.allSettled([
+      apiFetch(`${API}/analyses/${jid}/extractor`).then(r => r.ok ? r.json() : null),
+      apiFetch(`${API}/analyses/${jid}/analyzer`).then(r => r.ok ? r.json() : null),
+      apiFetch(`${API}/analyses/${jid}/scorer`).then(r => r.ok ? r.json() : null),
+      apiFetch(`${API}/analyses/${jid}/revisor`).then(r => r.ok ? r.json() : null),
     ])
 
     const extData = extRes.status === 'fulfilled' && extRes.value?.accounts ? extRes.value : null
     const anlData = anlRes.status === 'fulfilled' && anlRes.value?.analysis_results ? anlRes.value : null
     const scoData = scoRes.status === 'fulfilled' && scoRes.value?.overall_risk_score ? scoRes.value : null
+    const revData = revRes.status === 'fulfilled' && revRes.value?.errors_count !== undefined ? revRes.value : null
 
     if (extData) setReport(extData)
     if (anlData) setAnalyzerData(anlData)
     if (scoData) setScorerData(scoData)
+    if (revData) setRevisorData(revData)
 
     // Derive true status from what actually loaded; trust 'completed'/'failed'/'cancelled' from reported
     const reported = job.status as JobStatus['status']
@@ -569,7 +669,7 @@ export default function AnalysisPage() {
     let alive = true
     const poll = async () => {
       try {
-        const res = await fetch(`${API}/analyses/${jobId}`, { headers: HEADERS })
+        const res = await apiFetch(`${API}/analyses/${jobId}`)
         if (!res.ok || !alive) return
         const data: JobStatus = await res.json()
         if (!alive) return
@@ -592,15 +692,38 @@ export default function AnalysisPage() {
     _doRunAgent2()
   }
 
+  // Forward step from the extraction_complete gate: resume the paused Step Functions
+  // execution via /continue (SendTaskSuccess). Using /reanalyze here would run Agent 2
+  // outside SFN and strand the live task token, corrupting the next /continue.
   async function _doRunAgent2() {
     if (!jobId) return
     userNavigatedRef.current = false; setNewData(new Set())
     setPhase('agent2'); setAnalyzerData(null); setScorerData(null); setElapsed(0)
     setActiveView('agent2')
-    await fetch(`${API}/analyses/${jobId}/reanalyze`, { method: 'POST', headers: HEADERS })
+    await apiFetch(`${API}/analyses/${jobId}/continue`, { method: 'POST' })
     _startPolling(async (data) => {
       if (data.status === 'analysis_complete') {
-        const r = await fetch(`${API}/analyses/${jobId}/analyzer`, { headers: HEADERS })
+        const r = await apiFetch(`${API}/analyses/${jobId}/analyzer`)
+        if (r.ok) {
+          const j = await r.json()
+          if (j?.analysis_results) setAnalyzerData(j)
+        }
+      }
+    })
+  }
+
+  // Force re-run of Agent 2 after it already produced results: runs outside SFN via
+  // /reanalyze (overwrites the existing analysis). The backend tidies the parked SFN
+  // token so the rest of the pipeline then proceeds on the manual path.
+  async function _doRunAgent2Forced() {
+    if (!jobId) return
+    userNavigatedRef.current = false; setNewData(new Set())
+    setPhase('agent2'); setAnalyzerData(null); setScorerData(null); setElapsed(0)
+    setActiveView('agent2')
+    await apiFetch(`${API}/analyses/${jobId}/reanalyze`, { method: 'POST' })
+    _startPolling(async (data) => {
+      if (data.status === 'analysis_complete') {
+        const r = await apiFetch(`${API}/analyses/${jobId}/analyzer`)
         if (r.ok) {
           const j = await r.json()
           if (j?.analysis_results) setAnalyzerData(j)
@@ -620,10 +743,10 @@ export default function AnalysisPage() {
     userNavigatedRef.current = false; setNewData(new Set())
     setPhase('agent3'); setScorerData(null); setElapsed(0)
     setActiveView('agent3')
-    await fetch(`${API}/analyses/${jobId}/continue`, { method: 'POST', headers: HEADERS })
+    await apiFetch(`${API}/analyses/${jobId}/continue`, { method: 'POST' })
     _startPolling(async (data) => {
       if (data.status === 'scoring_complete') {
-        const r = await fetch(`${API}/analyses/${jobId}/scorer`, { headers: HEADERS })
+        const r = await apiFetch(`${API}/analyses/${jobId}/scorer`)
         if (r.ok) setScorerData(await r.json())
       }
     })
@@ -634,10 +757,10 @@ export default function AnalysisPage() {
     userNavigatedRef.current = false; setNewData(new Set())
     setPhase('agent3'); setScorerData(null); setElapsed(0)
     setActiveView('agent3')
-    await fetch(`${API}/analyses/${jobId}/reanalyze-scorer`, { method: 'POST', headers: HEADERS })
+    await apiFetch(`${API}/analyses/${jobId}/reanalyze-scorer`, { method: 'POST' })
     _startPolling(async (data) => {
       if (data.status === 'scoring_complete') {
-        const r = await fetch(`${API}/analyses/${jobId}/scorer`, { headers: HEADERS })
+        const r = await apiFetch(`${API}/analyses/${jobId}/scorer`)
         if (r.ok) setScorerData(await r.json())
       }
     })
@@ -653,13 +776,27 @@ export default function AnalysisPage() {
     userNavigatedRef.current = false; setNewData(new Set())
     setPhase('agent5'); setRevisorData(null); setElapsed(0)
     setActiveView('agent4')
-    await fetch(`${API}/analyses/${jobId}/continue`, { method: 'POST', headers: HEADERS })
+    // Optimistically flip to processing so the first poll doesn't observe the still
+    // -terminal report_complete start-state and stop immediately (TERMINAL includes it).
+    setJobStatus({ analysis_id: jobId, status: 'processing' })
+    const res = await apiFetch(`${API}/analyses/${jobId}/continue`, { method: 'POST' })
+    if (!res.ok) {
+      // /continue rejected (e.g. expired/invalid task token) — surface it instead of
+      // silently resetting the button with nothing on screen.
+      let msg = 'No se pudo iniciar la revisión inteligente.'
+      try { msg = (await res.json())?.error || msg } catch { /* ignore */ }
+      setJobStatus({ analysis_id: jobId, status: 'failed', error: msg })
+      setPhase(null)
+      return
+    }
     _startPolling(async (data) => {
       if (data.status === 'completed') {
-        const r = await fetch(`${API}/analyses/${jobId}/revisor`, { headers: HEADERS })
+        const r = await apiFetch(`${API}/analyses/${jobId}/revisor`)
         if (r.ok) {
           const j = await r.json()
           if (j?.errors_count !== undefined) setRevisorData(j)
+        } else {
+          console.error('[agent5] revisor artifact missing after completion', r.status)
         }
       }
     })
@@ -672,9 +809,15 @@ export default function AnalysisPage() {
     setActiveView('agent4')
     setDocxUrl(null); setDocxError(null)
     const chosenModel = model ?? selectedModel
-    await fetch(`${API}/analyses/${jobId}/reanalyze-report`, {
+    // Forward step from the scoring_complete gate resumes the paused SFN execution via
+    // /continue (the report runs inside the pipeline). Once a report already exists
+    // (report_complete/completed), regenerating force-re-runs Agent 4 outside SFN via
+    // /reanalyze-report. Both carry the analyst-chosen llm_model.
+    const isRerun = jobStatus?.status === 'report_complete' || jobStatus?.status === 'completed'
+    const endpoint = isRerun ? 'reanalyze-report' : 'continue'
+    await apiFetch(`${API}/analyses/${jobId}/${endpoint}`, {
       method: 'POST',
-      headers: { ...HEADERS, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ llm_model: chosenModel }),
     })
     _startPolling(() => { })
@@ -682,7 +825,7 @@ export default function AnalysisPage() {
 
   async function confirmRestart() {
     setShowRestartDialog(false)
-    if (restartIntent === 'agent2') await _doRunAgent2()
+    if (restartIntent === 'agent2') await _doRunAgent2Forced()
     else if (restartIntent === 'agent3') await _doRunAgent3Forced()
     else if (restartIntent === 'agent4') { setShowModelDialog(true); setRestartIntent(null); return }
     setRestartIntent(null)
@@ -698,7 +841,7 @@ export default function AnalysisPage() {
     setFetchingDocx(true)
     setDocxError(null)
     try {
-      const res = await fetch(`${API}/analyses/${jobId}/report`, { headers: HEADERS })
+      const res = await apiFetch(`${API}/analyses/${jobId}/report`)
       const data = await res.json()
       const url = data.docx_url as string | undefined
       if (!res.ok || !url) {
@@ -722,8 +865,9 @@ export default function AnalysisPage() {
   const runningView: ActiveView | null =
     phase === 'agent2' ? 'agent2' :
       phase === 'agent3' ? 'agent3' :
-        (phase === 'agent4' || phase === 'agent5') ? 'agent4' :
-          (st === 'processing' || st === 'pending') ? 'agent1' : null
+        phase === 'agent4' ? 'agent4' :
+          phase === 'agent5' ? 'agent5' :
+            (st === 'processing' || st === 'pending') ? 'agent1' : null
 
   const isProcessing = st === 'processing' || st === 'pending'
 
@@ -742,10 +886,13 @@ export default function AnalysisPage() {
       if (scorerData) return st === 'scoring_complete' ? 'waiting' : 'done'
       return phase === 'agent3' ? 'running' : 'locked'
     }
-    // agent4
-    if (st === 'completed') return 'done'
-    if (st === 'report_complete') return 'waiting'
-    return (phase === 'agent4' || phase === 'agent5') ? 'running' : 'locked'
+    if (v === 'agent4') {
+      if (st === 'completed' || st === 'report_complete') return 'done'
+      return phase === 'agent4' ? 'running' : 'locked'
+    }
+    // agent5 — 'waiting' means "report ready, run me"; 'done' means revisor data exists
+    if (st === 'completed' || st === 'report_complete') return revisorData ? 'done' : 'waiting'
+    return phase === 'agent5' ? 'running' : 'locked'
   }
 
   const accounts = report?.accounts ?? []
@@ -857,6 +1004,7 @@ export default function AnalysisPage() {
               report={report}
               analyzerData={analyzerData}
               scorerData={scorerData}
+              revisorData={revisorData}
               status={st}
               phase={phase}
               newData={newData}
@@ -976,25 +1124,70 @@ export default function AnalysisPage() {
                           // Collect every tile the agent deemed relevant, then let the
                           // layout decide how many rows are needed so they always fit.
                           const tiles: React.ReactNode[] = []
+                          const r = analyzerData.financial_ratios?.ratios
+                          const healthTrace: CardTrace = {
+                            formula: 'clasificación determinista (liquidez, apalancamiento, márgenes, concentración)',
+                            inputs: {
+                              razon_corriente: r?.razon_corriente,
+                              endeudamiento_global: r?.endeudamiento_global,
+                              margen_neto_pct: r?.margen_neto_pct,
+                              roe_pct: r?.roe_pct,
+                            },
+                            result: analyzerData.overall_financial_health.replace(/_/g, ' '),
+                            note: 'Estado financiero derivado por reglas, no por el LLM.',
+                          }
                           tiles.push(
-                            <StatTile key="health" wide label="Financial Health" value={analyzerData.overall_financial_health.replace(/_/g, ' ')} color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#2F80FF'} icon="monitor_heart" />
+                            <StatTile key="health" wide label="Financial Health" value={analyzerData.overall_financial_health.replace(/_/g, ' ')} color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#2F80FF'} icon="monitor_heart" trace={healthTrace} />
                           )
-                          if (isFundWithNav) tiles.push(
-                            <StatTile key="aum" label="Equity"
-                              value={`${analyzerData.fund_analysis!.nav_reconciliation!.closing_nav!.toLocaleString('en-US', { maximumFractionDigits: 0 })}`}
-                              sub="COP MM" color="var(--color-brand-accent)" icon="account_balance_wallet" />
-                          )
+                          if (isFundWithNav) {
+                            const nav = analyzerData.fund_analysis!.nav_reconciliation!
+                            const aumTrace: CardTrace = {
+                              formula: 'opening_nav + contributions − redemptions + investment_return',
+                              inputs: {
+                                opening_nav: nav.opening_nav,
+                                contributions: nav.contributions,
+                                redemptions: nav.redemptions,
+                                investment_return: nav.investment_return,
+                              },
+                              result: `${nav.closing_nav.toLocaleString('en-US', { maximumFractionDigits: 0 })} COP MM`,
+                              note: nav.reconciles ? 'NAV concilia ✓' : `Brecha de conciliación: ${nav.gap_cop_mm} COP MM`,
+                            }
+                            tiles.push(
+                              <StatTile key="aum" label="Equity"
+                                value={`${nav.closing_nav.toLocaleString('en-US', { maximumFractionDigits: 0 })}`}
+                                sub="COP MM" color="var(--color-brand-accent)" icon="account_balance_wallet" trace={aumTrace} />
+                            )
+                          }
                           dashboardMetrics.forEach(m => tiles.push(
                             <StatTile key={m.key} label={m.label} value={m.value}
                               signal={m.signal}
                               color={m.signal === 'positive' ? 'var(--color-success-low)' : m.signal === 'negative' ? 'var(--color-danger-soft)' : 'var(--color-warning-soft)'}
-                              icon={metricIcon(m.key)} />
+                              icon={metricIcon(m.key)} trace={resolveKpiTrace(m, analyzerData)} />
                           ))
+                          const matNames = analyzerData.high_materiality_accounts
+                          const materialityTrace: CardTrace = {
+                            formula: 'count(cuentas con materialidad = ALTA)',
+                            inputs: {
+                              cuentas_materiales: matNames.length,
+                              ejemplos: matNames.slice(0, 4).join(', ') || '—',
+                            },
+                            result: matNames.length,
+                            note: 'Umbral de materialidad = 1% del máximo entre activos y ventas.',
+                          }
                           tiles.push(
-                            <StatTile key="materiality" label="High Materiality" value={analyzerData.high_materiality_accounts.length} sub="accounts" big color="#56CCF2" icon="priority_high" />
+                            <StatTile key="materiality" label="High Materiality" value={matNames.length} sub="accounts" big color="#56CCF2" icon="priority_high" trace={materialityTrace} />
                           )
+                          const anomalyTrace: CardTrace = {
+                            formula: 'count(cuentas con anomaly_detected = true)',
+                            inputs: {
+                              cuentas_analizadas: analyzerData.analysis_results?.length ?? 0,
+                              anomalías: anomalyCount,
+                            },
+                            result: anomalyCount,
+                            note: 'Detector de anomalías a nivel de cuenta y estructural.',
+                          }
                           tiles.push(
-                            <StatTile key="anomalies" label="Anomalies" value={anomalyCount} sub="detected" big color={anomalyCount > 0 ? '#FFB020' : '#56F2C1'} icon={anomalyCount > 0 ? 'warning' : 'check_circle'} />
+                            <StatTile key="anomalies" label="Anomalies" value={anomalyCount} sub="detected" big color={anomalyCount > 0 ? '#FFB020' : '#56F2C1'} icon={anomalyCount > 0 ? 'warning' : 'check_circle'} trace={anomalyTrace} />
                           )
 
                           // Up to 6 tiles stay on a single row; beyond that, split into
@@ -1191,11 +1384,38 @@ export default function AnalysisPage() {
                       <>
                         {/* Overview cards */}
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                          <MetricCard label="Overall Risk" value={scorerData.overall_risk_score} color={RISK_COLOR[scorerData.overall_risk_score] ?? '#8d90a2'} icon="security" />
-                          <MetricCard label="Validation Score" value={`${scorerData.validation_score}/100`}
-                            color={scorerData.validation_score >= 75 ? '#56F2C1' : scorerData.validation_score >= 50 ? '#FFB020' : '#FF4D6D'} icon="verified" />
-                          <MetricCard label="Confidence" value={`${(scorerData.analysis_confidence * 100).toFixed(0)}%`}
-                            color={scorerData.analysis_confidence >= 0.8 ? '#56F2C1' : scorerData.analysis_confidence >= 0.6 ? '#FFB020' : '#FF4D6D'} icon="query_stats" />
+                          {(() => {
+                            const csd = scorerData.composite_score_detail
+                            const vsd = scorerData.validation_score_detail
+                            const acd = scorerData.analysis_confidence_detail
+                            const riskTrace: CardTrace | undefined = csd?.formula ? {
+                              formula: csd.formula,
+                              inputs: csd.weighted_components ?? csd.weights,
+                              result: csd.value != null ? `${scorerData.overall_risk_score} (${csd.value}/100)` : scorerData.overall_risk_score,
+                              note: csd.weight_profile ? `Perfil de ponderación: ${csd.weight_profile}` : undefined,
+                            } : undefined
+                            const valTrace: CardTrace | undefined = vsd?.components ? {
+                              formula: vsd.formula ?? 'sum(score × weight)',
+                              inputs: Object.fromEntries(Object.entries(vsd.components).map(([k, c]) => [k, c.score])),
+                              result: `${scorerData.validation_score}/100`,
+                              note: (vsd.issues_penalized?.length ?? 0) > 0 ? `${vsd.issues_penalized!.length} hallazgo(s) penalizado(s)` : undefined,
+                            } : undefined
+                            const confTrace: CardTrace | undefined = acd?.factors ? {
+                              formula: acd.formula ?? 'media ponderada de factores',
+                              inputs: acd.factors,
+                              result: `${((acd.value ?? scorerData.analysis_confidence) * 100).toFixed(0)}%`,
+                              note: acd.note,
+                            } : undefined
+                            return (
+                              <>
+                                <MetricCard label="Overall Risk" value={scorerData.overall_risk_score} color={RISK_COLOR[scorerData.overall_risk_score] ?? '#8d90a2'} icon="security" trace={riskTrace} />
+                                <MetricCard label="Validation Score" value={`${scorerData.validation_score}/100`}
+                                  color={scorerData.validation_score >= 75 ? '#56F2C1' : scorerData.validation_score >= 50 ? '#FFB020' : '#FF4D6D'} icon="verified" trace={valTrace} />
+                                <MetricCard label="Confidence" value={`${(scorerData.analysis_confidence * 100).toFixed(0)}%`}
+                                  color={scorerData.analysis_confidence >= 0.8 ? '#56F2C1' : scorerData.analysis_confidence >= 0.6 ? '#FFB020' : '#FF4D6D'} icon="query_stats" trace={confTrace} />
+                              </>
+                            )
+                          })()}
                           <div className="bg-surface border border-border rounded-lg p-4 flex flex-col gap-2">
                             <span className="text-label-sm font-label-sm text-on-surface-variant uppercase text-[10px]">Flags</span>
                             <span className={`text-[11px] font-mono ${scorerData.anti_hallucination_passed ? 'text-[#56F2C1]' : 'text-[#FF4D6D]'}`}>
@@ -1565,60 +1785,20 @@ export default function AnalysisPage() {
                           </div>
                         </div>
 
-                        {/* Agent 5 QA results */}
                         {revisorData && (
-                          <div className="bg-surface border border-border rounded-lg overflow-hidden">
-                            <div className="px-5 py-3 border-b border-border bg-surface-container-low flex items-center gap-3">
-                              <span className="material-symbols-outlined text-[14px] text-outline">fact_check</span>
-                              <span className="text-[10px] font-mono text-on-surface-variant uppercase tracking-widest">Agent 5 — Quality Review</span>
-                              <span className={`ml-auto text-[9px] font-mono px-2 py-0.5 rounded ${revisorData.validation_passed ? 'text-[#56F2C1]' : 'text-[#FFB020]'}`}
-                                style={{ background: revisorData.validation_passed ? '#56F2C120' : '#FFB02020' }}>
-                                {revisorData.validation_passed ? 'PASSED' : 'WARNINGS'}
-                              </span>
-                            </div>
-                            <div className="grid grid-cols-3 divide-x divide-border">
-                              <div className="p-4 flex flex-col gap-1">
-                                <span className="text-[9px] font-mono text-outline uppercase">QA Score</span>
-                                <span className="text-[22px] font-mono font-bold"
-                                  style={{ color: revisorData.validation_score >= 75 ? '#56F2C1' : revisorData.validation_score >= 50 ? '#FFB020' : '#FF4D6D' }}>
-                                  {revisorData.validation_score}
-                                </span>
-                                <span className="text-[9px] font-mono text-outline">/100</span>
-                              </div>
-                              <div className="p-4 flex flex-col gap-1">
-                                <span className="text-[9px] font-mono text-outline uppercase">Errors</span>
-                                <span className="text-[22px] font-mono font-bold"
-                                  style={{ color: revisorData.errors_count > 0 ? '#FF4D6D' : '#56F2C1' }}>
-                                  {revisorData.errors_count}
-                                </span>
-                              </div>
-                              <div className="p-4 flex flex-col gap-1">
-                                <span className="text-[9px] font-mono text-outline uppercase">Warnings</span>
-                                <span className="text-[22px] font-mono font-bold"
-                                  style={{ color: revisorData.warnings_count > 0 ? '#FFB020' : '#56F2C1' }}>
-                                  {revisorData.warnings_count}
-                                </span>
-                              </div>
-                            </div>
-                            {revisorData.validation_flags && revisorData.validation_flags.length > 0 && (
-                              <div className="border-t border-border divide-y divide-border">
-                                {revisorData.validation_flags.slice(0, 8).map((f, i) => (
-                                  <div key={i} className="px-5 py-2.5 flex items-start gap-3">
-                                    <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded shrink-0 mt-0.5`}
-                                      style={{
-                                        color: f.severity === 'ERROR' ? '#FF4D6D' : '#FFB020',
-                                        background: f.severity === 'ERROR' ? '#FF4D6D15' : '#FFB02015',
-                                      }}>
-                                      {f.severity}
-                                    </span>
-                                    <div className="flex-1 min-w-0">
-                                      <p className="text-[11px] text-on-surface">{f.message}</p>
-                                      {f.field && <p className="text-[9px] font-mono text-outline mt-0.5">{f.category} · {f.field}</p>}
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
+                          <div className="bg-surface border rounded px-4 py-3 flex items-center gap-3"
+                            style={{ borderColor: revisorData.validation_passed ? 'rgba(86,242,193,0.3)' : 'rgba(255,176,32,0.3)', background: revisorData.validation_passed ? 'rgba(86,242,193,0.04)' : 'rgba(255,176,32,0.04)' }}>
+                            <span className="material-symbols-outlined text-[16px]" style={{ color: revisorData.validation_passed ? '#56F2C1' : '#FFB020' }}>fact_check</span>
+                            <span className="text-[11px] font-mono flex-1" style={{ color: revisorData.validation_passed ? '#56F2C1' : '#FFB020' }}>
+                              Agent 5 QA — score {revisorData.validation_score}/100 · {revisorData.errors_count} errors · {revisorData.warnings_count} warnings
+                            </span>
+                            <button
+                              onClick={() => handleViewSelect('agent5')}
+                              className="text-[10px] font-mono px-2.5 py-1 rounded border border-border text-outline hover:text-on-surface transition-colors flex items-center gap-1"
+                            >
+                              <span className="material-symbols-outlined text-[12px]">open_in_new</span>
+                              View details
+                            </button>
                           </div>
                         )}
                       </>
@@ -1626,6 +1806,90 @@ export default function AnalysisPage() {
 
                     {vs === 'locked' && (
                       <LockedView icon="article" message="Agent 4 hasn't run yet" hint="Complete risk scoring first, then generate the report." />
+                    )}
+                  </>
+                )
+              })()}
+
+              {/* ══ AGENT 5 VIEW ════════════════════════════════════════════ */}
+              {activeView === 'agent5' && (() => {
+                const vs = getViewState('agent5')
+                return (
+                  <>
+                    {vs === 'running' && (
+                      <PulseSpinner
+                        label="Agent 5 — Quality Review"
+                        elapsed={elapsed}
+                        message="Running validation checks…"
+                        hint="Quality review takes 15–30s · polling every 4s"
+                      />
+                    )}
+
+                    {vs === 'waiting' && !revisorData && (
+                      <ContinueBanner
+                        color="#6EE7B7"
+                        icon="fact_check"
+                        title="Pipeline complete — quality review pending"
+                        subtitle="Agent 5 validates math, cross-references, business logic and narrative consistency."
+                      >
+                        <button
+                          onClick={_doRunAgent5}
+                          className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95"
+                          style={{ background: '#6EE7B7', color: '#050816' }}
+                        >
+                          <span className="material-symbols-outlined text-[16px]">verified</span>
+                          Run Agent 5 — Quality Review
+                        </button>
+                      </ContinueBanner>
+                    )}
+
+                    {(vs === 'done' || (vs === 'waiting' && revisorData)) && revisorData && (
+                      <>
+                        {/* QA score cards */}
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                          <MetricCard
+                            label="QA Score"
+                            value={`${revisorData.validation_score}/100`}
+                            color={revisorData.validation_score >= 75 ? '#56F2C1' : revisorData.validation_score >= 50 ? '#FFB020' : '#FF4D6D'}
+                            icon="verified"
+                          />
+                          <MetricCard
+                            label="Errors"
+                            value={String(revisorData.errors_count)}
+                            color={revisorData.errors_count > 0 ? '#FF4D6D' : '#56F2C1'}
+                            icon="error"
+                          />
+                          <MetricCard
+                            label="Warnings"
+                            value={String(revisorData.warnings_count)}
+                            color={revisorData.warnings_count > 0 ? '#FFB020' : '#56F2C1'}
+                            icon="warning"
+                          />
+                        </div>
+
+                        {/* Validation flags */}
+                        {revisorData.validation_flags && revisorData.validation_flags.length > 0 && (
+                          <ValidationFlagsTable flags={revisorData.validation_flags} passed={revisorData.validation_passed} />
+                        )}
+
+                        {/* Re-run button */}
+                        <div className="flex justify-end gap-2">
+                          <button onClick={_doRunAgent5} className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors">
+                            <span className="material-symbols-outlined text-[13px]">replay</span>Re-run Agent 5
+                          </button>
+                        </div>
+
+                        {/* Inline chat */}
+                        <ChatWithReviewer
+                          jobId={jobId ?? ''}
+                          visible={!!(jobId && (st === 'completed' || st === 'report_complete'))}
+                          inline
+                        />
+                      </>
+                    )}
+
+                    {vs === 'locked' && (
+                      <LockedView icon="fact_check" message="Agent 5 hasn't run yet" hint="Complete report generation first, then run the quality review." />
                     )}
                   </>
                 )
@@ -1856,12 +2120,13 @@ export default function AnalysisPage() {
 
 // ── Sub-components ────────────────────────────────────────────────────────
 
-function ViewTabBar({ activeView, onSelectView, report, analyzerData, scorerData, status, phase, newData }: {
+function ViewTabBar({ activeView, onSelectView, report, analyzerData, scorerData, revisorData, status, phase, newData }: {
   activeView: ActiveView
   onSelectView: (v: ActiveView) => void
   report: ExtractorOutput | null
   analyzerData: AnalyzerOutput | null
   scorerData: ScorerOutput | null
+  revisorData: RevisorData | null
   status: string | null
   phase: ProcessingPhase
   newData?: Set<ActiveView>
@@ -1870,6 +2135,7 @@ function ViewTabBar({ activeView, onSelectView, report, analyzerData, scorerData
   const isRunning2 = phase === 'agent2'
   const isRunning3 = phase === 'agent3'
   const isRunning4 = phase === 'agent4'
+  const isRunning5 = phase === 'agent5'
 
   const tabs = [
     {
@@ -1912,16 +2178,30 @@ function ViewTabBar({ activeView, onSelectView, report, analyzerData, scorerData
       label: 'Agent 4',
       name: 'Report',
       icon: 'article',
-      available: status === 'completed' || isRunning4,
+      available: status === 'completed' || status === 'report_complete' || isRunning4,
       running: isRunning4,
-      done: status === 'completed',
+      done: status === 'completed' || status === 'report_complete',
       color: AGENT_COLOR.agent4,
-      summary: status === 'completed' ? 'Complete' : null,
+      summary: status === 'completed' || status === 'report_complete' ? 'Generated' : null,
+    },
+    {
+      key: 'agent5' as const,
+      label: 'Agent 5',
+      name: 'Review',
+      icon: 'fact_check',
+      available: !!revisorData || isRunning5 || status === 'completed',
+      running: isRunning5,
+      done: !!revisorData,
+      color: AGENT_COLOR.agent5,
+      summary: revisorData ? `QA ${revisorData.validation_score}/100` : null,
+      summaryColor: revisorData
+        ? (revisorData.validation_score >= 75 ? '#56F2C1' : revisorData.validation_score >= 50 ? '#FFB020' : '#FF4D6D')
+        : undefined,
     },
   ]
 
   return (
-    <div className="grid grid-cols-4 bg-surface border border-border rounded-lg overflow-hidden">
+    <div className="grid grid-cols-5 bg-surface border border-border rounded-lg overflow-hidden">
       {tabs.map(tab => {
         const isActive = activeView === tab.key
         const hasNew = newData?.has(tab.key) && !tab.running
@@ -2119,15 +2399,292 @@ function Kpi({ label, value, color }: { label: string; value: string; color: str
   )
 }
 
-function MetricCard({ label, value, color, icon }: { label: string; value: string; color: string; icon: string }) {
-  // Compact two-line card: label + icon on line 1, value on line 2.
+// ── Hover-dwell calculation popover ─────────────────────────────────────────
+// Shows the numbers, equation and output behind a KPI card after the cursor
+// rests on it for ~500ms. Rendered through a portal with fixed positioning so
+// it is never clipped by the card's `overflow-hidden`.
+
+const DWELL_MS = 500
+
+function useDwell(delay = DWELL_MS) {
+  const [open, setOpen] = useState(false)
+  const timer = useRef<number | null>(null)
+  const clear = () => { if (timer.current !== null) { window.clearTimeout(timer.current); timer.current = null } }
+  const onEnter = () => { clear(); timer.current = window.setTimeout(() => setOpen(true), delay) }
+  const onLeave = () => { clear(); setOpen(false) }
+  useEffect(() => clear, [])
+  return { open, onEnter, onLeave }
+}
+
+function fmtVal(v: number | string | null | undefined): string {
+  if (v === null || v === undefined) return '—'
+  if (typeof v === 'number') return Number.isInteger(v) ? v.toLocaleString('en-US') : v.toLocaleString('en-US', { maximumFractionDigits: 4 })
+  return v
+}
+
+// ── Formula → LaTeX transpiler ───────────────────────────────────────────────
+// Turns the deterministic plain-text formulas (e.g. "(net_income / total_equity)
+// * 100") into rendered math: real fractions via \frac, × for multiplication,
+// and — when every identifier has a matching input — a second line with the
+// actual numbers substituted. Purely a presentation of existing data: it never
+// invents values. Non-arithmetic strings (e.g. "count(...)", "score >= 70 → …")
+// fail to parse and fall back to styled monospace text.
+
+type FNode =
+  | { t: 'num'; v: string }
+  | { t: 'id'; name: string }
+  | { t: 'group'; e: FNode }
+  | { t: 'neg'; e: FNode }
+  | { t: 'bin'; op: string; l: FNode; r: FNode }
+
+function tokenizeFormula(s: string): string[] | null {
+  const tokens: string[] = []
+  let i = 0
+  const isIdStart = (c: string) => /[A-Za-zÀ-ÿ_]/.test(c)
+  const isIdChar = (c: string) => /[A-Za-zÀ-ÿ0-9_.]/.test(c)
+  while (i < s.length) {
+    const c = s[i]
+    if (c === ' ' || c === '\t') { i++; continue }
+    // Accept typographic operators emitted by the backend traces alongside ASCII:
+    // ×/· → '*', and the Unicode minus (−, U+2212) / en-dash (–) → '-'. Without
+    // this, formulas like "opening_nav + contributions − redemptions" fail to
+    // tokenize and fall back to plain text instead of rendered math.
+    if ('+-−–*/×·()'.includes(c)) {
+      const op = c === '·' || c === '×' ? '*' : (c === '−' || c === '–' ? '-' : c)
+      tokens.push(op); i++; continue
+    }
+    if (/[0-9]/.test(c)) {
+      let n = ''
+      while (i < s.length && /[0-9.]/.test(s[i])) n += s[i++]
+      tokens.push(n); continue
+    }
+    if (isIdStart(c)) {
+      let id = ''
+      while (i < s.length && isIdChar(s[i])) id += s[i++]
+      tokens.push(id); continue
+    }
+    return null  // unsupported character → not a clean arithmetic formula
+  }
+  return tokens
+}
+
+function parseFormula(formula: string): FNode | null {
+  const toks = tokenizeFormula(formula)
+  if (!toks || toks.length === 0) return null
+  let p = 0
+  const peek = () => toks[p]
+  const eat = (t?: string) => { if (t && toks[p] !== t) throw new Error('parse'); return toks[p++] }
+
+  // expr := term (('+'|'-') term)*   term := factor (('*'|'/') factor)*
+  function parseExpr(): FNode {
+    let node = parseTerm()
+    while (peek() === '+' || peek() === '-') { const op = eat(); node = { t: 'bin', op, l: node, r: parseTerm() } }
+    return node
+  }
+  function parseTerm(): FNode {
+    let node = parseFactor()
+    while (peek() === '*' || peek() === '/') { const op = eat(); node = { t: 'bin', op, l: node, r: parseFactor() } }
+    return node
+  }
+  function parseFactor(): FNode {
+    const tk = peek()
+    if (tk === '-') { eat(); return { t: 'neg', e: parseFactor() } }
+    if (tk === '(') { eat('('); const e = parseExpr(); eat(')'); return { t: 'group', e } }
+    if (tk === undefined) throw new Error('parse')
+    eat()
+    if (/^[0-9.]+$/.test(tk)) return { t: 'num', v: tk }
+    return { t: 'id', name: tk }
+  }
+  try {
+    const node = parseExpr()
+    if (p !== toks.length) return null  // trailing tokens → reject
+    return node
+  } catch { return null }
+}
+
+const texEscape = (s: string) => s.replace(/\\/g, '\\backslash ').replace(/_/g, '\\_').replace(/%/g, '\\%').replace(/&/g, '\\&')
+const texNum = (s: string) => s.replace(/,/g, '{,}')
+
+// Render a node to LaTeX. `subs` (optional) maps identifiers → their numeric
+// values for the "numbers plugged in" line; when present, every id must resolve.
+function nodeToTex(node: FNode, subs?: Record<string, string>): string {
+  const bare = (n: FNode): string => (n.t === 'group' ? nodeToTex(n.e, subs) : nodeToTex(n, subs))
+  switch (node.t) {
+    case 'num': return texNum(node.v)
+    case 'id': {
+      if (subs) return subs[node.name]            // guaranteed present by canSubstitute()
+      return `\\text{${texEscape(node.name.replace(/_/g, ' '))}}`
+    }
+    case 'group': return `\\left(${nodeToTex(node.e, subs)}\\right)`
+    case 'neg': return `-${nodeToTex(node.e, subs)}`
+    case 'bin':
+      if (node.op === '/') return `\\dfrac{${bare(node.l)}}{${bare(node.r)}}`
+      if (node.op === '*') return `${nodeToTex(node.l, subs)} \\times ${nodeToTex(node.r, subs)}`
+      return `${nodeToTex(node.l, subs)} ${node.op} ${nodeToTex(node.r, subs)}`
+  }
+}
+
+function collectIds(node: FNode, acc: Set<string>): void {
+  if (node.t === 'id') acc.add(node.name)
+  else if (node.t === 'group' || node.t === 'neg') collectIds(node.t === 'group' ? node.e : node.e, acc)
+  else if (node.t === 'bin') { collectIds(node.l, acc); collectIds(node.r, acc) }
+}
+
+// Build the substitution map only if EVERY identifier has a numeric input value.
+function buildSubs(node: FNode, inputs: CardTrace['inputs']): Record<string, string> | null {
+  if (!inputs) return null
+  const ids = new Set<string>()
+  collectIds(node, ids)
+  if (ids.size === 0) return null
+  const subs: Record<string, string> = {}
+  for (const id of ids) {
+    const v = inputs[id]
+    if (v === null || v === undefined || v === '') return null
+    if (typeof v === 'number') subs[id] = texNum(fmtVal(v))
+    else if (/^-?[0-9][0-9.,]*%?$/.test(v.trim())) subs[id] = texNum(v.trim())
+    else return null  // non-numeric input (e.g. an account name) — skip numeric line
+  }
+  return subs
+}
+
+function renderTex(latex: string): string | null {
+  // strict:false renders accented Spanish identifiers (e.g. "Crédito") inside
+  // \text{} without flooding the console with unicode-in-math warnings.
+  try { return katex.renderToString(latex, { throwOnError: true, strict: false, displayMode: false, output: 'html' }) }
+  catch { return null }
+}
+
+// Renders the equation graphically; returns null if the formula isn't arithmetic
+// (caller then shows the plain-text fallback).
+function Equation({ trace, color }: { trace: CardTrace; color: string }) {
+  if (!trace.formula) return null
+  const ast = parseFormula(trace.formula)
+  const symHtml = ast ? renderTex(nodeToTex(ast)) : null
+  if (!ast || !symHtml) {
+    // Fallback: prettified monospace text for descriptive / non-arithmetic formulas.
+    return (
+      <code className="block text-[11px] font-mono text-on-surface bg-surface rounded px-2 py-1.5 break-words leading-snug">
+        {trace.formula.replace(/\*/g, '×')}
+      </code>
+    )
+  }
+  const subs = buildSubs(ast, trace.inputs)
+  const resultTex = (() => {
+    const r = trace.result
+    if (r === null || r === undefined) return null
+    const s = String(r)
+    return /^-?[0-9][0-9.,]*\s*%?$/.test(s.trim()) ? texNum(s.trim()) : `\\text{${texEscape(s)}}`
+  })()
+  const numHtml = subs ? renderTex(`${nodeToTex(ast, subs)}${resultTex ? ` = ${resultTex}` : ''}`) : null
+
   return (
-    <div className="bg-surface border border-border floating-card rounded px-3 py-2">
+    <div className="rounded bg-surface px-2 py-2 leading-snug">
+      <div className="overflow-x-auto text-[13px] text-on-surface [&_.katex]:text-[1em]" dangerouslySetInnerHTML={{ __html: symHtml }} />
+      {numHtml && (
+        <div
+          className="mt-1.5 overflow-x-auto border-t pt-1.5 text-[12px] [&_.katex]:text-[1em]"
+          style={{ borderColor: 'var(--color-border)', color }}
+          dangerouslySetInnerHTML={{ __html: numHtml }}
+        />
+      )}
+    </div>
+  )
+}
+
+function TracePopover({ anchor, open, trace, label, color }: {
+  anchor: React.RefObject<HTMLElement | null>
+  open: boolean
+  trace: CardTrace
+  label: string
+  color: string
+}) {
+  const [pos, setPos] = useState<{ top: number; left: number; maxH: number } | null>(null)
+
+  useEffect(() => {
+    if (!open || !anchor.current) { setPos(null); return }
+    const r = anchor.current.getBoundingClientRect()
+    const W = 288
+    const MARGIN = 12
+    // Defined vertical limit: grow with content up to ~58% of the viewport
+    // (capped a touch above the old fixed size), then the body scrolls.
+    const maxH = Math.min(420, Math.round(window.innerHeight * 0.58), window.innerHeight - MARGIN * 2)
+    // Prefer to the right of the card; flip left if it would overflow the viewport.
+    let left = r.right + 10
+    if (left + W > window.innerWidth - 8) left = Math.max(8, r.left - W - 10)
+    // Align to the card top, but lift up so the full (possibly capped) height stays on-screen.
+    const top = Math.max(MARGIN, Math.min(r.top, window.innerHeight - maxH - MARGIN))
+    setPos({ top, left, maxH })
+  }, [open, anchor])
+
+  if (!open || !pos) return null
+  const inputs = Object.entries(trace.inputs ?? {})
+
+  return createPortal(
+    <div
+      role="tooltip"
+      className="fixed z-[120] flex w-72 flex-col rounded-xl border bg-surface-container shadow-2xl animate-fade-in"
+      style={{ top: pos.top, left: pos.left, maxHeight: pos.maxH, borderColor: `color-mix(in srgb, ${color} 40%, transparent)` }}
+    >
+      {/* Header — pinned */}
+      <div className="flex shrink-0 items-center gap-1.5 px-3 pt-3 pb-2">
+        <span className="material-symbols-outlined text-[14px]" style={{ color }}>function</span>
+        <span className="text-[9px] font-mono uppercase tracking-[0.14em]" style={{ color }}>{label} · cómo se calcula</span>
+      </div>
+
+      {/* Body — scrolls when content exceeds the capped height */}
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 [scrollbar-width:thin]">
+        {inputs.length > 0 && (
+          <div className="mb-2">
+            <span className="block text-[8px] font-mono uppercase tracking-widest text-outline mb-1">Datos usados</span>
+            <div className="flex flex-col gap-0.5">
+              {inputs.map(([k, v]) => (
+                <div key={k} className="flex items-baseline justify-between gap-3 text-[11px]">
+                  <span className="font-mono text-on-surface-variant truncate">{k}</span>
+                  <span className="font-mono font-semibold text-on-surface shrink-0">{fmtVal(v)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {trace.formula && (
+          <div className="mb-2">
+            <span className="block text-[8px] font-mono uppercase tracking-widest text-outline mb-1">Ecuación</span>
+            <Equation trace={trace} color={color} />
+          </div>
+        )}
+
+        {trace.note && <p className="mb-2 text-[10px] leading-tight text-outline">{trace.note}</p>}
+      </div>
+
+      {/* Result — pinned */}
+      <div className="flex shrink-0 items-baseline justify-between gap-3 border-t px-3 py-2.5" style={{ borderColor: 'var(--color-border)' }}>
+        <span className="text-[8px] font-mono uppercase tracking-widest text-outline">Resultado</span>
+        <span className="font-mono text-[13px] font-bold" style={{ color }}>{fmtVal(trace.result)}</span>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+function MetricCard({ label, value, color, icon, trace }: { label: string; value: string; color: string; icon: string; trace?: CardTrace }) {
+  // Compact two-line card: label + icon on line 1, value on line 2.
+  const ref = useRef<HTMLDivElement>(null)
+  const dwell = useDwell()
+  const hasTrace = !!trace
+  return (
+    <div
+      ref={ref}
+      className={`bg-surface border border-border floating-card rounded px-3 py-2 ${hasTrace ? 'cursor-help' : ''}`}
+      onMouseEnter={hasTrace ? dwell.onEnter : undefined}
+      onMouseLeave={hasTrace ? dwell.onLeave : undefined}
+    >
       <div className="flex items-center justify-between gap-2">
         <span className="text-label-sm font-label-sm text-on-surface-variant uppercase text-[9px] truncate">{label}</span>
         <span className="material-symbols-outlined text-[13px] text-outline shrink-0">{icon}</span>
       </div>
       <div className="text-[15px] leading-tight font-mono font-bold truncate" style={{ color }} title={value}>{value}</div>
+      {trace && <TracePopover anchor={ref} open={dwell.open} trace={trace} label={label} color={color} />}
     </div>
   )
 }
@@ -2136,7 +2693,7 @@ function MetricCard({ label, value, color, icon }: { label: string; value: strin
 // Portrait layout: icon chip on top → hero value in the middle → label at the
 // foot, with a signal-colored accent bar + corner glow. `color` may be a hex or
 // a CSS var; tints are derived with color-mix so both work.
-function StatTile({ label, value, color, icon, sub, big, signal, wide }: {
+function StatTile({ label, value, color, icon, sub, big, signal, wide, trace }: {
   label: string
   value: string | number
   color: string
@@ -2145,14 +2702,21 @@ function StatTile({ label, value, color, icon, sub, big, signal, wide }: {
   big?: boolean
   signal?: 'positive' | 'neutral' | 'negative'
   wide?: boolean
+  trace?: CardTrace
 }) {
   const tint = (pct: number) => `color-mix(in srgb, ${color} ${pct}%, transparent)`
   const trend = signal === 'positive' ? 'trending_up' : signal === 'negative' ? 'trending_down' : null
+  const ref = useRef<HTMLDivElement>(null)
+  const dwell = useDwell()
+  const hasTrace = !!trace
   return (
     <div
+      ref={ref}
+      onMouseEnter={hasTrace ? dwell.onEnter : undefined}
+      onMouseLeave={hasTrace ? dwell.onLeave : undefined}
       // `flex-1 min-w-0` lets every tile share one row without wrapping; `wide`
       // grants ~1.8× the horizontal share for long text (e.g. Financial Health).
-      className={`floating-card group relative flex min-w-0 flex-col justify-between overflow-hidden rounded-xl border bg-surface p-4 min-h-[152px] ${wide ? 'flex-[1.5]' : 'flex-1'}`}
+      className={`floating-card group relative flex min-w-0 flex-col justify-between overflow-hidden rounded-xl border bg-surface p-4 min-h-[152px] ${wide ? 'flex-[1.5]' : 'flex-1'} ${hasTrace ? 'cursor-help' : ''}`}
       style={{ borderColor: tint(26) }}
     >
       {/* top accent line */}
@@ -2191,9 +2755,20 @@ function StatTile({ label, value, color, icon, sub, big, signal, wide }: {
       </div>
 
       {/* foot label */}
-      <div className="relative mt-2">
+      <div className="relative mt-2 flex items-end justify-between">
         <span className="block text-[9px] font-mono uppercase leading-tight tracking-[0.12em] text-on-surface-variant">{label}</span>
+        {hasTrace && (
+          // Subtle affordance: a ƒ(x) chip that brightens on hover, hinting the
+          // card reveals its calculation when the cursor dwells on it.
+          <span
+            className="material-symbols-outlined shrink-0 text-[14px] opacity-30 transition-opacity duration-200 group-hover:opacity-80"
+            style={{ color }}
+            aria-hidden
+          >function</span>
+        )}
       </div>
+
+      {trace && <TracePopover anchor={ref} open={dwell.open} trace={trace} label={label} color={color} />}
     </div>
   )
 }
@@ -2425,6 +3000,82 @@ function AccountsTable({ report, filtered, accounts, categories, catFilter, setC
           {report.extraction_warnings.map((w, i) => <div key={i} className="text-label-sm font-label-sm text-risk-medium mb-1">· {w}</div>)}
         </div>
       )}
+    </div>
+  )
+}
+
+const FLAGS_PAGE_SIZE = 5
+
+function ValidationFlagsTable({ flags, passed }: { flags: RevisorFlag[]; passed: boolean }) {
+  const [page, setPage] = useState(1)
+  const [severityFilter, setSeverityFilter] = useState<'ALL' | 'ERROR' | 'WARNING'>('ALL')
+
+  const filtered = severityFilter === 'ALL' ? flags : flags.filter(f => f.severity === severityFilter)
+  const totalPages = Math.max(1, Math.ceil(filtered.length / FLAGS_PAGE_SIZE))
+  const pageSafe = Math.min(page, totalPages)
+  const pageFlags = filtered.slice((pageSafe - 1) * FLAGS_PAGE_SIZE, pageSafe * FLAGS_PAGE_SIZE)
+
+  const errorCount = flags.filter(f => f.severity === 'ERROR').length
+  const warnCount = flags.filter(f => f.severity === 'WARNING').length
+
+  const chipStyle = (active: boolean, color: string) => ({
+    padding: '2px 10px',
+    borderRadius: 6,
+    border: `1px solid ${active ? color : 'var(--color-border)'}`,
+    background: active ? `${color}18` : 'transparent',
+    color: active ? color : '#94A3B8',
+    fontFamily: 'JetBrains Mono',
+    fontSize: 10,
+    cursor: 'pointer',
+    letterSpacing: '0.05em',
+  } as React.CSSProperties)
+
+  return (
+    <div className="bg-surface border border-border rounded-lg overflow-hidden">
+      <div className="px-5 py-3 border-b border-border bg-surface-container-low flex flex-wrap items-center gap-3">
+        <span className="material-symbols-outlined text-[14px] text-outline">fact_check</span>
+        <span className="text-[10px] font-mono text-on-surface-variant uppercase tracking-widest">Validation Flags</span>
+        {/* Severity filter chips */}
+        <div className="flex gap-2 ml-2">
+          <button style={chipStyle(severityFilter === 'ALL', '#94A3B8')} onClick={() => { setSeverityFilter('ALL'); setPage(1) }}>
+            All ({flags.length})
+          </button>
+          <button style={chipStyle(severityFilter === 'ERROR', '#FF4D6D')} onClick={() => { setSeverityFilter('ERROR'); setPage(1) }}>
+            Errors ({errorCount})
+          </button>
+          <button style={chipStyle(severityFilter === 'WARNING', '#FFB020')} onClick={() => { setSeverityFilter('WARNING'); setPage(1) }}>
+            Warnings ({warnCount})
+          </button>
+        </div>
+        <span className={`ml-auto text-[9px] font-mono px-2 py-0.5 rounded ${passed ? 'text-[#56F2C1]' : 'text-[#FFB020]'}`}
+          style={{ background: passed ? '#56F2C120' : '#FFB02020' }}>
+          {passed ? 'PASSED' : 'WARNINGS'}
+        </span>
+      </div>
+      <div className="divide-y divide-border">
+        {pageFlags.map((f, i) => (
+          <div key={i} className="px-4 py-1.5 flex items-start gap-2.5">
+            <span className="text-[9px] font-mono px-1.5 py-0.5 rounded shrink-0 mt-0.5"
+              style={{
+                color: f.severity === 'ERROR' ? '#FF4D6D' : '#FFB020',
+                background: f.severity === 'ERROR' ? '#FF4D6D15' : '#FFB02015',
+              }}>
+              {f.severity}
+            </span>
+            <div className="flex-1 min-w-0">
+              <p className="text-[11px] font-light text-on-surface">{f.message}</p>
+              {f.field && <p className="text-[9px] font-mono text-outline mt-0.5">{f.category} · {f.field}</p>}
+            </div>
+          </div>
+        ))}
+      </div>
+      <TablePagination
+        page={pageSafe}
+        totalPages={totalPages}
+        pageSize={FLAGS_PAGE_SIZE}
+        totalRows={filtered.length}
+        onPage={setPage}
+      />
     </div>
   )
 }

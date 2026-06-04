@@ -39,11 +39,22 @@ Parameters:
     Type: String
     Default: ""
     Description: Email address to receive CloudWatch alarm notifications (optional).
+  FrontendOrigin:
+    Type: String
+    Default: "*"
+    Description: >
+      CORS allowed origin for the HttpApi. In production set to the CloudFront distribution
+      URL (e.g. https://abc123.cloudfront.net). Defaults to * so local dev works without
+      any parameter override.
 
 Conditions:
   # Only provision the Anthropic secret + grant access when a key is supplied at
   # deploy time. Dev/bedrock deployments that pass no key skip it cleanly.
   HasAnthropicKey: !Not [!Equals [!Ref AnthropicApiKey, ""]]
+  # True when the Anthropic API is the selected provider (vs bedrock). Functions that
+  # override the global Environment block use this to gate the Anthropic secret ARN var.
+  UseAnthropicApi: !Equals [!Ref LlmProvider, "anthropic_api"]
+  HasGnewsKey: !Not [!Equals [!Ref GnewsApiKey, ""]]
   # Only create the email SNS subscription when an address was supplied.
   HasAlertsEmail: !Not [!Equals [!Ref AlertsEmail, ""]]
 
@@ -64,7 +75,7 @@ Globals:
         # API key is resolved from Secrets Manager in production (see AnthropicApiKeySecret).
         # Local dev still reads ANTHROPIC_API_KEY directly from .env.
         ANTHROPIC_API_KEY_SECRET_ARN: !Ref AnthropicApiKeySecret
-        GNEWS_API_KEY: !Ref GnewsApiKey
+        GNEWS_API_KEY_SECRET_ARN: !Ref GnewsApiKeySecret
         AWS_ACCOUNT_ID: !Ref AWS::AccountId
   HttpApi:
     CorsConfiguration:
@@ -78,7 +89,7 @@ Globals:
         - Authorization
         - X-Tenant-Id
       AllowOrigins:
-        - '*'
+        - !Ref FrontendOrigin
 
 # ─────────────────────────────────────────────
 # STORAGE
@@ -97,9 +108,18 @@ Resources:
       Description: Anthropic API key for CreditIQ LLM calls
       SecretString: !If [HasAnthropicKey, !Ref AnthropicApiKey, !Ref "AWS::NoValue"]
 
+  GnewsApiKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "creditiq-gnews-api-key-${Stage}"
+      Description: GNews API key for market news ingestion
+      SecretString: !If [HasGnewsKey, !Ref GnewsApiKey, !Ref "AWS::NoValue"]
+
   # Único bucket con 3 prefijos: uploads/, reports/, rag/
   MainBucket:
     Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BucketName: !Sub "iastronauts-creditiq-${AWS::Region}-${Stage}"
       CorsConfiguration:
@@ -125,6 +145,8 @@ Resources:
   # Bucket para el frontend (CloudFront OAC)
   FrontendBucket:
     Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BucketName: !Sub "iastronauts-creditiq-frontend-${AWS::Region}-${Stage}"
       PublicAccessBlockConfiguration:
@@ -236,7 +258,13 @@ Resources:
                   - !GetAtt AnalyzerFunction.Arn
                   - !GetAtt RiskScorerFunction.Arn
                   - !GetAtt ReportGeneratorFunction.Arn
+                  - !GetAtt RevisorInteligenteFunction.Arn
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:creditiq-agent-runner-${Stage}"
+                  # Market refresh: a POST self-invokes the function asynchronously
+                  # to run the slow live fetch off the request path. Self ARNs via
+                  # !Sub (not !GetAtt) to avoid a Role↔Function dependency cycle.
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:creditiq-market-data-${Stage}"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:creditiq-market-read-${Stage}"
               - Effect: Allow
                 Action:
                   - xray:PutTraceSegments
@@ -246,7 +274,9 @@ Resources:
                 Resource: "*"
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
-                Resource: !Ref AnthropicApiKeySecret
+                Resource:
+                  - !Ref AnthropicApiKeySecret
+                  - !Ref GnewsApiKeySecret
               - Effect: Allow
                 Action: sqs:SendMessage
                 Resource: !GetAtt AgentRunnerDLQ.Arn
@@ -300,7 +330,9 @@ Resources:
                 Resource: "*"
               - Effect: Allow
                 Action: secretsmanager:GetSecretValue
-                Resource: !Ref AnthropicApiKeySecret
+                Resource:
+                  - !Ref AnthropicApiKeySecret
+                  - !Ref GnewsApiKeySecret
 
   WorkflowLogGroup:
     Type: AWS::Logs::LogGroup
@@ -358,11 +390,128 @@ Resources:
 # API GATEWAY + LAMBDAS DE ENTRADA
 # ─────────────────────────────────────────────
 
+# ─────────────────────────────────────────────
+# AUTH — Cognito User Pool
+# ─────────────────────────────────────────────
+
+  # Pre Token Generation trigger must exist before the User Pool references it.
+  PreTokenGenerationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "creditiq-pre-token-gen-${Stage}"
+      CodeUri: src/
+      Handler: api.cognito.pre_token_generation.lambda_handler
+      Policies:
+        - AWSLambdaBasicExecutionRole
+      Timeout: 5
+      MemorySize: 128
+
+  # Grant Cognito permission to invoke the trigger Lambda.
+  CognitoTriggerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt PreTokenGenerationFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !Sub "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*"
+
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "creditiq-users-${Stage}"
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Schema:
+        - Name: tenant_id
+          AttributeDataType: String
+          Mutable: false
+          Required: false
+          StringAttributeConstraints:
+            MinLength: "1"
+            MaxLength: "128"
+        - Name: tenant_name
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+          StringAttributeConstraints:
+            MinLength: "0"
+            MaxLength: "128"
+        - Name: tenant_tier
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+          StringAttributeConstraints:
+            MinLength: "0"
+            MaxLength: "64"
+        - Name: permissions
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+          StringAttributeConstraints:
+            MinLength: "0"
+            MaxLength: "512"
+      LambdaConfig:
+        PreTokenGeneration: !GetAtt PreTokenGenerationFunction.Arn
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      UserPoolAddOns:
+        AdvancedSecurityMode: "OFF"
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "creditiq-frontend-${Stage}"
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+      ReadAttributes:
+        - email
+        - custom:tenant_id
+        - custom:tenant_name
+        - custom:tenant_tier
+        - custom:permissions
+      WriteAttributes:
+        - email
+      PreventUserExistenceErrors: ENABLED
+
+# ─────────────────────────────────────────────
+# API GATEWAY + LAMBDAS DE ENTRADA
+# ─────────────────────────────────────────────
+
   CreditIQApi:
     Type: AWS::Serverless::HttpApi
     Properties:
       StageName: !Ref Stage
       Description: CreditIQ API — Financial Analysis Platform
+      Auth:
+        Authorizers:
+          CognitoAuthorizer:
+            JwtConfiguration:
+              issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}"
+              audience:
+                - !Ref CognitoUserPoolClient
+            IdentitySource: "$request.header.Authorization"
+        DefaultAuthorizer: CognitoAuthorizer
 
   # POST /upload-url  → genera presigned URL para subir archivo a S3
   PresignedUrlFunction:
@@ -450,8 +599,8 @@ Resources:
             Path: /analyses/{analysis_id}/continue
             Method: POST
 
-  # POST /analyses/{id}/reanalyze  y  /reanalyze-scorer
-  # → re-ejecuta un solo agente (2 o 3) fuera de Step Functions. Espejo de los
+  # POST /analyses/{id}/reanalyze, /reanalyze-scorer y /reanalyze-report
+  # → re-ejecuta un solo agente (2, 3 o 4) fuera de Step Functions. Espejo de los
   #   runners de local_server.py. Invoca el Lambda del agente directamente y
   #   registra el estado en status.json con source="reanalyze".
   AgentRunnerFunction:
@@ -473,6 +622,7 @@ Resources:
           ANALYZER_FUNCTION_NAME: !Ref AnalyzerFunction
           RISK_SCORER_FUNCTION_NAME: !Ref RiskScorerFunction
           REPORT_GENERATOR_FUNCTION_NAME: !Ref ReportGeneratorFunction
+          REVISOR_FUNCTION_NAME: !Ref RevisorInteligenteFunction
       Events:
         ReanalyzeEvent:
           Type: HttpApi
@@ -485,6 +635,12 @@ Resources:
           Properties:
             ApiId: !Ref CreditIQApi
             Path: /analyses/{analysis_id}/reanalyze-scorer
+            Method: POST
+        ReanalyzeReportEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /analyses/{analysis_id}/reanalyze-report
             Method: POST
 
   # GET /analyses/{id}/report  → URL del reporte generado
@@ -532,6 +688,39 @@ Resources:
           Properties:
             ApiId: !Ref CreditIQApi
             Path: /analyses/{analysis_id}/scorer
+            Method: GET
+
+  # POST /analyses/{id}/chat       → interactive chat with RevisorInteligente
+  # GET  /analyses/{id}/chat/history → fetch prior chat turns
+  AnalysisChatFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "creditiq-analysis-chat-${Stage}"
+      CodeUri: src/
+      Handler: api.analysis_chat.handler.lambda_handler
+      Role: !GetAtt ApiLambdaRole.Arn
+      # LLM call can take up to 30s on a cold container.
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          MAIN_BUCKET: !Ref MainBucket
+          LLM_PROVIDER: !Ref LlmProvider
+          ANTHROPIC_API_KEY_SECRET_ARN: !If [UseAnthropicApi, !Ref AnthropicApiKeySecret, !Ref AWS::NoValue]
+          STAGE: !Ref Stage
+          AWS_ACCOUNT_ID: !Ref AWS::AccountId
+      Events:
+        ChatEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /analyses/{analysis_id}/chat
+            Method: POST
+        ChatHistoryEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /analyses/{analysis_id}/chat/history
             Method: GET
 
   # DELETE /analyses/{id}  → cancela la ejecución de Step Functions y marca el job como cancelado
@@ -647,7 +836,8 @@ Resources:
 # MARKET DATA LAMBDAS
 # ─────────────────────────────────────────────
 
-  # GET /market/data — live market data snapshot (yfinance + GNews)
+  # GET  /market/data — serve the cached snapshot from S3 (fast, no external calls)
+  # POST /market/data — trigger a background refresh (live yfinance fetch → S3)
   MarketDataFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -655,7 +845,11 @@ Resources:
       CodeUri: src/
       Handler: api.market_data.handler.lambda_handler
       Role: !GetAtt ApiLambdaRole.Arn
-      Timeout: 60
+      Timeout: 120
+      # 256 MB (the Globals default) gives only ~0.15 vCPU; yfinance's curl_cffi
+      # TLS handshake + pandas parsing is CPU-bound, which is why a ~2s local
+      # fetch took ~35s on Lambda. 1024 MB ≈ 0.58 vCPU and brings it back to seconds.
+      MemorySize: 1024
       Events:
         MarketDataEvent:
           Type: HttpApi
@@ -663,9 +857,16 @@ Resources:
             ApiId: !Ref CreditIQApi
             Path: /market/data
             Method: GET
+        MarketDataRefreshEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /market/data
+            Method: POST
 
-  # GET /market/pulse, /market/news, /market/overview, /market/signals
-  # → serve the cached AI market pulse (no live fetching on request path)
+  # GET  /market/pulse|news|overview|signals → serve the cached AI market pulse
+  # POST /market/news → trigger a background pulse refresh (GNews ingest + LLM)
+  # Timeout covers the async refresh path (ingest + LLM interpret), not just reads.
   MarketReadFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -673,7 +874,9 @@ Resources:
       CodeUri: src/
       Handler: api.market_read.handler.lambda_handler
       Role: !GetAtt ApiLambdaRole.Arn
-      Timeout: 30
+      Timeout: 180
+      # More CPU for the yfinance fetch + JSON parsing on the ingest→interpret path.
+      MemorySize: 512
       Events:
         MarketPulseEvent:
           Type: HttpApi
@@ -687,6 +890,12 @@ Resources:
             ApiId: !Ref CreditIQApi
             Path: /market/news
             Method: GET
+        MarketNewsRefreshEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref CreditIQApi
+            Path: /market/news
+            Method: POST
         MarketOverviewEvent:
           Type: HttpApi
           Properties:
@@ -699,25 +908,6 @@ Resources:
             ApiId: !Ref CreditIQApi
             Path: /market/signals
             Method: GET
-
-  # EventBridge scheduled rule — refresh market pulse every 5 minutes in prod
-  MarketRefreshSchedule:
-    Type: AWS::Events::Rule
-    Properties:
-      Name: !Sub "creditiq-market-refresh-${Stage}"
-      ScheduleExpression: rate(5 minutes)
-      State: ENABLED
-      Targets:
-        - Id: MarketDataTarget
-          Arn: !GetAtt MarketDataFunction.Arn
-
-  MarketRefreshPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !GetAtt MarketDataFunction.Arn
-      Action: lambda:InvokeFunction
-      Principal: events.amazonaws.com
-      SourceArn: !GetAtt MarketRefreshSchedule.Arn
 
 # ─────────────────────────────────────────────
 # OBSERVABILITY — SNS, CloudWatch Alarms, DLQ, Dashboard
@@ -915,19 +1105,10 @@ Resources:
         {
           "widgets": [
             {
-              "type": "alarm",
+              "type": "text",
               "x": 0, "y": 0, "width": 24, "height": 2,
               "properties": {
-                "title": "Alarm Status",
-                "alarms": [
-                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:creditiq-${Stage}-extractor-errors",
-                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:creditiq-${Stage}-analyzer-errors",
-                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:creditiq-${Stage}-risk-scorer-errors",
-                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:creditiq-${Stage}-report-generator-errors",
-                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:creditiq-${Stage}-revisor-errors",
-                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:creditiq-${Stage}-workflow-executions-failed",
-                  "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:creditiq-${Stage}-agent-runner-dlq-depth"
-                ]
+                "markdown": "## CreditIQ — ${Stage}\nMonitoring dashboard for the analysis pipeline. Check the metric widgets below for errors and latency."
               }
             },
             {
@@ -935,6 +1116,7 @@ Resources:
               "x": 0, "y": 2, "width": 12, "height": 6,
               "properties": {
                 "title": "Lambda Errors — Agents",
+                "region": "${AWS::Region}",
                 "view": "timeSeries",
                 "stat": "Sum",
                 "period": 300,
@@ -952,6 +1134,7 @@ Resources:
               "x": 12, "y": 2, "width": 12, "height": 6,
               "properties": {
                 "title": "Step Functions Executions",
+                "region": "${AWS::Region}",
                 "view": "timeSeries",
                 "stat": "Sum",
                 "period": 300,
@@ -967,6 +1150,7 @@ Resources:
               "x": 0, "y": 8, "width": 12, "height": 6,
               "properties": {
                 "title": "Lambda Duration p99 — Agents (ms)",
+                "region": "${AWS::Region}",
                 "view": "timeSeries",
                 "stat": "p99",
                 "period": 300,
@@ -983,6 +1167,7 @@ Resources:
               "x": 12, "y": 8, "width": 12, "height": 6,
               "properties": {
                 "title": "AgentRunner DLQ Depth",
+                "region": "${AWS::Region}",
                 "view": "timeSeries",
                 "stat": "Maximum",
                 "period": 300,
@@ -1038,3 +1223,21 @@ Outputs:
   DashboardUrl:
     Description: CloudWatch dashboard URL
     Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=CreditIQ-${Stage}"
+
+  UserPoolId:
+    Description: Cognito User Pool ID — set as VITE_COGNITO_USER_POOL_ID in the frontend
+    Value: !Ref CognitoUserPool
+
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID — set as VITE_COGNITO_CLIENT_ID in the frontend
+    Value: !Ref CognitoUserPoolClient
+
+  UserPoolEndpoint:
+    Description: Cognito issuer URL (used by JWT authorizer)
+    Value: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}"
+
+  CreateFirstUserCommand:
+    Description: CLI command to create the demo user (run after deploy, fill in password + email)
+    Value: !Sub |
+      aws cognito-idp admin-create-user --user-pool-id ${CognitoUserPool} --username YOUR_EMAIL --temporary-password Temp1234! --user-attributes Name=email,Value=YOUR_EMAIL Name=email_verified,Value=true Name=custom:tenant_id,Value=btg-demo Name=custom:tenant_name,Value="BTG Demo" Name=custom:tenant_tier,Value=professional Name=custom:permissions,Value="analyses:create,analyses:read" --region ${AWS::Region}
+      aws cognito-idp admin-set-user-password --user-pool-id ${CognitoUserPool} --username YOUR_EMAIL --password YOUR_FINAL_PASSWORD --permanent --region ${AWS::Region}

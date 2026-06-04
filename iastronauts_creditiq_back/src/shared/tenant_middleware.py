@@ -31,10 +31,16 @@ COGNITO SETUP:
 
 import json
 import logging
+import os
 
 from .tenant_context import TenantBoundaryViolation, TenantContext, TenantTier
 
 logger = logging.getLogger()
+
+# Stages where JWT is the only accepted auth mechanism.
+# "dev" and "test" allow header/body fallbacks for local dev and CI.
+_STAGE = os.environ.get("STAGE", "dev")
+_PRODUCTION_STAGES = frozenset({"uat", "master"})
 
 
 def extract_tenant_context(event: dict) -> TenantContext:
@@ -93,6 +99,11 @@ def extract_tenant_context(event: dict) -> TenantContext:
     headers = event.get("headers") or {}
     header_tenant = headers.get("x-tenant-id") or headers.get("X-Tenant-Id")
     if header_tenant:
+        if _STAGE in _PRODUCTION_STAGES:
+            raise TenantBoundaryViolation(
+                "x-tenant-id header authentication is not permitted in production. "
+                "All requests must carry a Cognito JWT (Authorization header)."
+            )
         logger.warning(
             "tenant_context | source=header tenant=%s | "
             "x-tenant-id header is acceptable only for internal or dev traffic",
@@ -109,6 +120,11 @@ def extract_tenant_context(event: dict) -> TenantContext:
         body = json.loads(event.get("body") or "{}")
         body_tenant = body.get("tenant_id")
         if body_tenant:
+            if _STAGE in _PRODUCTION_STAGES:
+                raise TenantBoundaryViolation(
+                    "body tenant_id authentication is not permitted in production. "
+                    "All requests must carry a Cognito JWT (Authorization header)."
+                )
             logger.warning(
                 "tenant_context | source=body tenant=%s | "
                 "body tenant_id is not secure for production traffic",

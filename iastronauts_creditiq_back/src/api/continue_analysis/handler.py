@@ -11,6 +11,7 @@ Resumes the pipeline from its pause point. Two paths:
 import json
 import logging
 import os
+import time
 
 import boto3
 from botocore.exceptions import ClientError
@@ -48,7 +49,8 @@ def _continue_via_runner(analysis_id: str, current_status: str, llm_model: str |
             "status": current_status,
         })
     # Mark processing up front so the first status poll doesn't see the stale state.
-    job_save(analysis_id, STATUS, {"status": "processing", "source": "reanalyze"})
+    # updated_at lets analysis_status time out a worker that died hard.
+    job_save(analysis_id, STATUS, {"status": "processing", "source": "reanalyze", "updated_at": int(time.time())})
     runner_payload: dict = {"analysis_id": analysis_id, "agent": agent}
     if agent == 4 and llm_model:
         runner_payload["llm_model"] = llm_model
@@ -86,10 +88,18 @@ def lambda_handler(event: dict, context) -> dict:
         # Task token lives in a separate pause_token artifact (written by PauseFunction)
         # so concurrent status polls on status.json never see a partially-written mix.
         # Fall back to reading from status_data for tokens written by older code.
+        #
+        # The token carries the pause_status it was created for. That is the
+        # authoritative SFN pause point — status.json can drift ahead of it (the
+        # manual agent_runner path advances status.json without consuming the SFN
+        # token). We resume off the token's pause_status so the payload always
+        # matches what the next SFN state expects.
         task_token: str | None = None
+        token_pause_status: str | None = None
         try:
             token_data = job_load(analysis_id, PAUSE_TOKEN)
             task_token = token_data.get("task_token") or None
+            token_pause_status = token_data.get("pause_status") or None
         except ClientError:
             task_token = status_data.get("task_token") or None
 
@@ -98,22 +108,28 @@ def lambda_handler(event: dict, context) -> dict:
         if not task_token:
             return _continue_via_runner(analysis_id, current_status, llm_model=llm_model)
 
-        # Load the output of the last completed agent to pass as SFN state input
-        if current_status == "extraction_complete":
+        # Choose the resume payload off the token's pause point (authoritative),
+        # falling back to status.json only for legacy tokens that predate the
+        # pause_status field. The payload MUST be the output of the agent that ran
+        # *before* this pause, because send_task_success feeds it straight into the
+        # next SFN state (e.g. extraction_complete → FinancialAnalyzer expects the
+        # ExtractorOutput, not the analyzer's output).
+        resume_status = token_pause_status or current_status
+        if resume_status == "extraction_complete":
             resume_payload = job_load(analysis_id, EXTRACTOR)
-        elif current_status == "analysis_complete":
+        elif resume_status == "analysis_complete":
             resume_payload = job_load_first(analysis_id, [FINANCIAL_ANALYZER, EXTRACTOR]) or {}
-        elif current_status == "scoring_complete":
+        elif resume_status == "scoring_complete":
             resume_payload = job_load_first(analysis_id, [RISK_SCORER, FINANCIAL_ANALYZER, EXTRACTOR]) or {}
-        elif current_status == "report_complete":
+        elif resume_status == "report_complete":
             resume_payload = job_load(analysis_id, REPORT_GENERATOR) or {}
         else:
             return _response(409, {
-                "error": f"Estado '{current_status}' no es un punto de pausa válido",
+                "error": f"Estado '{resume_status}' no es un punto de pausa válido",
             })
 
         # Inject llm_model into payload so ReportGenerator can read it from the SFN event
-        if current_status == "scoring_complete" and llm_model:
+        if resume_status == "scoring_complete" and llm_model:
             resume_payload = dict(resume_payload)
             resume_payload["llm_model"] = llm_model
 
@@ -128,7 +144,7 @@ def lambda_handler(event: dict, context) -> dict:
             job_save(analysis_id, PAUSE_TOKEN, {})
         except Exception:
             pass
-        job_save(analysis_id, STATUS, {"status": "processing"})
+        job_save(analysis_id, STATUS, {"status": "processing", "updated_at": int(time.time())})
 
         logger.info("continued | job=%s from=%s", analysis_id, current_status)
         return _response(202, {"analysis_id": analysis_id, "status": "processing"})

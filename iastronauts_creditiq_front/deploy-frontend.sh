@@ -11,8 +11,8 @@
 set -euo pipefail
 
 BUCKET="iastronauts-creditiq-frontend-us-east-1-dev"
-DISTRIBUTION_ID="E3HG9C1VM4OQNF"
-CLOUDFRONT_URL="https://d3jagqz9s125b2.cloudfront.net"
+DISTRIBUTION_ID="E2ZBRGKDH63WJL"
+CLOUDFRONT_URL="https://dp5mnbrpcxiza.cloudfront.net"
 
 # Run from the script's own directory regardless of where it was invoked.
 cd "$(dirname "$0")"

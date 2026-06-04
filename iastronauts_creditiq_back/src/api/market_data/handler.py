@@ -9,9 +9,8 @@ of ~15s sequential.
 import json
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Optional
 
 logger = logging.getLogger("api.market_data")
 logger.setLevel(logging.INFO)
@@ -19,6 +18,12 @@ logger.setLevel(logging.INFO)
 _CACHE: Optional[dict] = None
 _CACHE_AT: float = 0.0
 _CACHE_TTL = 300  # 5 minutes
+
+# S3 key for the shared, cross-instance market snapshot. The scheduled
+# (EventBridge) invocation is the only writer; the API request path is a
+# pure reader. This keeps reads under API Gateway's hard 30s integration
+# timeout — a live yfinance fetch takes 35–120s and would otherwise 503.
+DATA_SNAPSHOT_KEY = "market/data_snapshot.json"
 
 # ── Ticker catalogs ───────────────────────────────────────────────────────────────
 STOCKS = [
@@ -65,61 +70,83 @@ COMMODITIES = [
 
 # ── Fetch helpers ─────────────────────────────────────────────────────────────────
 
-def _fetch_one(spec: dict) -> dict:
-    """Fetch 1-month daily history for one ticker. Returns a result dict."""
-    import yfinance as yf
-    ticker = spec["ticker"]
+def _closes_for(df, ticker: str) -> list[float]:
+    """Extract the clean close series for one ticker out of a yf.download frame.
+
+    yf.download(group_by="ticker") returns a column MultiIndex keyed by ticker;
+    a single-ticker frame is flat. Handle both, and never raise — a missing or
+    malformed column just yields an empty series so the caller marks it ok=False.
+    """
     try:
-        hist = yf.Ticker(ticker).history(period="1mo", interval="1d")
-        closes = [float(c) for c in hist["Close"].dropna().tolist()]
-        if not closes:
-            raise ValueError("no closes")
-        value = closes[-1]
-        prev = closes[-2] if len(closes) > 1 else value
-        change_pct = round((value - prev) / abs(prev) * 100, 2) if prev else 0.0
-        return {
-            **spec,
-            "value": value,
-            "prev_close": prev,
-            "change_pct": change_pct,
-            "history": closes[-20:],
-            "ok": True,
-        }
-    except Exception as exc:
-        logger.warning("fetch %s failed: %s", ticker, exc)
-        return {**spec, "ok": False, "error": str(exc)}
+        if hasattr(df.columns, "levels") and ticker in df.columns.get_level_values(0):
+            series = df[ticker]["Close"]
+        elif "Close" in getattr(df, "columns", []):
+            series = df["Close"]
+        else:
+            return []
+        return [float(c) for c in series.dropna().tolist()]
+    except Exception:
+        return []
 
 
-def _fetch_group(specs: list[dict]) -> list[dict]:
-    results_by_key: dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=min(len(specs), 12)) as pool:
-        futures = {pool.submit(_fetch_one, s): s["key"] for s in specs}
-        for future in as_completed(futures):
-            r = future.result()
-            results_by_key[r["key"]] = r
-    return [results_by_key[s["key"]] for s in specs if s["key"] in results_by_key]
+def _result_from_closes(spec: dict, closes: list[float]) -> dict:
+    """Build the card payload for one ticker from its close series."""
+    if not closes:
+        return {**spec, "ok": False, "error": "no data"}
+    value = closes[-1]
+    prev = closes[-2] if len(closes) > 1 else value
+    change_pct = round((value - prev) / abs(prev) * 100, 2) if prev else 0.0
+    return {
+        **spec,
+        "value": value,
+        "prev_close": prev,
+        "change_pct": change_pct,
+        "history": closes[-20:],
+        "ok": True,
+    }
 
 
 def _fetch_all() -> dict:
-    """Fetch all four groups concurrently (groups run in parallel threads)."""
-    groups: dict[str, list[dict]] = {}
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        fs = {
-            pool.submit(_fetch_group, STOCKS):      "stocks",
-            pool.submit(_fetch_group, FX):          "fx",
-            pool.submit(_fetch_group, INDICES):     "indices",
-            pool.submit(_fetch_group, COMMODITIES): "commodities",
-        }
-        for f in as_completed(fs):
-            key = fs[f]
-            groups[key] = f.result()
+    """Fetch every ticker in ONE batched yf.download request.
+
+    A single batched call (one HTTP request for all ~29 symbols) is the only
+    reliable pattern from a Lambda IP: the previous design fired 29 concurrent
+    yf.Ticker().history() calls, which Yahoo rate-limits as a burst — every
+    ticker then times out and the whole snapshot lands empty. The batched
+    endpoint returns all symbols at once in ~2s and stays well under the
+    rate limit. `threads` stays on for yfinance's internal chunking but we no
+    longer fan out our own thread pool per ticker.
+    """
+    import yfinance as yf
+
+    all_specs = STOCKS + FX + INDICES + COMMODITIES
+    tickers = [s["ticker"] for s in all_specs]
+
+    closes_by_ticker: dict[str, list[float]] = {}
+    try:
+        df = yf.download(
+            tickers,
+            period="1mo",
+            interval="1d",
+            group_by="ticker",
+            auto_adjust=True,
+            threads=True,
+            progress=False,
+        )
+        for t in tickers:
+            closes_by_ticker[t] = _closes_for(df, t)
+    except Exception as exc:
+        logger.error("batched yf.download failed: %s", exc, exc_info=True)
+
+    def build(specs: list[dict]) -> list[dict]:
+        return [_result_from_closes(s, closes_by_ticker.get(s["ticker"], [])) for s in specs]
 
     return {
         "as_of": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "stocks":      groups.get("stocks", []),
-        "fx":          groups.get("fx", []),
-        "indices":     groups.get("indices", []),
-        "commodities": groups.get("commodities", []),
+        "stocks":      build(STOCKS),
+        "fx":          build(FX),
+        "indices":     build(INDICES),
+        "commodities": build(COMMODITIES),
     }
 
 
@@ -139,22 +166,98 @@ def get_market_data(force: bool = False) -> dict:
 
 # ── Lambda handler ─────────────────────────────────────────────────────────────────
 
+def _is_async_refresh(event: dict) -> bool:
+    """True when this invocation should do the slow live fetch + S3 write.
+
+    Two triggers reach the writer path, both off the API request path:
+      * the async self-invoke fired by a POST (carries `_refresh`)
+      * a legacy EventBridge scheduled event (`source: aws.events`)
+    """
+    return bool(event.get("_refresh")) \
+        or event.get("source") == "aws.events" \
+        or event.get("detail-type") == "Scheduled Event"
+
+
+def _http_method(event: dict) -> str:
+    """HTTP method for an API Gateway HTTP API (v2) event, or '' for non-API events."""
+    return (event.get("requestContext", {}).get("http", {}) or {}).get("method", "")
+
+
+def _refresh_and_store() -> dict:
+    """Live fetch + persist to S3. Slow (35–120s) — only ever runs off the request path."""
+    from shared import market_store
+
+    data = get_market_data(force=True)
+    market_store.write(DATA_SNAPSHOT_KEY, data)
+    return data
+
+
+def _trigger_async_refresh(context) -> dict:
+    """Fire a background self-invoke that runs the slow fetch, return 202 at once.
+
+    The live fetch can take 35–120s, far beyond API Gateway's 30s integration
+    timeout, so the request path must never block on it. The frontend polls
+    GET /market/data and watches `as_of` to know when the new snapshot lands.
+    """
+    import boto3
+
+    fn = getattr(context, "function_name", None)
+    if not fn:
+        # No Lambda context (e.g. local dev) — just refresh synchronously.
+        data = _refresh_and_store()
+        return _json_response(200, {"status": "refreshed", "as_of": data.get("as_of")})
+
+    boto3.client("lambda").invoke(
+        FunctionName=fn,
+        InvocationType="Event",  # async — returns immediately
+        Payload=json.dumps({"_refresh": True}).encode("utf-8"),
+    )
+    logger.info("market_data: async refresh triggered on %s", fn)
+    return _json_response(202, {"status": "refresh_started"})
+
+
+def _json_response(status: int, body: dict) -> dict:
+    return {
+        "statusCode": status,
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+        },
+        "body": json.dumps(body, ensure_ascii=False, default=str),
+    }
+
+
 def lambda_handler(event: dict, context) -> dict:
-    force = str((event.get("queryStringParameters") or {}).get("force", "")).lower() == "true"
+    from shared import market_store
+
+    # Writer path: the async self-invoke does the slow live fetch and stores the
+    # snapshot to S3. It may take the full Lambda timeout — no client is waiting.
+    if _is_async_refresh(event):
+        try:
+            data = _refresh_and_store()
+            return _json_response(200, data)
+        except Exception as exc:
+            logger.error("market_data refresh failed: %s", exc, exc_info=True)
+            return _json_response(500, {"error": str(exc)})
+
+    # POST /market/data — user pressed "Refresh". Kick off the background fetch
+    # and return 202 immediately; the frontend then polls the GET below.
+    if _http_method(event) == "POST":
+        return _trigger_async_refresh(context)
+
+    # Reader path (GET): serve the cached S3 snapshot only. Never fetch live here
+    # — a live fetch exceeds API Gateway's 30s cap and returns 503.
     try:
-        data = get_market_data(force=force)
-        return {
-            "statusCode": 200,
-            "headers": {
-                "Content-Type": "application/json",
-                "Access-Control-Allow-Origin": "*",
-            },
-            "body": json.dumps(data, ensure_ascii=False, default=str),
-        }
+        cached = market_store.read(DATA_SNAPSHOT_KEY)
+        if cached:
+            return _json_response(200, cached)
+
+        # No snapshot yet (never refreshed). Return an empty-but-valid payload so
+        # the UI can prompt the user to press Refresh instead of erroring.
+        logger.info("market_data: no cached snapshot yet")
+        return _json_response(200, {
+            "as_of": None, "stocks": [], "fx": [], "indices": [], "commodities": [],
+        })
     except Exception as exc:
         logger.error("market_data handler error: %s", exc, exc_info=True)
-        return {
-            "statusCode": 500,
-            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
-            "body": json.dumps({"error": str(exc)}),
-        }
+        return _json_response(500, {"error": str(exc)})

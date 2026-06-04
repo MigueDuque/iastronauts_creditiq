@@ -48,6 +48,10 @@ class CompositeRiskResult:
     analysis_confidence_detail: Dict[str, Any] = field(default_factory=dict)
     data_quality_warnings: list = field(default_factory=list)
     anomaly_detection_summary: Dict[str, Any] = field(default_factory=dict)
+    # ── Formula audit trail ───────────────────────────────────────────────────
+    # Documents composite_score, overall_risk_level (threshold + ceiling/floor
+    # rules), financiero_category blend, and per-dimension score/level snapshot.
+    computation_trace: Dict[str, Any] = field(default_factory=dict)
 
 
 # ── Weight profiles (Mejora 1 — exposed in output, no longer internal-only) ────
@@ -279,7 +283,9 @@ def _build_validation_detail(
     for a in analysis_results[:20]:
         prev = a.get("previous_value")
         curr = a.get("current_value", 0.0)
-        reported_pct = a.get("variation_pct", 0.0)
+        # variation_pct is None when suppressed (no/near-zero baseline); coerce to
+        # 0.0 so the consistency check simply skips it rather than crashing.
+        reported_pct = a.get("variation_pct") or 0.0
         if prev and prev != 0 and reported_pct != 0:
             expected_pct = (curr - prev) / abs(prev) * 100
             if abs(expected_pct - reported_pct) > tolerance:
@@ -390,7 +396,7 @@ def _build_anomaly_summary(analysis_results: list, confidence_threshold: float =
     for a in detected:
         is_low = a.get("materiality") == "LOW"
         low_conf = a.get("confidence", 1.0) < confidence_threshold
-        minor_var = abs(a.get("variation_pct", 0.0)) < 15.0
+        minor_var = abs(a.get("variation_pct") or 0.0) < 15.0
         if is_low and (low_conf or minor_var):
             filtered.append(a)
 
@@ -607,6 +613,78 @@ def compute_composite(
         or composite_score < 35
     )
 
+    # ── Computation audit trail ───────────────────────────────────────────────
+    # The arithmetic level before ceiling/floor adjustments, so auditors can see
+    # exactly which rule changed the final risk classification.
+    arithmetic_level = _level_from_score(composite_score)
+    ceiling_applied = (
+        overall_level != arithmetic_level
+        and "HIGH" in levels
+        and arithmetic_level == RiskLevel.LOW
+    )
+    floor_applied = all(lvl == "LOW" for lvl in levels) and arithmetic_level != RiskLevel.LOW
+
+    fin_score_raw = liquidity.score * 0.6 + solvency.score * 0.4
+
+    computation_trace: Dict[str, Any] = {
+        "composite_score": {
+            "formula": " + ".join(
+                f"{_DIM_ES[k]} * {weights[k]}" for k in
+                ("liquidity", "credit", "solvency", "market", "operational")
+            ),
+            "inputs": {_DIM_ES[k]: dimension_scores[k] for k in weights},
+            "weights": {_DIM_ES[k]: weights[k] for k in weights},
+            "weight_profile": weight_profile,
+            "result": composite_score,
+        },
+        "overall_risk_level": {
+            "formula": "score >= 70 → LOW | score >= 40 → MEDIUM | score < 40 → HIGH",
+            "inputs": {
+                "composite_score": composite_score,
+                "arithmetic_level": arithmetic_level.value,
+                "dimension_levels": dimension_levels,
+            },
+            "ceiling_applied": ceiling_applied,
+            "ceiling_reason": (
+                "A HIGH dimension raised the arithmetic LOW to MEDIUM"
+                if ceiling_applied else None
+            ),
+            "floor_applied": floor_applied,
+            "floor_reason": (
+                "All dimensions LOW — arithmetic MEDIUM/HIGH overridden to LOW"
+                if floor_applied else None
+            ),
+            "result": overall_level.value,
+        },
+        "financiero_category": {
+            "formula": "liquidity.score * 0.6 + solvency.score * 0.4",
+            "inputs": {
+                "liquidity_score": liquidity.score,
+                "solvency_score": solvency.score,
+            },
+            "result": round(fin_score_raw),
+            "note": (
+                "Ceiling rule also applied: level = worst(arithmetic, liquidity.level, solvency.level)"
+            ),
+        },
+        "dimension_scores": {
+            dim: {
+                "score": dimension_scores[dim],
+                "level": dimension_levels[dim],
+                "weight": weights[dim],
+                "weighted_contribution": round(dimension_scores[dim] * weights[dim], 2),
+            }
+            for dim in ("liquidity", "credit", "solvency", "market", "operational")
+        },
+        "human_review_triggers": {
+            "overall_risk_is_high": overall_level == RiskLevel.HIGH,
+            "high_dimension_count": high_count,
+            "anti_hallucination_failed": not anti_hallucination_passed,
+            "composite_score_below_35": composite_score < 35,
+            "result": requires_human_review,
+        },
+    }
+
     return CompositeRiskResult(
         overall_risk_score=overall_level,
         composite_score=composite_score,
@@ -624,4 +702,5 @@ def compute_composite(
         analysis_confidence_detail=analysis_confidence_detail,
         data_quality_warnings=data_quality_warnings,
         anomaly_detection_summary=anomaly_detection_summary,
+        computation_trace=computation_trace,
     )

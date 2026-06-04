@@ -1,6 +1,7 @@
-import { useState, useEffect, type ReactNode } from 'react'
+import { useState, useEffect, useCallback, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import EarthIntelligenceCard from '../components/EarthIntelligenceCard'
+import { apiFetch } from '../lib/apiClient'
 
 /* ─── tiny sparkline component ─────────────────────────────────────────────── */
 function Sparkline({
@@ -283,35 +284,65 @@ export default function DashboardPage() {
   const [overview, setOverview] = useState<MarketMetric[]>(MARKET_METRICS)
   const [signals, setSignals] = useState<Signal[]>(AI_SIGNALS)
   const [news, setNews] = useState<NewsItem[]>(FALLBACK_NEWS)
-  useEffect(() => {
-    if (!API) return
-    let alive = true
-    const load = async () => {
-      try {
-        const res = await fetch(`${API}/market/pulse`)
-        // 503 = no cached pulse yet → keep showing fallback data.
-        if (!res.ok || !alive) return
-        const data = await res.json()
+  const [pulseAsOf, setPulseAsOf] = useState<string>('')
+  const [refreshingPulse, setRefreshingPulse] = useState(false)
 
-        const metrics = (Array.isArray(data?.overview) ? data.overview : [])
-          .map(mapMetric).filter((m: MarketMetric | null): m is MarketMetric => m !== null)
-        if (alive && metrics.length) setOverview(metrics)
+  // Read the cached pulse from S3 (fast, no external API calls). Returns its
+  // `as_of` so the polling loop can detect when a manual refresh has landed.
+  const loadPulse = useCallback(async (): Promise<string | null> => {
+    if (!API) return null
+    try {
+      const res = await apiFetch(`${API}/market/pulse`)
+      // 503/empty = no cached pulse yet → keep showing fallback data.
+      if (!res.ok) return null
+      const data = await res.json()
 
-        const sigs = (Array.isArray(data?.signals) ? data.signals : [])
-          .map(mapSignal).filter((s: Signal | null): s is Signal => s !== null)
-        if (alive && sigs.length) setSignals(sigs)
+      const metrics = (Array.isArray(data?.overview) ? data.overview : [])
+        .map(mapMetric).filter((m: MarketMetric | null): m is MarketMetric => m !== null)
+      if (metrics.length) setOverview(metrics)
 
-        const rawNews: unknown[] = Array.isArray(data?.news) ? data.news : []
-        const items = rawNews.map(normalizeNews).filter((n): n is NewsItem => n !== null).slice(0, 3)
-        if (alive && items.length) setNews(items)
-      } catch (e) {
-        console.error('[pulse]', e)
-      }
+      const sigs = (Array.isArray(data?.signals) ? data.signals : [])
+        .map(mapSignal).filter((s: Signal | null): s is Signal => s !== null)
+      if (sigs.length) setSignals(sigs)
+
+      const rawNews: unknown[] = Array.isArray(data?.news) ? data.news : []
+      const items = rawNews.map(normalizeNews).filter((n): n is NewsItem => n !== null).slice(0, 3)
+      if (items.length) setNews(items)
+
+      if (data?.as_of) setPulseAsOf(data.as_of)
+      return data?.as_of ?? null
+    } catch (e) {
+      console.error('[pulse]', e)
+      return null
     }
-    load()
-    const t = setInterval(load, 300_000) // refresh every 5 min
-    return () => { alive = false; clearInterval(t) }
   }, [])
+
+  // Manual pulse refresh: POST triggers a background GNews ingest + LLM interpret
+  // (202), then we poll the cache until `as_of` advances. No auto-interval — the
+  // GNews/LLM cost is only paid when the user clicks.
+  const refreshPulse = useCallback(async () => {
+    if (!API || refreshingPulse) return
+    setRefreshingPulse(true)
+    const before = pulseAsOf
+    try {
+      const res = await apiFetch(`${API}/market/news`, { method: 'POST' })
+      if (!res.ok && res.status !== 202) throw new Error(`HTTP ${res.status}`)
+      const deadline = Date.now() + 150_000
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 4000))
+        const asOf = await loadPulse()
+        if (asOf && asOf !== before) return
+      }
+    } catch (e) {
+      console.error('[pulse refresh]', e)
+    } finally {
+      setRefreshingPulse(false)
+    }
+  }, [refreshingPulse, pulseAsOf, loadPulse])
+
+  useEffect(() => {
+    loadPulse()
+  }, [loadPulse])
 
   return (
     <div
@@ -344,6 +375,21 @@ export default function DashboardPage() {
           <span style={{ fontSize: 13, color: '#94a3b8' }}>
             {formatDate(now)}&nbsp;&nbsp;{formatTime(now)}
           </span>
+          {/* Manual pulse refresh — GNews + AI signals only update on demand */}
+          <button
+            onClick={refreshPulse}
+            disabled={refreshingPulse}
+            title="Fetch the latest market news and AI signals"
+            style={{
+              padding: '7px 14px', borderRadius: 8, fontSize: 12, fontWeight: 600,
+              border: '1px solid rgba(59,130,246,0.2)',
+              background: 'rgba(59,130,246,0.06)', color: '#94a3b8',
+              cursor: refreshingPulse ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+              transition: 'all 0.15s',
+            }}
+          >
+            {refreshingPulse ? 'Updating…' : 'Update pulse'}
+          </button>
           {/* Bell */}
           <div style={{ position: 'relative' }}>
             <button

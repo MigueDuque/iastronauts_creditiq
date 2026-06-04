@@ -27,6 +27,8 @@ import logging
 import os
 from typing import Any, Optional
 
+import boto3
+
 from shared import market_store
 
 logger = logging.getLogger("agents.market_ingestion")
@@ -37,8 +39,10 @@ logger.setLevel(logging.INFO)
 # provider-specific lookup (yfinance ticker, or TE indicator name). Keeping this
 # as data means fixing a wrong symbol is a one-line edit, not a logic change.
 METRICS: list[dict[str, Any]] = [
-    {"key": "USDCOP", "label": "USD / COP", "provider": "yfinance", "ref": "COP=X",   "unit": "COP", "decimals": 2},
-    {"key": "COLCAP", "label": "COLCAP",    "provider": "yfinance", "ref": "^COLCAP", "unit": "pts", "decimals": 2},
+    {"key": "USDCOP", "label": "USD / COP", "provider": "yfinance", "ref": "COP=X",      "unit": "COP", "decimals": 2},
+    # COLCAP has no direct Yahoo symbol (^COLCAP / COLCAP.CL return nothing); the
+    # iShares COLCAP ETF (ICOLCAP.CL) is the only reliable live proxy on Yahoo.
+    {"key": "COLCAP", "label": "iColcap",   "provider": "yfinance", "ref": "ICOLCAP.CL", "unit": "COP", "decimals": 2},
 ]
 # TES10Y / INFL / BANREP come from macro_colombia.py (maintained constants).
 
@@ -136,11 +140,29 @@ def _match_indicator(data: Any, ref: str) -> Optional[dict]:
 
 # ── GNews ────────────────────────────────────────────────────────────────────────
 
+_gnews_key_cache: str | None = None
+
+def _resolve_gnews_key() -> str:
+    global _gnews_key_cache
+    if _gnews_key_cache is not None:
+        return _gnews_key_cache
+    secret_arn = os.environ.get("GNEWS_API_KEY_SECRET_ARN")
+    if secret_arn:
+        try:
+            sm = boto3.client("secretsmanager")
+            _gnews_key_cache = sm.get_secret_value(SecretId=secret_arn).get("SecretString", "")
+            return _gnews_key_cache
+        except Exception as exc:
+            logger.warning("Could not read GNews secret from Secrets Manager: %s", exc)
+    _gnews_key_cache = os.environ.get("GNEWS_API_KEY", "")
+    return _gnews_key_cache
+
+
 def _fetch_news(max_items: int = 8) -> list[dict[str, Any]]:
     """Fetch + normalize Colombian financial headlines from GNews."""
     import requests
 
-    api_key = os.environ.get("GNEWS_API_KEY", "")
+    api_key = _resolve_gnews_key()
     if not api_key:
         raise ValueError("GNEWS_API_KEY no está configurada")
 

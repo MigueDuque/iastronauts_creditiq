@@ -93,25 +93,23 @@ export default function EarthIntelligenceCard({
 }: EarthIntelligenceCardProps) {
   const cardRef = useRef<HTMLDivElement>(null);
   const earthRef = useRef<HTMLImageElement>(null);
-  const rafRef = useRef<number>(0);
-  const startRef = useRef<number>(0);
-  /** Latest clamped horizontal offset (px). Held in a ref so the rAF loop
-   *  always reads the current value without restarting the animation. */
-  const horizontalOffsetRef = useRef<number>(0);
 
-  // Measure the card width → derive the clamped horizontal offset (responsive).
+  // Measure the card width → set the clamped horizontal offset as a CSS variable.
+  // The float itself is a compositor-driven CSS animation (see `.earth-float` in
+  // index.css), so it stays perfectly smooth even when the main thread is busy
+  // (e.g. market-data fetching in production). We only touch the DOM here when
+  // the card is actually resized — not every frame.
   useEffect(() => {
     const card = cardRef.current;
     if (!card) return;
 
     const recompute = () => {
       const containerWidth = card.clientWidth;
-      // const maxOffset = maxHorizontalOffset;
-      // const horizontalOffset = Math.min(containerWidth * horizontalFactor, maxOffset);
-      horizontalOffsetRef.current = Math.min(
+      const horizontalOffset = Math.min(
         containerWidth * horizontalFactor,
         maxHorizontalOffset,
       );
+      earthRef.current?.style.setProperty('--earth-x', `${horizontalOffset}px`);
     };
 
     recompute();
@@ -119,30 +117,6 @@ export default function EarthIntelligenceCard({
     observer.observe(card);
     return () => observer.disconnect();
   }, [horizontalFactor, maxHorizontalOffset]);
-
-  // Drive the smooth sinusoidal vertical oscillation.
-  useEffect(() => {
-    const animate = (timestamp: number) => {
-      if (!startRef.current) startRef.current = timestamp;
-      const t = (timestamp - startRef.current) / 1000; // seconds
-
-      const earth = earthRef.current;
-      if (earth) {
-        const x = horizontalOffsetRef.current;
-        // translateY(verticalOffset + amplitude * sin(t)) — smooth oscillation
-        // with an immediate reversal at the ±amplitude boundaries.
-        const y = verticalOffset + amplitude * Math.sin(t * speed);
-        // Base translate(-50%, -50%) re-centers the Earth on its anchor point;
-        // rotate() applies the configurable static spin.
-        earth.style.transform = `translate(-50%, -50%) translate(${x}px, ${y}px) rotate(${rotation}deg)`;
-      }
-
-      rafRef.current = requestAnimationFrame(animate);
-    };
-
-    rafRef.current = requestAnimationFrame(animate);
-    return () => cancelAnimationFrame(rafRef.current);
-  }, [verticalOffset, amplitude, speed, rotation]);
 
   const cardStyle: CSSProperties = {
     position: 'relative',
@@ -164,6 +138,10 @@ export default function EarthIntelligenceCard({
   // Using an <img> (replaced element) guarantees intrinsic dimensions are
   // respected — a background-image div with height:auto can collapse to 0.
   const earthSizeClamp = `clamp(${earthMinSize}px, ${earthViewportWidth}vw, ${earthMaxSize}px)`;
+  // Half-bob duration (s): the original sin oscillation y = vy + amp·sin(t·speed)
+  // sweeps min→max over π/speed seconds; `alternate` mirrors it back for the
+  // full cycle, reproducing the same cadence on the compositor thread.
+  const halfBobSeconds = Math.PI / speed;
   const earthStyle: CSSProperties = {
     position: 'absolute',
     top: '50%',
@@ -172,7 +150,15 @@ export default function EarthIntelligenceCard({
     height: earthSizeClamp,
     borderRadius: '50%',
     objectFit: 'cover',
-    transform: `translate(-50%, -50%) rotate(${rotation}deg)`,
+    // Dynamic values consumed by the `earth-float` keyframes (index.css).
+    // `--earth-x` is set imperatively by the ResizeObserver above.
+    ['--earth-vy' as string]: `${verticalOffset}px`,
+    ['--earth-amp' as string]: `${amplitude}px`,
+    ['--earth-rot' as string]: `${rotation}deg`,
+    ['--earth-period' as string]: `${halfBobSeconds}s`,
+    // Initial transform before the first animation frame (matches the keyframe
+    // origin so there is no visible jump on mount).
+    transform: `translate(-50%, -50%) translateY(${verticalOffset - amplitude}px) rotate(${rotation}deg)`,
     willChange: 'transform',
     filter: [
       'saturate(1.35)',
@@ -222,6 +208,7 @@ export default function EarthIntelligenceCard({
         src={imageSrc}
         alt=""
         aria-hidden="true"
+        className="earth-float"
         style={earthStyle}
       />
 

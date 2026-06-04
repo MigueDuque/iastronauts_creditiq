@@ -164,6 +164,133 @@ def calculate_impact_score(
     return round(min(mat_pts + size_pts + var_pts + anomaly_pts, 100.0), 2)
 
 
+def build_account_trace(
+    variation: AccountVariation,
+    threshold: float,
+    totals: FinancialTotals,
+    materiality: MaterialityLevel,
+    impact_score: float,
+    reliability: VariationReliability,
+    anomaly_detected: bool,
+) -> dict:
+    """Build the deterministic computation_trace for a single account.
+
+    All values are taken from already-computed objects so no re-calculation
+    occurs — the trace is a faithful record of what the pipeline actually produced.
+
+    Returns a dict with keys:
+      absolute_variation, variation_pct, materiality_threshold,
+      materiality_classification, impact_score.
+    Each entry: {formula, inputs, result, [note], [components]}.
+    """
+    magnitude = abs(variation.absolute_variation)
+    base = max(totals.total_assets, totals.total_revenue, 0.001)
+
+    mat_pts = {
+        MaterialityLevel.HIGH: 40.0,
+        MaterialityLevel.MEDIUM: 20.0,
+        MaterialityLevel.LOW: 5.0,
+    }[materiality]
+    size_ratio = abs(variation.current_value) / base
+    size_pts = min(size_ratio * 250.0, 25.0)
+    if reliability == VariationReliability.RELIABLE and variation.has_previous_value:
+        var_ratio = abs(variation.absolute_variation) / base
+        var_pts = min(var_ratio * 200.0, 20.0)
+    else:
+        var_pts = 0.0
+    anomaly_pts = 15.0 if anomaly_detected else 0.0
+
+    # The exposed variation_pct field is None whenever reliability suppresses it
+    # (no baseline, near-zero baseline, extreme reclassification). The trace must
+    # report the same value the field exposes so the two never diverge (§5.4).
+    pct_suppressed = reliability != VariationReliability.RELIABLE
+    if not variation.has_previous_value:
+        pct_formula = "N/A — sin período anterior (cuenta nueva)"
+    elif variation.previous_value == 0:
+        pct_formula = "N/A — previous_value = 0"
+    elif pct_suppressed:
+        pct_formula = f"N/A — % suprimido (confiabilidad = {reliability.value})"
+    else:
+        pct_formula = "(absolute_variation / previous_value) * 100"
+    pct_result = None if pct_suppressed else variation.variation_pct
+    if not variation.has_previous_value:
+        pct_note = "No baseline period available"
+    elif pct_suppressed:
+        pct_note = (
+            f"Suprimido — confiabilidad {reliability.value}; "
+            f"valor crudo calculado = {variation.variation_pct:+.2f}%"
+        )
+    else:
+        pct_note = None
+
+    return {
+        "absolute_variation": {
+            "formula": "current_value - previous_value",
+            "inputs": {
+                "current_value": variation.current_value,
+                "previous_value": variation.previous_value,
+            },
+            "result": variation.absolute_variation,
+        },
+        "variation_pct": {
+            "formula": pct_formula,
+            "inputs": {
+                "absolute_variation": variation.absolute_variation,
+                "previous_value": variation.previous_value,
+                "raw_computed_pct": variation.variation_pct,
+            },
+            "result": pct_result,
+            "note": pct_note,
+        },
+        "materiality_threshold": {
+            "formula": f"max(max(total_assets, total_revenue) * {_MATERIALITY_RATE}, {_FLOOR_COP_MM})",
+            "inputs": {
+                "total_assets": totals.total_assets,
+                "total_revenue": totals.total_revenue,
+                "rate": _MATERIALITY_RATE,
+                "floor_cop_mm": _FLOOR_COP_MM,
+            },
+            "result": threshold,
+        },
+        "materiality_classification": {
+            "formula": (
+                f"|absolute_variation| >= threshold → HIGH; "
+                f">= threshold * {_MEDIUM_MULTIPLIER} → MEDIUM; else LOW"
+            ),
+            "inputs": {
+                "magnitude": magnitude,
+                "threshold": threshold,
+                "medium_threshold": round(threshold * _MEDIUM_MULTIPLIER, 3),
+            },
+            "result": materiality.value,
+        },
+        "impact_score": {
+            "formula": "min(mat_pts + size_pts + var_pts + anomaly_pts, 100)",
+            "inputs": {
+                "base": round(base, 3),
+                "mat_pts": mat_pts,
+                "size_pts": round(size_pts, 2),
+                "var_pts": round(var_pts, 2),
+                "anomaly_pts": anomaly_pts,
+            },
+            "components": {
+                "materiality": f"{mat_pts} pts  (materiality = {materiality.value})",
+                "size": (
+                    f"{size_pts:.2f} pts  "
+                    f"= min(|{variation.current_value:.2f}| / {base:.2f} * 250, 25)"
+                ),
+                "variation": (
+                    f"{var_pts:.2f} pts"
+                    if reliability == VariationReliability.RELIABLE
+                    else f"0.00 pts  (suppressed — reliability = {reliability.value})"
+                ),
+                "anomaly_bonus": f"{anomaly_pts} pts  ({'detected' if anomaly_detected else 'none'})",
+            },
+            "result": impact_score,
+        },
+    }
+
+
 def infer_niif_references(
     account_name: str,
     category: str,

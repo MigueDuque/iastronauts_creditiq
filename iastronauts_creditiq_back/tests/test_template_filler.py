@@ -21,7 +21,8 @@ from agents.report_generator.template_filler import (
     build_deterministic_fields,
     build_narrative_fallbacks,
     is_narrative_field,
-    _miles,
+    _mm,
+    _qty,
     _pct,
     _period_label,
 )
@@ -72,8 +73,18 @@ def test_is_narrative_field_classification():
 
 
 def test_money_and_pct_formatting():
-    assert _miles(2_904_080_336.72) == "2,904,080.3"  # COP miles
-    assert _miles(None) == "N/D"
+    # Values are already in COP MM — rendered as-is, not divided.
+    assert _mm(2_904_080.3672) == "2,904,080.4"  # COP MM
+    assert _mm(15617.878) == "15,617.9"
+    assert _mm(None) == "N/D"
+    # Adaptive precision keeps small holdings visible instead of rounding to 0.0.
+    assert _mm(0.5) == "0.500"
+    assert _mm(0.0000156) == "0.0000156"  # ~3 significant figures, never 0.0
+    assert _mm(0.0008) == "0.000800"
+    assert _mm(0) == "0.0"
+    # Nominal quantities render plainly (no MM scaling).
+    assert _qty(1_000_000) == "1,000,000"
+    assert _qty(None) == "N/D"
     assert _pct(12.34) == "+12.3%"
     assert _pct(-5.0) == "-5.0%"
     assert _pct(None) == "N/D"
@@ -94,7 +105,7 @@ def test_real_template_fully_filled_without_llm():
     placeholders = _extract_placeholders(template_bytes)
     assert len(placeholders) > 200  # sanity: the rich template
 
-    det_map = build_deterministic_fields(payload, job_id=payload.job_id)
+    det_map, _audit = build_deterministic_fields(payload, job_id=payload.job_id)
     fallback_map = build_narrative_fallbacks(payload)
     field_map = _merge_like_handler(placeholders, det_map, fallback_map)
 
@@ -122,7 +133,7 @@ def test_every_deterministic_data_cell_has_a_value():
     with open(_TEMPLATE, "rb") as f:
         placeholders = _extract_placeholders(f.read())
 
-    det_map = build_deterministic_fields(payload, job_id=payload.job_id)
+    det_map, _audit = build_deterministic_fields(payload, job_id=payload.job_id)
     fallback_map = build_narrative_fallbacks(payload)
 
     missing = [

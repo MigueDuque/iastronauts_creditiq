@@ -471,6 +471,7 @@ async def list_jobs():
 # cached pulse (never hit GNews/yfinance/TE on the request path).
 
 @app.get("/market/data")
+@app.post("/market/data")  # POST triggers a refresh (synchronous in local dev)
 async def market_data(request: Request):
     from api.market_data.handler import lambda_handler
     return _resp(lambda_handler(_event(request, None), None))
@@ -478,6 +479,7 @@ async def market_data(request: Request):
 
 @app.get("/market/pulse")
 @app.get("/market/news")
+@app.post("/market/news")  # POST triggers a pulse refresh (synchronous in local dev)
 @app.get("/market/overview")
 @app.get("/market/signals")
 async def market_read(request: Request):
@@ -525,6 +527,40 @@ async def _start_market_refresh() -> None:
         return
     threading.Thread(target=_market_refresh_loop, daemon=True).start()
     print("[market] background refresh started")
+
+
+@app.post("/analyses/{analysis_id}/chat")
+async def chat_with_revisor(analysis_id: str, request: Request):
+    """Interactive chat with the RevisorInteligente about a completed analysis."""
+    from agents.revisor_inteligente.handler import chat_handler
+    body_bytes = await request.body()
+    body: dict = {}
+    try:
+        body = json.loads(body_bytes) if body_bytes else {}
+    except Exception:
+        pass
+    message = (body.get("message") or "").strip()
+    tenant_id = body.get("tenant_id") or request.headers.get("x-tenant-id") or "local"
+    if not message:
+        return JSONResponse(content={"error": "message es requerido"}, status_code=400)
+    result = chat_handler(
+        {"job_id": analysis_id, "message": message, "tenant_id": tenant_id},
+        None,
+    )
+    if "error" in result:
+        return JSONResponse(content={"error": result["error"]}, status_code=result.get("statusCode", 500))
+    return JSONResponse(content=result)
+
+
+@app.get("/analyses/{analysis_id}/chat/history")
+async def get_chat_history(analysis_id: str):
+    """Return the stored chat log for a job."""
+    from shared.job_store import load as job_load, CHAT_LOG
+    try:
+        data = job_load(analysis_id, CHAT_LOG)
+        return JSONResponse(content={"turns": data.get("turns") or []})
+    except Exception:
+        return JSONResponse(content={"turns": []})
 
 
 @app.delete("/analyses/{analysis_id}")

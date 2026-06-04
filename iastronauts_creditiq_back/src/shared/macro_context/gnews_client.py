@@ -18,6 +18,8 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+import boto3
+
 logger = logging.getLogger(__name__)
 
 _GNEWS_BASE = "https://gnews.io/api/v4"
@@ -48,6 +50,24 @@ def _cache_get(key: str) -> dict[str, Any] | None:
 
 def _cache_put(key: str, value: dict[str, Any]) -> None:
     _cache[key] = (value, time.time())
+
+
+_gnews_key_cache: str | None = None
+
+def _resolve_gnews_key() -> str:
+    global _gnews_key_cache
+    if _gnews_key_cache is not None:
+        return _gnews_key_cache
+    secret_arn = os.getenv("GNEWS_API_KEY_SECRET_ARN")
+    if secret_arn:
+        try:
+            sm = boto3.client("secretsmanager")
+            _gnews_key_cache = sm.get_secret_value(SecretId=secret_arn).get("SecretString", "")
+            return _gnews_key_cache
+        except Exception as exc:
+            logger.warning("Could not read GNews secret from Secrets Manager: %s", exc)
+    _gnews_key_cache = os.getenv("GNEWS_API_KEY", "")
+    return _gnews_key_cache
 
 
 def _fetch_url(url: str) -> list[dict]:
@@ -148,7 +168,7 @@ def fetch_colombia_news(
         return cached
 
     window = {"from": date_from, "to": date_to}
-    api_key = os.getenv("GNEWS_API_KEY", "")
+    api_key = _resolve_gnews_key()
     if not api_key:
         logger.warning("GNEWS_API_KEY not set — GNews client disabled")
         return {"articles": [], "available": False, "source": "gnews", "window": window}

@@ -13,6 +13,10 @@ import logging
 import os
 
 import boto3
+from botocore.exceptions import ClientError
+
+from shared.tenant_context import TenantBoundaryViolation
+from shared.tenant_middleware import extract_tenant_context
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -21,6 +25,11 @@ BUCKET = os.environ["MAIN_BUCKET"]
 
 
 def lambda_handler(event: dict, context) -> dict:
+    try:
+        tenant_ctx = extract_tenant_context(event)
+    except TenantBoundaryViolation:
+        return _response(401, {"error": "Unauthorized — se requiere identidad de tenant válida"})
+
     s3 = boto3.client("s3")
 
     # ── Single paginated listing of everything under jobs/ ──────────────────────
@@ -39,6 +48,16 @@ def lambda_handler(event: dict, context) -> dict:
 
     jobs: list[dict] = []
     for job_id, date_folder in job_dates.items():
+        # Tenant isolation: skip jobs that belong to a different tenant.
+        tenant_key = f"jobs/{date_folder}/{job_id}/tenant.json"
+        if tenant_key in all_keys:
+            try:
+                obj = s3.get_object(Bucket=BUCKET, Key=tenant_key)
+                stored_tenant = json.loads(obj["Body"].read()).get("tenant_id")
+                if stored_tenant and stored_tenant != tenant_ctx.tenant_id:
+                    continue
+            except Exception:
+                pass  # if we can't read ownership, include for backward compat
         base = f"jobs/{date_folder}/{job_id}"
         has_extractor = f"{base}/extractor_response.json"          in all_keys
         has_analyzer  = f"{base}/financial_analyzer_response.json" in all_keys

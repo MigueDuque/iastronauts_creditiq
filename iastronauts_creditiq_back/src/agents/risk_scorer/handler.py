@@ -39,6 +39,33 @@ def _is_investment_fund(payload: AnalyzerOutput) -> bool:
     return any(kw in company for kw in ("fondo", "fund", "p.acciones", "acciones", "renta", "liquidez"))
 
 
+def _enrich_business_context(payload: AnalyzerOutput, is_fund: bool):
+    """Fill business_context fields the pipeline can derive itself.
+
+    `analysis_confidence` weights `input_quality` (completeness of business_context) at
+    25%. `fiscal_year` and `industry` were arriving null on every run — even though both
+    are derivable from data already in hand — which forced input_quality to 0.0 and dragged
+    the documented confidence down to ~59% ("Confianza Baja") regardless of the actual
+    analysis quality. Derive them here so the score reflects what is genuinely known;
+    `strategic_context` is left untouched because it truly requires a human analyst.
+    """
+    bc = payload.business_context
+    if bc is None:
+        return bc
+
+    # fiscal_year ← reporting_period or the most recent period (both are "YYYY-MM").
+    if not getattr(bc, "fiscal_year", None):
+        ref = getattr(bc, "reporting_period", None) or (payload.periods[0] if payload.periods else None)
+        if ref and len(ref) >= 4 and ref[:4].isdigit():
+            bc.fiscal_year = ref[:4]
+
+    # industry ← deterministic label when the entity is an investment fund.
+    if not getattr(bc, "industry", None) and is_fund:
+        bc.industry = "Fondo de inversión / gestión de activos"
+
+    return bc
+
+
 def lambda_handler(event: dict, context) -> dict:
     """
     Input:  AnalyzerOutput
@@ -49,6 +76,7 @@ def lambda_handler(event: dict, context) -> dict:
 
     analysis_list = [a.model_dump() for a in payload.analysis_results]
     is_fund = _is_investment_fund(payload)
+    _enrich_business_context(payload, is_fund)
     sheet_concentration = payload.sheet_concentration or {}
 
     # ─── 1. Run 5 deterministic risk engines ──────────────────────────────────
@@ -245,6 +273,7 @@ def lambda_handler(event: dict, context) -> dict:
         risk_categories=risk_categories,
         risk_summary=risk_summary,
         fund_context_adjusted=is_fund,
+        computation_trace=composite.computation_trace,
     )
 
     logger.info("RiskScorer complete: overall_risk=%s", result.overall_risk_score.value)

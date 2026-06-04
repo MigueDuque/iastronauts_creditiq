@@ -666,6 +666,32 @@ body {
   animation: caret-blink 1.05s steps(1) infinite;
 }
 
+/* Earth hero float — runs on the compositor thread (GPU), so it stays smooth
+ * under main-thread load. Dynamic values are fed via CSS custom properties:
+ *   --earth-x   horizontal offset (px, responsive to card width)
+ *   --earth-vy  vertical center offset (px)
+ *   --earth-amp oscillation amplitude (px)
+ *   --earth-rot static rotation (deg)
+ *   --earth-period one half-bob duration (s) — alternate makes the full cycle 2×
+ * Only `transform` is animated, so the browser can promote the element to its
+ * own layer and animate off the main thread. */
+@keyframes earth-float {
+  from {
+    transform: translate(-50%, -50%) translateX(var(--earth-x, 0px))
+      translateY(calc(var(--earth-vy, 0px) - var(--earth-amp, 0px)))
+      rotate(var(--earth-rot, 0deg));
+  }
+  to {
+    transform: translate(-50%, -50%) translateX(var(--earth-x, 0px))
+      translateY(calc(var(--earth-vy, 0px) + var(--earth-amp, 0px)))
+      rotate(var(--earth-rot, 0deg));
+  }
+}
+
+.earth-float {
+  animation: earth-float var(--earth-period, 2.85s) ease-in-out infinite alternate;
+}
+
 /* Respect users who prefer reduced motion. */
 @media (prefers-reduced-motion: reduce) {
 

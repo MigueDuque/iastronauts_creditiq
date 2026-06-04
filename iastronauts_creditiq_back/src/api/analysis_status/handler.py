@@ -1,14 +1,35 @@
 import json
 import logging
 import os
+import time
 
 import boto3
 from botocore.exceptions import ClientError
 
-from shared.job_store import load as job_load, STATUS
+from shared.job_store import load as job_load, STATUS, TENANT
+from shared.tenant_context import TenantBoundaryViolation
+from shared.tenant_middleware import extract_tenant_context, validate_requested_tenant
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+# A "processing" status older than this is treated as a dead worker. The longest a
+# single agent can legitimately run is ~330s (the Lambda/SFN task timeouts); past this
+# ceiling the worker has crashed hard (OOM / timeout) without writing a terminal
+# status, so we surface "failed" instead of an eternal spinner. Applies only to the
+# manual/reanalyze path and the S3 fallback — when SFN reports RUNNING, SFN supervises
+# the timeout itself and is trusted.
+STALE_PROCESSING_SECONDS = 420
+
+
+def _is_stale_processing(s3_data: dict) -> bool:
+    """True when status is 'processing' and its heartbeat is older than the ceiling."""
+    if s3_data.get("status") != "processing":
+        return False
+    updated = s3_data.get("updated_at")
+    if not isinstance(updated, (int, float)):
+        return False  # legacy status with no heartbeat — cannot judge; leave as-is
+    return (time.time() - updated) > STALE_PROCESSING_SECONDS
 
 def _sfn_client():
     kwargs = {}
@@ -39,6 +60,13 @@ def _s3_status_fallback(analysis_id: str) -> dict:
     """Read status from S3 — written by the orchestrator background thread in local dev."""
     try:
         data = job_load(analysis_id, STATUS)
+        if _is_stale_processing(data):
+            logger.warning("analysis_status | job=%s stale processing (fallback) -> failed", analysis_id)
+            return _response(200, {
+                "analysis_id": analysis_id,
+                "status": "failed",
+                "error": "El proceso excedió el tiempo máximo sin completarse. Reintenta el análisis.",
+            })
         payload: dict = {
             "analysis_id": analysis_id,
             "status": data.get("status", "pending"),
@@ -54,12 +82,26 @@ def _s3_status_fallback(analysis_id: str) -> dict:
 def lambda_handler(event: dict, context) -> dict:
     """
     GET /analyses/{analysis_id}
-    Header: x-tenant-id
+    Header: Authorization (JWT) or x-tenant-id (dev only)
     """
     try:
+        try:
+            tenant_ctx = extract_tenant_context(event)
+        except TenantBoundaryViolation:
+            return _response(401, {"error": "Unauthorized — se requiere identidad de tenant válida"})
+
         analysis_id = event.get("pathParameters", {}).get("analysis_id")
         if not analysis_id:
             return _response(400, {"error": "analysis_id es requerido"})
+
+        # Verify this job belongs to the authenticated tenant before any S3/SFN reads.
+        try:
+            tenant_data = job_load(analysis_id, TENANT)
+            validate_requested_tenant(tenant_ctx, tenant_data["tenant_id"])
+        except TenantBoundaryViolation:
+            return _response(403, {"error": "Forbidden — este análisis no pertenece a su tenant"})
+        except ClientError:
+            pass  # tenant.json absent for jobs created before this change — allow through
 
         # Manual re-run override: when a job is re-run via /reanalyze (outside Step
         # Functions), status.json carries source="reanalyze". The SFN execution is
@@ -67,6 +109,15 @@ def lambda_handler(event: dict, context) -> dict:
         try:
             s3_data = job_load(analysis_id, STATUS)
             if s3_data.get("source") == "reanalyze":
+                # A reanalyze worker that crashed hard never wrote a terminal status;
+                # time it out so the frontend shows an error instead of hanging.
+                if _is_stale_processing(s3_data):
+                    logger.warning("analysis_status | job=%s stale processing -> failed", analysis_id)
+                    return _response(200, {
+                        "analysis_id": analysis_id,
+                        "status": "failed",
+                        "error": "El proceso excedió el tiempo máximo sin completarse. Reintenta el análisis.",
+                    })
                 payload = {
                     "analysis_id": analysis_id,
                     "status": s3_data.get("status", "processing"),

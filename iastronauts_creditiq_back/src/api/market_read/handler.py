@@ -47,15 +47,57 @@ def get_pulse() -> tuple[dict[str, Any], bool]:
     return pulse, True
 
 
+def _http_method(event: dict) -> str:
+    return (event.get("requestContext", {}).get("http", {}) or {}).get("method", "")
+
+
+def _trigger_async_refresh(context) -> dict:
+    """Fire a background self-invoke that runs the GNews ingest + LLM interpret.
+
+    This chain takes longer than API Gateway's 30s cap, so the request path must
+    not block on it. The frontend polls GET /market/pulse and watches `as_of`.
+    """
+    import boto3
+
+    fn = getattr(context, "function_name", None)
+    if not fn:
+        # Local dev — refresh synchronously.
+        pulse = refresh()
+        return _response(200, {"status": "refreshed", "as_of": pulse.get("as_of")})
+
+    boto3.client("lambda").invoke(
+        FunctionName=fn,
+        InvocationType="Event",  # async — returns immediately
+        Payload=json.dumps({"_refresh": True}).encode("utf-8"),
+    )
+    logger.info("market_read: async pulse refresh triggered on %s", fn)
+    return _response(202, {"status": "refresh_started"})
+
+
 def lambda_handler(event: dict, context) -> dict:
     """
-    GET /market/pulse     → full payload
-    GET /market/news      → pulse.news
-    GET /market/overview  → pulse.overview
-    GET /market/signals   → pulse.signals
+    GET  /market/pulse     → full payload
+    GET  /market/news      → pulse.news
+    GET  /market/overview  → pulse.overview
+    GET  /market/signals   → pulse.signals
+    POST /market/news      → trigger a background pulse refresh (GNews + LLM)
 
-    The slice is taken from rawPath so one Lambda backs all four routes.
+    The slice is taken from rawPath so one Lambda backs all four read routes.
     """
+    # Writer path: the async self-invoke runs the slow ingest → interpret chain
+    # and writes the new pulse to S3. No client is waiting on it.
+    if isinstance(event, dict) and event.get("_refresh"):
+        try:
+            pulse = refresh()
+            return _response(200, {"status": "refreshed", "as_of": pulse.get("as_of")})
+        except Exception as exc:
+            logger.error("market_read pulse refresh failed: %s", exc, exc_info=True)
+            return _response(500, {"error": str(exc)})
+
+    # POST — user pressed "Update". Kick off the background refresh, return 202.
+    if _http_method(event) == "POST":
+        return _trigger_async_refresh(context)
+
     path = (event.get("rawPath") or event.get("path") or "/market/pulse").rstrip("/")
     pulse, found = get_pulse()
 

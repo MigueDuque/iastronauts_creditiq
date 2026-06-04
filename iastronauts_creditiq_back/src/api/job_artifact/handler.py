@@ -14,7 +14,9 @@ import logging
 
 from botocore.exceptions import ClientError
 
-from shared.job_store import load as job_load, EXTRACTOR, FINANCIAL_ANALYZER, RISK_SCORER
+from shared.job_store import load as job_load, EXTRACTOR, FINANCIAL_ANALYZER, RISK_SCORER, TENANT
+from shared.tenant_context import TenantBoundaryViolation
+from shared.tenant_middleware import extract_tenant_context, validate_requested_tenant
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -33,6 +35,11 @@ def _artifact_for_path(path: str) -> str | None:
 
 
 def lambda_handler(event: dict, context) -> dict:
+    try:
+        tenant_ctx = extract_tenant_context(event)
+    except TenantBoundaryViolation:
+        return _response(401, {"error": "Unauthorized — se requiere identidad de tenant válida"})
+
     analysis_id = (event.get("pathParameters") or {}).get("analysis_id")
     path = (
         event.get("rawPath")
@@ -42,6 +49,14 @@ def lambda_handler(event: dict, context) -> dict:
 
     if not analysis_id or not artifact:
         return _response(400, {"error": "Ruta inválida o analysis_id faltante"})
+
+    try:
+        tenant_data = job_load(analysis_id, TENANT)
+        validate_requested_tenant(tenant_ctx, tenant_data["tenant_id"])
+    except TenantBoundaryViolation:
+        return _response(403, {"error": "Forbidden — este análisis no pertenece a su tenant"})
+    except ClientError:
+        pass  # tenant.json absent for legacy jobs — allow through
 
     try:
         data = job_load(analysis_id, artifact)

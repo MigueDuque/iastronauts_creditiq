@@ -26,7 +26,14 @@ def lambda_handler(event: dict, context) -> None:
 
     # Write status and token as separate artifacts so readers of status.json
     # never see a partially-written document that mixes status with the token.
-    job_save(job_id, PAUSE_TOKEN, {"task_token": task_token})
+    #
+    # The token artifact records the pause_status it belongs to. /continue uses
+    # this — NOT status.json — to choose which upstream artifact to resume with.
+    # status.json can drift ahead of the live SFN pause point (e.g. the manual
+    # agent_runner path advances it to "analysis_complete" while the token is
+    # still parked at "extraction_complete"); trusting it would feed the wrong
+    # agent output into the next state and crash it with a ValidationError.
+    job_save(job_id, PAUSE_TOKEN, {"task_token": task_token, "pause_status": pause_status})
     job_save(job_id, STATUS, {"status": pause_status})
 
     logger.info("paused | job=%s status=%s", job_id, pause_status)

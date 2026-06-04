@@ -38,6 +38,10 @@ RISK_SCORER = "risk_scorer_response"
 REPORT_GENERATOR = "report_generator_response"
 REVISOR = "revisor_response"
 STATUS = "status"
+# Written once at job creation; never overwritten by agents or status updates.
+TENANT = "tenant"
+CHAT_LOG = "chat_log"
+ANALYSIS_SUMMARY = "analysis_summary"
 
 # job_id → date folder, resolved once and reused. job_ids are bare UUIDs with no
 # embedded date, so the only way to find an existing job's folder is to look it up
@@ -170,6 +174,27 @@ def save_bytes(
     _job_date_cache.setdefault(job_id, date)
     logger.info("job_store.save_bytes | job=%s artifact=%s key=%s", job_id, artifact, key)
     return key
+
+
+def load_text(job_id: str, artifact: str, extension: str = "md", s3_client=None) -> str:
+    """Download a raw-text artifact (e.g. analysis_summary.md) from the job folder.
+
+    Returns the decoded string, or raises ClientError when the key does not exist.
+    Uses the same date-folder resolution logic as load().
+    """
+    client = s3_client or boto3.client("s3")
+    date = _job_date_cache.get(job_id) or _date_for(job_id)
+    key = f"jobs/{date}/{job_id}/{artifact}.{extension}"
+    try:
+        obj = client.get_object(Bucket=BUCKET, Key=key)
+        return obj["Body"].read().decode("utf-8")
+    except ClientError:
+        folder = _find_existing_folder(job_id, client)
+        if not folder or folder == date:
+            raise
+        key2 = f"jobs/{folder}/{job_id}/{artifact}.{extension}"
+        obj = client.get_object(Bucket=BUCKET, Key=key2)
+        return obj["Body"].read().decode("utf-8")
 
 
 def _get(client, key: str) -> dict:

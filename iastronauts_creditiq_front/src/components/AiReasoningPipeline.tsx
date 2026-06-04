@@ -1,4 +1,4 @@
-type Status = 'pending' | 'processing' | 'extraction_complete' | 'analysis_complete' | 'scoring_complete' | 'completed' | 'failed' | 'cancelled' | null
+type Status = 'pending' | 'processing' | 'extraction_complete' | 'analysis_complete' | 'scoring_complete' | 'report_complete' | 'completed' | 'failed' | 'cancelled' | null
 
 interface AgentProgressEntry {
   index: number
@@ -15,7 +15,7 @@ interface PipelineProgress {
   agents: AgentProgressEntry[]
 }
 
-type Phase = 'agent1' | 'agent2' | 'agent3' | 'agent4' | null
+type Phase = 'agent1' | 'agent2' | 'agent3' | 'agent4' | 'agent5' | null
 
 interface Props {
   status: Status
@@ -30,12 +30,14 @@ const STATIC_STEPS = [
   { label: 'Agent 2', title: 'Financial Analysis & NIIF', detail: 'Account classification · variance' },
   { label: 'Agent 3', title: 'Risk Scoring',              detail: 'Liquidity · credit · solvency · market' },
   { label: 'Agent 4', title: 'Report Generation',         detail: 'LLM narrative · NIIF notes draft' },
+  { label: 'Agent 5', title: 'Quality Review',            detail: '6-category validation · audit chat' },
 ]
 
 function derivedState(index: number, status: Status, phase?: Phase): 'done' | 'active' | 'pending' | 'failed' {
   if (status === 'failed')              return index === 0 ? 'failed' : 'pending'
   if (status === 'completed')           return 'done'
   // Terminal wait states: agents that have run are done; nothing shown as active
+  if (status === 'report_complete')     return index <= 3 ? 'done' : 'pending'
   if (status === 'scoring_complete')    return index <= 2 ? 'done' : 'pending'
   if (status === 'analysis_complete')   return index <= 1 ? 'done' : 'pending'
   if (status === 'extraction_complete') return index === 0 ? 'done' : 'pending'
@@ -43,6 +45,7 @@ function derivedState(index: number, status: Status, phase?: Phase): 'done' | 'a
     if (phase === 'agent2') return index < 1 ? 'done' : index === 1 ? 'active' : 'pending'
     if (phase === 'agent3') return index < 2 ? 'done' : index === 2 ? 'active' : 'pending'
     if (phase === 'agent4') return index < 3 ? 'done' : index === 3 ? 'active' : 'pending'
+    if (phase === 'agent5') return index < 4 ? 'done' : index === 4 ? 'active' : 'pending'
     // agent1 / null: Agent 1 is running
     return index === 0 ? 'active' : 'pending'
   }
@@ -52,6 +55,10 @@ function derivedState(index: number, status: Status, phase?: Phase): 'done' | 'a
 
 function derivedStep(index: number, status: Status): string | null {
   if (status === 'completed') {
+    const labels = ['Accounts extracted', 'Analysis complete', 'Risk scored', 'Report generated', 'Review passed']
+    return labels[index] ?? null
+  }
+  if (status === 'report_complete' && index <= 3) {
     const labels = ['Accounts extracted', 'Analysis complete', 'Risk scored', 'Report generated']
     return labels[index] ?? null
   }
@@ -69,6 +76,7 @@ export default function AiReasoningPipeline({ status, jobId, progress, phase }: 
   const statusLabel =
     status === 'completed'           ? { text: 'COMPLETED', cls: 'text-success border-success bg-surface' } :
     status === 'failed'              ? { text: 'FAILED',    cls: 'text-risk-high border-risk-high bg-surface' } :
+    status === 'report_complete'     ? { text: 'REPORTED',  cls: 'text-primary border-primary bg-surface' } :
     status === 'scoring_complete'    ? { text: 'SCORED',    cls: 'text-primary border-primary bg-surface' } :
     status === 'analysis_complete'   ? { text: 'ANALYZED',  cls: 'text-risk-medium border-risk-medium bg-surface' } :
     status === 'extraction_complete' ? { text: 'REVIEW',    cls: 'text-risk-medium border-risk-medium bg-surface' } :

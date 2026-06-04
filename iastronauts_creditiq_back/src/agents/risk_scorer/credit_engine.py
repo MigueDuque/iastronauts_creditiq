@@ -94,18 +94,23 @@ def score_credit(
 
     if is_investment_fund:
         # investable_base = actual equity positions + fund positions (exclude investor share classes)
+        # is_leaf drops fair-value-hierarchy aggregates ("Acciones Locales - Nivel 1 …")
+        # that duplicate the per-issuer rows; without it the top issuer resolved to that
+        # aggregate at 50% of a doubled portfolio base.
         investment_total = sum(
             a.get("current_value", 0.0)
             for a in analysis_results
             if a.get("account_name", "").lower().startswith("acciones")
             and "total" not in a.get("account_name", "").lower()
+            and a.get("is_leaf", True)
             and a.get("current_value", 0.0) > 0
         )
         fondo_total = sum(
             a.get("current_value", 0.0)
             for a in analysis_results
-            if a.get("account_name", "").lower().startswith("fondo de invers")
+            if a.get("account_name", "").lower().startswith("fondo")
             and "total" not in a.get("account_name", "").lower()
+            and a.get("is_leaf", True)
             and a.get("current_value", 0.0) > 0
         )
         investable_base = investment_total + fondo_total
@@ -118,9 +123,10 @@ def score_credit(
                 for a in analysis_results
                 if (
                     a.get("account_name", "").lower().startswith("acciones")
-                    or a.get("account_name", "").lower().startswith("fondo de invers")
+                    or a.get("account_name", "").lower().startswith("fondo")
                 )
                 and "total" not in a.get("account_name", "").lower()
+                and a.get("is_leaf", True)
                 and a.get("current_value", 0.0) > 0
             ]
             if candidates:

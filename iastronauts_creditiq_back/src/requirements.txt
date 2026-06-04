@@ -5,6 +5,7 @@ tenacity>=9.0.0
 pandas>=2.2.3
 openpyxl>=3.1.5
 yfinance>=0.2.40
+curl_cffi>=0.7.0  # yfinance uses it to impersonate a browser and avoid Yahoo 429/bot-blocking
 tradingeconomics==4.5.10
 requests>=2.32.0
 python-docx>=1.1.0

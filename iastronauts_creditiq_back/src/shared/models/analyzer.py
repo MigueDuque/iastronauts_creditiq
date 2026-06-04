@@ -9,8 +9,15 @@ class AccountAnalysis(BaseModel):
     account_name: str
     current_value: float
     previous_value: float
+    # False when no prior period existed for this account (brand-new position).
+    # Consumers must branch on this rather than treating previous_value==0.0 as a
+    # real zero baseline — the two are semantically distinct.
+    has_previous_value: bool = True
     absolute_variation: float
-    variation_pct: float
+    # None when the percentage is not economically meaningful (no baseline,
+    # near-zero baseline, or extreme reclassification). 0.0 means a literal zero
+    # change. The true computed number, if any, is preserved in computation_trace.
+    variation_pct: float | None = None
     materiality: MaterialityLevel
     requires_niif_note: bool
     niif_note_references: list[str]
@@ -51,6 +58,28 @@ class AccountAnalysis(BaseModel):
 
     # ── Dashboard investment signal (asset accounts only) ────────────────────
     investment_signal: str | None = None
+
+    # ── Account hierarchy (set by hierarchy_engine) ──────────────────────────
+    # Role of this row within the statement structure, so downstream consumers
+    # never mix levels of the same money (e.g. a portfolio summary line and its
+    # per-instrument breakdown on a detail sheet):
+    #   "primary_line"     — a line on a primary statement (balance/income/…)
+    #   "breakdown_detail" — a detail row that rolls up into a primary line
+    #   "subtotal"         — an intra-statement sum/subtotal row
+    #   "grand_total"      — a top-level reported total (Total Activos, …)
+    statement_role: str = "primary_line"
+    # account_id of the primary line this row breaks down (only for breakdown_detail).
+    parent_account_id: str | None = None
+    # True when this account is NOT itself broken down elsewhere — i.e. a leaf
+    # position safe to use for concentration/position-level aggregation.
+    is_leaf: bool = True
+
+    # ── Computation audit trail ───────────────────────────────────────────────
+    # Deterministic trace of every formula used to produce this account's values.
+    # Keys: absolute_variation, variation_pct, materiality_threshold,
+    #       materiality_classification, impact_score.
+    # Each entry: {formula, inputs, result, [note], [components]}.
+    computation_trace: dict | None = None
 
 
 class AnalyzerOutput(BaseModel):
@@ -118,3 +147,9 @@ class AnalyzerOutput(BaseModel):
     # ── Sheet-based Concentration (Activos / Instrumentos / Bancos) ──────────
     # Populated from source_sheet metadata; empty dict when source lacks sheet data
     sheet_concentration: dict = {}
+
+    # ── Global computation audit trail ────────────────────────────────────────
+    # Covers the materiality threshold derivation and aggregation counts.
+    # Per-account traces live in AccountAnalysis.computation_trace.
+    # Ratio/totals traces live in financial_ratios._computation_trace.
+    computation_trace: dict = {}

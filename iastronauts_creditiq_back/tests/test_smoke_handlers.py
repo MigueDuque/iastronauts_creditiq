@@ -104,11 +104,12 @@ class TestOrchestrator:
             mock_job_boto.client.return_value = MagicMock()
             result = mod.lambda_handler(
                 _api_event("POST", "/analyses", body={
-                    "s3_key": "uploads/tenant-test/test.pdf",
-                    "file_type": "pdf",
+                    "files_to_process": [
+                        {"file_name": "test.pdf", "s3_location": "uploads/tenant-test/test.pdf", "file_type": "pdf"}
+                    ],
                     "company_name": "Acme Corp",
                     "reporting_period": "2024-12",
-                    "output_format": "markdown",
+                    "output_formats": ["markdown"],
                 }),
                 None,
             )
@@ -291,11 +292,16 @@ class TestContinueAnalysis:
 class TestCancelAnalysis:
     def test_cancel_returns_200(self):
         from api.cancel_analysis import handler as mod
+        from botocore.exceptions import ClientError
 
         mock_sfn = MagicMock()
         mock_sfn.stop_execution.return_value = {}
 
         mock_s3_client = MagicMock()
+        # Simulate tenant.json not present (legacy job) so the allow-through branch runs.
+        mock_s3_client.get_object.side_effect = ClientError(
+            {"Error": {"Code": "NoSuchKey", "Message": ""}}, "get_object"
+        )
 
         with patch("api.cancel_analysis.handler._sfn_client", return_value=mock_sfn), \
              patch("shared.job_store.boto3") as mock_job_boto:

@@ -57,6 +57,7 @@ Devuelve ÚNICAMENTE un JSON válido con esta estructura:
       "is_total": true | false,
       "position_status": "existing | new_position | liquidated_position",
       "issuer_name": "nombre del emisor si aplica, o null",
+      "nominal_value": número (valor/cantidad nominal de la columna "Nominal YYYY") o null,
       "sector_hint": "financials | sovereign | infrastructure | energy | utilities | mixed | unknown | null",
       "investment_type": "equity | bond | fund | cash | sovereign_debt | private_equity | trust_rights | futures | unknown | null",
       "materiality_hint": "high | medium | low"
@@ -226,8 +227,9 @@ REGLAS DE SELECCIÓN DE COLUMNAS (CRÍTICO)
    - IGNORAR las columnas trimestrales — no son comparables con el acumulado.
 
    Si la tabla de inversiones tiene columnas "Nominal YYYY | Valor YYYY":
-   - Usar SOLO las columnas "Valor YYYY" (valor de mercado o razonable).
-   - IGNORAR las columnas "Nominal YYYY" (cantidad de unidades, no monetario).
+   - Usar la columna "Valor YYYY" (valor de mercado o razonable) como current_value/previous_value.
+   - Capturar la columna "Nominal YYYY" del período MÁS RECIENTE en nominal_value
+     (cantidad/valor nominal de la posición). Si no existe, nominal_value: null.
 
 3. POSICIONES NUEVAS O CERRADAS (valor = 0 en un período):
    - Si el valor del período anterior es 0 y el actual es > 0 → posición NUEVA.

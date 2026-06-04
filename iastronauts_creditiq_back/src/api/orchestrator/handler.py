@@ -11,7 +11,7 @@ from shared.models import BusinessContext, FileToProcess, OrchestratorOutput, Ou
 from shared.s3_report_store import slugify
 from shared.tenant_context import TenantBoundaryViolation
 from shared.tenant_middleware import extract_tenant_context, source_ip, validate_requested_tenant
-from shared.job_store import save as job_save, load as job_load, STATUS, EXTRACTOR
+from shared.job_store import save as job_save, load as job_load, STATUS, EXTRACTOR, TENANT
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -221,6 +221,10 @@ def lambda_handler(event: dict, context) -> dict:
             report_language=body.get("report_language", "es"),
             output_formats=output_formats,
         )
+
+        # Persist ownership record once, before either execution path. This lets
+        # GET/DELETE handlers validate tenant without loading the full extractor output.
+        job_save(orchestrator_output.job_id, TENANT, {"tenant_id": tenant_ctx.tenant_id})
 
         if LOCAL_DEV_BYPASS:
             # LOCAL_DEV_BYPASS_SFN=true — skip Step Functions and run the extractor

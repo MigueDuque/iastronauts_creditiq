@@ -1,0 +1,1367 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: "CreditIQ \u2014 Multi-Agent Financial Analysis Platform AI Innovation\
+  \ Challenge 2026 \u2014 BTG Pactual Colombia\n"
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues:
+    - dev
+    - uat
+    - master
+  LlmProvider:
+    Type: String
+    Default: anthropic_api
+    AllowedValues:
+    - anthropic_api
+    - bedrock
+  LlmModel:
+    Type: String
+    Default: claude-haiku-4-5-20251001
+  AnthropicApiKey:
+    Type: String
+    NoEcho: true
+    Default: ''
+  GnewsApiKey:
+    Type: String
+    NoEcho: true
+    Default: ''
+  PauseHeartbeatSeconds:
+    Type: Number
+    Default: 86400
+    Description: 'Seconds before an analyst-review pause state times out and the execution
+      transitions to ReviewExpired. Default is 24 h. Raise for longer review windows;
+      lower (e.g. 3600) for tighter SLAs in production.
+
+      '
+  AlertsEmail:
+    Type: String
+    Default: ''
+    Description: Email address to receive CloudWatch alarm notifications (optional).
+  FrontendOrigin:
+    Type: String
+    Default: '*'
+    Description: 'CORS allowed origin for the HttpApi. In production set to the CloudFront
+      distribution URL (e.g. https://abc123.cloudfront.net). Defaults to * so local
+      dev works without any parameter override.
+
+      '
+Conditions:
+  HasAnthropicKey:
+    Fn::Not:
+    - Fn::Equals:
+      - Ref: AnthropicApiKey
+      - ''
+  HasAlertsEmail:
+    Fn::Not:
+    - Fn::Equals:
+      - Ref: AlertsEmail
+      - ''
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 256
+    Architectures:
+    - arm64
+    Tracing: Active
+    Environment:
+      Variables:
+        STAGE:
+          Ref: Stage
+        MAIN_BUCKET:
+          Ref: MainBucket
+        WORKFLOW_ARN:
+          Fn::Sub: arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:creditiq-analysis-workflow-${Stage}
+        LLM_PROVIDER:
+          Ref: LlmProvider
+        LLM_MODEL:
+          Ref: LlmModel
+        ANTHROPIC_API_KEY_SECRET_ARN:
+          Ref: AnthropicApiKeySecret
+        GNEWS_API_KEY:
+          Ref: GnewsApiKey
+        AWS_ACCOUNT_ID:
+          Ref: AWS::AccountId
+  HttpApi:
+    CorsConfiguration:
+      AllowMethods:
+      - GET
+      - POST
+      - DELETE
+      - OPTIONS
+      AllowHeaders:
+      - Content-Type
+      - Authorization
+      - X-Tenant-Id
+      AllowOrigins:
+      - Ref: FrontendOrigin
+Resources:
+  AnthropicApiKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name:
+        Fn::Sub: creditiq-anthropic-api-key-${Stage}
+      Description: Anthropic API key for CreditIQ LLM calls
+      SecretString:
+        Fn::If:
+        - HasAnthropicKey
+        - Ref: AnthropicApiKey
+        - Ref: AWS::NoValue
+    Metadata:
+      SamResourceId: AnthropicApiKeySecret
+  MainBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName:
+        Fn::Sub: iastronauts-creditiq-${AWS::Region}-${Stage}
+      CorsConfiguration:
+        CorsRules:
+        - AllowedHeaders:
+          - '*'
+          AllowedMethods:
+          - GET
+          - PUT
+          - POST
+          - HEAD
+          AllowedOrigins:
+          - '*'
+          MaxAge: 3000
+      LifecycleConfiguration:
+        Rules:
+        - Id: expire-uploads
+          Prefix: uploads/
+          Status: Enabled
+          ExpirationInDays: 7
+        - Id: expire-job-artifacts
+          Prefix: jobs/
+          Status: Enabled
+          ExpirationInDays: 30
+    Metadata:
+      SamResourceId: MainBucket
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName:
+        Fn::Sub: iastronauts-creditiq-frontend-${AWS::Region}-${Stage}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+    Metadata:
+      SamResourceId: FrontendBucket
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name:
+          Fn::Sub: creditiq-oac-${Stage}
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+    Metadata:
+      SamResourceId: CloudFrontOAC
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: FrontendBucket
+      PolicyDocument:
+        Statement:
+        - Sid: AllowCloudFrontOAC
+          Effect: Allow
+          Principal:
+            Service: cloudfront.amazonaws.com
+          Action: s3:GetObject
+          Resource:
+            Fn::Sub: ${FrontendBucket.Arn}/*
+          Condition:
+            StringEquals:
+              AWS:SourceArn:
+                Fn::Sub: arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}
+    Metadata:
+      SamResourceId: FrontendBucketPolicy
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+        - Id: FrontendS3Origin
+          DomainName:
+            Fn::GetAtt:
+            - FrontendBucket
+            - RegionalDomainName
+          OriginAccessControlId:
+            Ref: CloudFrontOAC
+          S3OriginConfig:
+            OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          AllowedMethods:
+          - GET
+          - HEAD
+          - OPTIONS
+        CustomErrorResponses:
+        - ErrorCode: 403
+          ResponseCode: 200
+          ResponsePagePath: /index.html
+        - ErrorCode: 404
+          ResponseCode: 200
+          ResponsePagePath: /index.html
+        PriceClass: PriceClass_100
+    Metadata:
+      SamResourceId: FrontendDistribution
+  ApiLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Sub: creditiq-api-lambda-role-${Stage}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName: ApiLambdaPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:PutObject
+            - s3:GetObject
+            Resource:
+              Fn::Sub: ${MainBucket.Arn}/*
+          - Effect: Allow
+            Action: s3:ListBucket
+            Resource:
+              Fn::GetAtt:
+              - MainBucket
+              - Arn
+          - Effect: Allow
+            Action: states:StartExecution
+            Resource:
+              Fn::Sub: arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:creditiq-analysis-workflow-${Stage}
+          - Effect: Allow
+            Action: states:DescribeExecution
+            Resource:
+              Fn::Sub: arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:creditiq-analysis-workflow-${Stage}:*
+          - Effect: Allow
+            Action: states:StopExecution
+            Resource:
+              Fn::Sub: arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:creditiq-analysis-workflow-${Stage}:*
+          - Effect: Allow
+            Action: states:SendTaskSuccess
+            Resource: '*'
+          - Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource:
+            - Fn::GetAtt:
+              - AnalyzerFunction
+              - Arn
+            - Fn::GetAtt:
+              - RiskScorerFunction
+              - Arn
+            - Fn::GetAtt:
+              - ReportGeneratorFunction
+              - Arn
+            - Fn::Sub: arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:creditiq-agent-runner-${Stage}
+          - Effect: Allow
+            Action:
+            - xray:PutTraceSegments
+            - xray:PutTelemetryRecords
+            - xray:GetSamplingRules
+            - xray:GetSamplingTargets
+            Resource: '*'
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource:
+              Ref: AnthropicApiKeySecret
+          - Effect: Allow
+            Action: sqs:SendMessage
+            Resource:
+              Fn::GetAtt:
+              - AgentRunnerDLQ
+              - Arn
+    Metadata:
+      SamResourceId: ApiLambdaRole
+  AgentLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Sub: creditiq-agent-lambda-role-${Stage}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName: AgentLambdaPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:PutObject
+            Resource:
+              Fn::Sub: ${MainBucket.Arn}/*
+          - Effect: Allow
+            Action: s3:ListBucket
+            Resource:
+              Fn::GetAtt:
+              - MainBucket
+              - Arn
+          - Effect: Allow
+            Action:
+            - textract:StartDocumentTextDetection
+            - textract:GetDocumentTextDetection
+            - textract:StartDocumentAnalysis
+            - textract:GetDocumentAnalysis
+            - textract:AnalyzeDocument
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - bedrock:InvokeModel
+            - bedrock:InvokeModelWithResponseStream
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - xray:PutTraceSegments
+            - xray:PutTelemetryRecords
+            - xray:GetSamplingRules
+            - xray:GetSamplingTargets
+            Resource: '*'
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource:
+              Ref: AnthropicApiKeySecret
+    Metadata:
+      SamResourceId: AgentLambdaRole
+  WorkflowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: /aws/states/creditiq-analysis-workflow-${Stage}
+      RetentionInDays: 30
+    Metadata:
+      SamResourceId: WorkflowLogGroup
+  WorkflowRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Sub: creditiq-workflow-role-${Stage}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: states.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: StepFunctionsPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource:
+            - Fn::GetAtt:
+              - ExtractorFunction
+              - Arn
+            - Fn::GetAtt:
+              - AnalyzerFunction
+              - Arn
+            - Fn::GetAtt:
+              - RiskScorerFunction
+              - Arn
+            - Fn::GetAtt:
+              - ReportGeneratorFunction
+              - Arn
+            - Fn::GetAtt:
+              - RevisorInteligenteFunction
+              - Arn
+            - Fn::GetAtt:
+              - PauseFunction
+              - Arn
+          - Effect: Allow
+            Action:
+            - logs:CreateLogDelivery
+            - logs:GetLogDelivery
+            - logs:UpdateLogDelivery
+            - logs:DeleteLogDelivery
+            - logs:ListLogDeliveries
+            - logs:PutLogEvents
+            - logs:PutResourcePolicy
+            - logs:DescribeResourcePolicies
+            - logs:DescribeLogGroups
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - xray:PutTraceSegments
+            - xray:PutTelemetryRecords
+            - xray:GetSamplingRules
+            - xray:GetSamplingTargets
+            Resource: '*'
+    Metadata:
+      SamResourceId: WorkflowRole
+  PreTokenGenerationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: creditiq-pre-token-gen-${Stage}
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor/1d89281f2de50e5b86d1f1415c815064
+      Handler: api.cognito.pre_token_generation.lambda_handler
+      Policies:
+      - AWSLambdaBasicExecutionRole
+      Timeout: 5
+      MemorySize: 128
+    Metadata:
+      SamResourceId: PreTokenGenerationFunction
+  CognitoTriggerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::GetAtt:
+        - PreTokenGenerationFunction
+        - Arn
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn:
+        Fn::Sub: arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*
+    Metadata:
+      SamResourceId: CognitoTriggerPermission
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName:
+        Fn::Sub: creditiq-users-${Stage}
+      UsernameAttributes:
+      - email
+      AutoVerifiedAttributes:
+      - email
+      Schema:
+      - Name: tenant_id
+        AttributeDataType: String
+        Mutable: false
+        Required: false
+        StringAttributeConstraints:
+          MinLength: '1'
+          MaxLength: '128'
+      - Name: tenant_name
+        AttributeDataType: String
+        Mutable: true
+        Required: false
+        StringAttributeConstraints:
+          MinLength: '0'
+          MaxLength: '128'
+      - Name: tenant_tier
+        AttributeDataType: String
+        Mutable: true
+        Required: false
+        StringAttributeConstraints:
+          MinLength: '0'
+          MaxLength: '64'
+      - Name: permissions
+        AttributeDataType: String
+        Mutable: true
+        Required: false
+        StringAttributeConstraints:
+          MinLength: '0'
+          MaxLength: '512'
+      LambdaConfig:
+        PreTokenGeneration:
+          Fn::GetAtt:
+          - PreTokenGenerationFunction
+          - Arn
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+        - Name: verified_email
+          Priority: 1
+      UserPoolAddOns:
+        AdvancedSecurityMode: "OFF"
+    Metadata:
+      SamResourceId: CognitoUserPool
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName:
+        Fn::Sub: creditiq-frontend-${Stage}
+      UserPoolId:
+        Ref: CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+      - ALLOW_USER_SRP_AUTH
+      - ALLOW_REFRESH_TOKEN_AUTH
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+      ReadAttributes:
+      - email
+      - custom:tenant_id
+      - custom:tenant_name
+      - custom:tenant_tier
+      - custom:permissions
+      WriteAttributes:
+      - email
+      PreventUserExistenceErrors: ENABLED
+    Metadata:
+      SamResourceId: CognitoUserPoolClient
+  CreditIQApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName:
+        Ref: Stage
+      Description: "CreditIQ API \u2014 Financial Analysis Platform"
+      Auth:
+        Authorizers:
+          CognitoAuthorizer:
+            JwtConfiguration:
+              issuer:
+                Fn::Sub: https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}
+              audience:
+              - Ref: CognitoUserPoolClient
+            IdentitySource: $request.header.Authorization
+        DefaultAuthorizer: CognitoAuthorizer
+    Metadata:
+      SamResourceId: CreditIQApi
+  PresignedUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: creditiq-presigned-url-${Stage}
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor/1d89281f2de50e5b86d1f1415c815064
+      Handler: api.presigned_url.handler.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - ApiLambdaRole
+        - Arn
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: CreditIQApi
+            Path: /upload-url
+            Method: POST
+    Metadata:
+      SamResourceId: PresignedUrlFunction
+  OrchestratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: creditiq-orchestrator-${Stage}
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor/1d89281f2de50e5b86d1f1415c815064
+      Handler: api.orchestrator.handler.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - ApiLambdaRole
+        - Arn
+      Timeout: 60
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: CreditIQApi
+            Path: /analyses
+            Method: POST
+    Metadata:
+      SamResourceId: OrchestratorFunction
+  ListJobsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: creditiq-list-jobs-${Stage}
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor/1d89281f2de50e5b86d1f1415c815064
+      Handler: api.list_jobs.handler.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - ApiLambdaRole
+        - Arn
+      Timeout: 30
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: CreditIQApi
+            Path: /jobs
+            Method: GET
+    Metadata:
+      SamResourceId: ListJobsFunction
+  AnalysisStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: creditiq-analysis-status-${Stage}
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor/1d89281f2de50e5b86d1f1415c815064
+      Handler: api.analysis_status.handler.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - ApiLambdaRole
+        - Arn
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: CreditIQApi
+            Path: /analyses/{analysis_id}
+            Method: GET
+    Metadata:
+      SamResourceId: AnalysisStatusFunction
+  ContinueAnalysisFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: creditiq-continue-analysis-${Stage}
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor/1d89281f2de50e5b86d1f1415c815064
+      Handler: api.continue_analysis.handler.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - ApiLambdaRole
+        - Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          RUNNER_FUNCTION_NAME:
+            Ref: AgentRunnerFunction
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: CreditIQApi
+            Path: /analyses/{analysis_id}/continue
+            Method: POST
+    Metadata:
+      SamResourceId: ContinueAnalysisFunction
+  AgentRunnerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: creditiq-agent-runner-${Stage}
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor/1d89281f2de50e5b86d1f1415c815064
+      Handler: api.agent_runner.handler.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - ApiLambdaRole
+        - Arn
+      Timeout: 360
+      MemorySize: 256
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn:
+          Fn::GetAtt:
+          - AgentRunnerDLQ
+          - Arn
+      Environment:
+        Variables:
+          ANALYZER_FUNCTION_NAME:
+            Ref: AnalyzerFunction
+          RISK_SCORER_FUNCTION_NAME:
+            Ref: RiskScorerFunction
+          REPORT_GENERATOR_FUNCTION_NAME:
+            Ref: ReportGeneratorFunction
+      Events:
+        ReanalyzeEvent:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: CreditIQApi
+            Path: /analyses/{analysis_id}/reanalyze
+            Method: POST
+        ReanalyzeScorerEvent:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: CreditIQApi
+            Path: /analyses/{analysis_id}/reanalyze-scorer
+            Method: POST
+    Metadata:
+      SamResourceId: AgentRunnerFunction
+  ReportUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: creditiq-report-url-${Stage}
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor/1d89281f2de50e5b86d1f1415c815064
+      Handler: api.report_url.handler.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - ApiLambdaRole
+        - Arn
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: CreditIQApi
+            Path: /analyses/{analysis_id}/report
+            Method: GET
+    Metadata:
+      SamResourceId: ReportUrlFunction
+  JobArtifactFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: creditiq-job-artifact-${Stage}
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor/1d89281f2de50e5b86d1f1415c815064
+      Handler: api.job_artifact.handler.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - ApiLambdaRole
+        - Arn
+      Timeout: 30
+      Events:
+        ExtractorEvent:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: CreditIQApi
+            Path: /analyses/{analysis_id}/extractor
+            Method: GET
+        AnalyzerEvent:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: CreditIQApi
+            Path: /analyses/{analysis_id}/analyzer
+            Method: GET
+        ScorerEvent:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: CreditIQApi
+            Path: /analyses/{analysis_id}/scorer
+            Method: GET
+    Metadata:
+      SamResourceId: JobArtifactFunction
+  CancelAnalysisFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: creditiq-cancel-analysis-${Stage}
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor/1d89281f2de50e5b86d1f1415c815064
+      Handler: api.cancel_analysis.handler.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - ApiLambdaRole
+        - Arn
+      Timeout: 30
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: CreditIQApi
+            Path: /analyses/{analysis_id}
+            Method: DELETE
+    Metadata:
+      SamResourceId: CancelAnalysisFunction
+  AnalysisWorkflow:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name:
+        Fn::Sub: creditiq-analysis-workflow-${Stage}
+      DefinitionUri:
+        Bucket: aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor
+        Key: 9adb2a4b97709f1b25164076db14fecf
+      DefinitionSubstitutions:
+        ExtractorFunctionArn:
+          Fn::GetAtt:
+          - ExtractorFunction
+          - Arn
+        AnalyzerFunctionArn:
+          Fn::GetAtt:
+          - AnalyzerFunction
+          - Arn
+        RiskScorerFunctionArn:
+          Fn::GetAtt:
+          - RiskScorerFunction
+          - Arn
+        ReportGeneratorFunctionArn:
+          Fn::GetAtt:
+          - ReportGeneratorFunction
+          - Arn
+        RevisorFunctionArn:
+          Fn::GetAtt:
+          - RevisorInteligenteFunction
+          - Arn
+        PauseFunctionArn:
+          Fn::GetAtt:
+          - PauseFunction
+          - Arn
+        PauseHeartbeatSeconds:
+          Ref: PauseHeartbeatSeconds
+      Role:
+        Fn::GetAtt:
+        - WorkflowRole
+        - Arn
+      Type: STANDARD
+      Tracing:
+        Enabled: true
+      Logging:
+        Level: ALL
+        IncludeExecutionData: false
+        Destinations:
+        - CloudWatchLogsLogGroup:
+            LogGroupArn:
+              Fn::GetAtt:
+              - WorkflowLogGroup
+              - Arn
+    Metadata:
+      SamResourceId: AnalysisWorkflow
+  PauseFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: creditiq-pause-${Stage}
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor/1d89281f2de50e5b86d1f1415c815064
+      Handler: agents.pause.handler.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - AgentLambdaRole
+        - Arn
+      Timeout: 10
+      MemorySize: 128
+    Metadata:
+      SamResourceId: PauseFunction
+  ExtractorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: creditiq-extractor-${Stage}
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor/1d89281f2de50e5b86d1f1415c815064
+      Handler: agents.document_extractor.handler.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - AgentLambdaRole
+        - Arn
+      Timeout: 300
+      MemorySize: 512
+    Metadata:
+      SamResourceId: ExtractorFunction
+  AnalyzerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: creditiq-analyzer-${Stage}
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor/1d89281f2de50e5b86d1f1415c815064
+      Handler: agents.financial_analyzer.handler.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - AgentLambdaRole
+        - Arn
+      Timeout: 300
+      MemorySize: 512
+    Metadata:
+      SamResourceId: AnalyzerFunction
+  RiskScorerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: creditiq-risk-scorer-${Stage}
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor/1d89281f2de50e5b86d1f1415c815064
+      Handler: agents.risk_scorer.handler.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - AgentLambdaRole
+        - Arn
+      Timeout: 180
+      MemorySize: 256
+    Metadata:
+      SamResourceId: RiskScorerFunction
+  ReportGeneratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: creditiq-report-generator-${Stage}
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor/1d89281f2de50e5b86d1f1415c815064
+      Handler: agents.report_generator.handler.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - AgentLambdaRole
+        - Arn
+      Timeout: 300
+      MemorySize: 512
+    Metadata:
+      SamResourceId: ReportGeneratorFunction
+  RevisorInteligenteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: creditiq-revisor-inteligente-${Stage}
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor/1d89281f2de50e5b86d1f1415c815064
+      Handler: agents.revisor_inteligente.handler.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - AgentLambdaRole
+        - Arn
+      Timeout: 300
+      MemorySize: 512
+    Metadata:
+      SamResourceId: RevisorInteligenteFunction
+  MarketDataFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: creditiq-market-data-${Stage}
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor/1d89281f2de50e5b86d1f1415c815064
+      Handler: api.market_data.handler.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - ApiLambdaRole
+        - Arn
+      Timeout: 60
+      Events:
+        MarketDataEvent:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: CreditIQApi
+            Path: /market/data
+            Method: GET
+    Metadata:
+      SamResourceId: MarketDataFunction
+  MarketReadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: creditiq-market-read-${Stage}
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-dzaabccwauor/1d89281f2de50e5b86d1f1415c815064
+      Handler: api.market_read.handler.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - ApiLambdaRole
+        - Arn
+      Timeout: 30
+      Events:
+        MarketPulseEvent:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: CreditIQApi
+            Path: /market/pulse
+            Method: GET
+        MarketNewsEvent:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: CreditIQApi
+            Path: /market/news
+            Method: GET
+        MarketOverviewEvent:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: CreditIQApi
+            Path: /market/overview
+            Method: GET
+        MarketSignalsEvent:
+          Type: HttpApi
+          Properties:
+            ApiId:
+              Ref: CreditIQApi
+            Path: /market/signals
+            Method: GET
+    Metadata:
+      SamResourceId: MarketReadFunction
+  MarketRefreshSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name:
+        Fn::Sub: creditiq-market-refresh-${Stage}
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+      - Id: MarketDataTarget
+        Arn:
+          Fn::GetAtt:
+          - MarketDataFunction
+          - Arn
+    Metadata:
+      SamResourceId: MarketRefreshSchedule
+  MarketRefreshPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::GetAtt:
+        - MarketDataFunction
+        - Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+        - MarketRefreshSchedule
+        - Arn
+    Metadata:
+      SamResourceId: MarketRefreshPermission
+  AgentRunnerDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName:
+        Fn::Sub: creditiq-agent-runner-dlq-${Stage}
+      MessageRetentionPeriod: 1209600
+    Metadata:
+      SamResourceId: AgentRunnerDLQ
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName:
+        Fn::Sub: creditiq-alerts-${Stage}
+    Metadata:
+      SamResourceId: AlertsTopic
+  AlertsEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertsEmail
+    Properties:
+      TopicArn:
+        Ref: AlertsTopic
+      Protocol: email
+      Endpoint:
+        Ref: AlertsEmail
+    Metadata:
+      SamResourceId: AlertsEmailSubscription
+  AlarmExtractorErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Sub: creditiq-${Stage}-extractor-errors
+      AlarmDescription: Document Extractor Lambda errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: ExtractorFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: AlertsTopic
+      OKActions:
+      - Ref: AlertsTopic
+    Metadata:
+      SamResourceId: AlarmExtractorErrors
+  AlarmAnalyzerErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Sub: creditiq-${Stage}-analyzer-errors
+      AlarmDescription: Financial Analyzer Lambda errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: AnalyzerFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: AlertsTopic
+      OKActions:
+      - Ref: AlertsTopic
+    Metadata:
+      SamResourceId: AlarmAnalyzerErrors
+  AlarmRiskScorerErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Sub: creditiq-${Stage}-risk-scorer-errors
+      AlarmDescription: Risk Scorer Lambda errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: RiskScorerFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: AlertsTopic
+      OKActions:
+      - Ref: AlertsTopic
+    Metadata:
+      SamResourceId: AlarmRiskScorerErrors
+  AlarmReportGeneratorErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Sub: creditiq-${Stage}-report-generator-errors
+      AlarmDescription: Report Generator Lambda errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: ReportGeneratorFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: AlertsTopic
+      OKActions:
+      - Ref: AlertsTopic
+    Metadata:
+      SamResourceId: AlarmReportGeneratorErrors
+  AlarmRevisorErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Sub: creditiq-${Stage}-revisor-errors
+      AlarmDescription: Revisor Inteligente Lambda errors
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: RevisorInteligenteFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: AlertsTopic
+      OKActions:
+      - Ref: AlertsTopic
+    Metadata:
+      SamResourceId: AlarmRevisorErrors
+  AlarmAgentThrottles:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Sub: creditiq-${Stage}-agent-throttles
+      AlarmDescription: Any agent Lambda is being throttled
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: AlertsTopic
+    Metadata:
+      SamResourceId: AlarmAgentThrottles
+  AlarmWorkflowFailed:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Sub: creditiq-${Stage}-workflow-executions-failed
+      AlarmDescription: Step Functions executions failed (pipeline error, not review
+        expiration)
+      Namespace: AWS/States
+      MetricName: ExecutionsFailed
+      Dimensions:
+      - Name: StateMachineArn
+        Value:
+          Fn::Sub: arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:creditiq-analysis-workflow-${Stage}
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: AlertsTopic
+      OKActions:
+      - Ref: AlertsTopic
+    Metadata:
+      SamResourceId: AlarmWorkflowFailed
+  AlarmAgentRunnerDLQ:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Sub: creditiq-${Stage}-agent-runner-dlq-depth
+      AlarmDescription: "Messages in AgentRunner DLQ \u2014 async invocations failing\
+        \ after all retries"
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+      - Name: QueueName
+        Value:
+          Fn::GetAtt:
+          - AgentRunnerDLQ
+          - QueueName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: AlertsTopic
+    Metadata:
+      SamResourceId: AlarmAgentRunnerDLQ
+  CreditIQDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName:
+        Fn::Sub: CreditIQ-${Stage}
+      DashboardBody:
+        Fn::Sub: "{\n  \"widgets\": [\n    {\n      \"type\": \"text\",\n      \"\
+          x\": 0, \"y\": 0, \"width\": 24, \"height\": 2,\n      \"properties\": {\n\
+          \        \"markdown\": \"## CreditIQ \u2014 ${Stage}\\nMonitoring dashboard\
+          \ for the analysis pipeline. Check the metric widgets below for errors and\
+          \ latency.\"\n      }\n    },\n    {\n      \"type\": \"metric\",\n    \
+          \  \"x\": 0, \"y\": 2, \"width\": 12, \"height\": 6,\n      \"properties\"\
+          : {\n        \"title\": \"Lambda Errors \u2014 Agents\",\n        \"region\"\
+          : \"${AWS::Region}\",\n        \"view\": \"timeSeries\",\n        \"stat\"\
+          : \"Sum\",\n        \"period\": 300,\n        \"metrics\": [\n         \
+          \ [\"AWS/Lambda\", \"Errors\", \"FunctionName\", \"creditiq-extractor-${Stage}\"\
+          , {\"label\": \"Extractor\"}],\n          [\"AWS/Lambda\", \"Errors\", \"\
+          FunctionName\", \"creditiq-analyzer-${Stage}\", {\"label\": \"Analyzer\"\
+          }],\n          [\"AWS/Lambda\", \"Errors\", \"FunctionName\", \"creditiq-risk-scorer-${Stage}\"\
+          , {\"label\": \"RiskScorer\"}],\n          [\"AWS/Lambda\", \"Errors\",\
+          \ \"FunctionName\", \"creditiq-report-generator-${Stage}\", {\"label\":\
+          \ \"ReportGen\"}],\n          [\"AWS/Lambda\", \"Errors\", \"FunctionName\"\
+          , \"creditiq-revisor-inteligente-${Stage}\", {\"label\": \"Revisor\"}]\n\
+          \        ]\n      }\n    },\n    {\n      \"type\": \"metric\",\n      \"\
+          x\": 12, \"y\": 2, \"width\": 12, \"height\": 6,\n      \"properties\":\
+          \ {\n        \"title\": \"Step Functions Executions\",\n        \"region\"\
+          : \"${AWS::Region}\",\n        \"view\": \"timeSeries\",\n        \"stat\"\
+          : \"Sum\",\n        \"period\": 300,\n        \"metrics\": [\n         \
+          \ [\"AWS/States\", \"ExecutionsStarted\", \"StateMachineArn\", \"arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:creditiq-analysis-workflow-${Stage}\"\
+          , {\"label\": \"Started\"}],\n          [\"AWS/States\", \"ExecutionsSucceeded\"\
+          , \"StateMachineArn\", \"arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:creditiq-analysis-workflow-${Stage}\"\
+          , {\"label\": \"Succeeded\"}],\n          [\"AWS/States\", \"ExecutionsFailed\"\
+          , \"StateMachineArn\", \"arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:creditiq-analysis-workflow-${Stage}\"\
+          , {\"label\": \"Failed\", \"color\": \"#d62728\"}]\n        ]\n      }\n\
+          \    },\n    {\n      \"type\": \"metric\",\n      \"x\": 0, \"y\": 8, \"\
+          width\": 12, \"height\": 6,\n      \"properties\": {\n        \"title\"\
+          : \"Lambda Duration p99 \u2014 Agents (ms)\",\n        \"region\": \"${AWS::Region}\"\
+          ,\n        \"view\": \"timeSeries\",\n        \"stat\": \"p99\",\n     \
+          \   \"period\": 300,\n        \"metrics\": [\n          [\"AWS/Lambda\"\
+          , \"Duration\", \"FunctionName\", \"creditiq-extractor-${Stage}\", {\"label\"\
+          : \"Extractor\"}],\n          [\"AWS/Lambda\", \"Duration\", \"FunctionName\"\
+          , \"creditiq-analyzer-${Stage}\", {\"label\": \"Analyzer\"}],\n        \
+          \  [\"AWS/Lambda\", \"Duration\", \"FunctionName\", \"creditiq-risk-scorer-${Stage}\"\
+          , {\"label\": \"RiskScorer\"}],\n          [\"AWS/Lambda\", \"Duration\"\
+          , \"FunctionName\", \"creditiq-report-generator-${Stage}\", {\"label\":\
+          \ \"ReportGen\"}]\n        ]\n      }\n    },\n    {\n      \"type\": \"\
+          metric\",\n      \"x\": 12, \"y\": 8, \"width\": 12, \"height\": 6,\n  \
+          \    \"properties\": {\n        \"title\": \"AgentRunner DLQ Depth\",\n\
+          \        \"region\": \"${AWS::Region}\",\n        \"view\": \"timeSeries\"\
+          ,\n        \"stat\": \"Maximum\",\n        \"period\": 300,\n        \"\
+          metrics\": [\n          [\"AWS/SQS\", \"ApproximateNumberOfMessagesVisible\"\
+          , \"QueueName\", \"creditiq-agent-runner-dlq-${Stage}\", {\"label\": \"\
+          Messages in DLQ\", \"color\": \"#d62728\"}]\n        ]\n      }\n    }\n\
+          \  ]\n}\n"
+    Metadata:
+      SamResourceId: CreditIQDashboard
+Outputs:
+  ApiUrl:
+    Description: Base URL de la API
+    Value:
+      Fn::Sub: https://${CreditIQApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}
+  MainBucketName:
+    Description: Bucket principal (uploads/, reports/, rag/)
+    Value:
+      Ref: MainBucket
+  CloudFrontUrl:
+    Description: "URL p\xFAblica del frontend"
+    Value:
+      Fn::Sub: https://${FrontendDistribution.DomainName}
+  CloudFrontDistributionId:
+    Description: "ID de la distribuci\xF3n CloudFront"
+    Value:
+      Ref: FrontendDistribution
+  FrontendBucketName:
+    Description: Bucket S3 del frontend
+    Value:
+      Ref: FrontendBucket
+  WorkflowArn:
+    Description: ARN del Step Functions workflow
+    Value:
+      Ref: AnalysisWorkflow
+  WorkflowLogGroup:
+    Description: CloudWatch Log Group para el workflow
+    Value:
+      Ref: WorkflowLogGroup
+  AlertsTopicArn:
+    Description: SNS topic ARN for CloudWatch alarm notifications
+    Value:
+      Ref: AlertsTopic
+  AgentRunnerDLQUrl:
+    Description: SQS DLQ URL for failed async AgentRunner invocations
+    Value:
+      Ref: AgentRunnerDLQ
+  DashboardUrl:
+    Description: CloudWatch dashboard URL
+    Value:
+      Fn::Sub: https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=CreditIQ-${Stage}
+  UserPoolId:
+    Description: "Cognito User Pool ID \u2014 set as VITE_COGNITO_USER_POOL_ID in\
+      \ the frontend"
+    Value:
+      Ref: CognitoUserPool
+  UserPoolClientId:
+    Description: "Cognito User Pool Client ID \u2014 set as VITE_COGNITO_CLIENT_ID\
+      \ in the frontend"
+    Value:
+      Ref: CognitoUserPoolClient
+  UserPoolEndpoint:
+    Description: Cognito issuer URL (used by JWT authorizer)
+    Value:
+      Fn::Sub: https://cognito-idp.${AWS::Region}.amazonaws.com/${CognitoUserPool}
+  CreateFirstUserCommand:
+    Description: CLI command to create the demo user (run after deploy, fill in password
+      + email)
+    Value:
+      Fn::Sub: 'aws cognito-idp admin-create-user --user-pool-id ${CognitoUserPool}
+        --username YOUR_EMAIL --temporary-password Temp1234! --user-attributes Name=email,Value=YOUR_EMAIL
+        Name=email_verified,Value=true Name=custom:tenant_id,Value=btg-demo Name=custom:tenant_name,Value="BTG
+        Demo" Name=custom:tenant_tier,Value=professional Name=custom:permissions,Value="analyses:create,analyses:read"
+        --region ${AWS::Region}
+
+        aws cognito-idp admin-set-user-password --user-pool-id ${CognitoUserPool}
+        --username YOUR_EMAIL --password YOUR_FINAL_PASSWORD --permanent --region
+        ${AWS::Region}'

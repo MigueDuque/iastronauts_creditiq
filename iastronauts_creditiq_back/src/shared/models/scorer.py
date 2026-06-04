@@ -83,3 +83,11 @@ class ScorerOutput(BaseModel):
     risk_summary: dict = {}
     # True when scoring thresholds were adjusted for investment fund context
     fund_context_adjusted: bool = False
+
+    # ── Risk scoring computation audit trail ──────────────────────────────────
+    # Keys: composite_score (formula+inputs+result), overall_risk_level
+    #       (threshold rule + ceiling/floor applied), financiero_category
+    #       (liquidity+solvency blend formula), dimension_scores (per-engine
+    #       score and level). Validation/confidence traces already live in
+    #       validation_score_detail and analysis_confidence_detail.
+    computation_trace: dict = {}

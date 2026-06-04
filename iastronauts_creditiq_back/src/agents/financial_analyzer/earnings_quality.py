@@ -5,6 +5,7 @@ Distinguishes real operational profitability from valuation-driven income.
 Pure deterministic analysis — no LLM.
 """
 
+import unicodedata
 from dataclasses import dataclass, field
 
 from .ratio_engine import AccountVariation, FinancialTotals
@@ -25,8 +26,17 @@ _NON_RECURRING_KW = (
 )
 
 
+def _norm(s: str) -> str:
+    """Lowercase + strip accents so keyword lists (accent-free) match accented account
+    names. Without this, 'Valoración de inversiones' never matched 'valoracion', so a
+    fund with 72% fair-value income was scored as 0% fair-value dependency (100/HIGH)."""
+    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode()
+    return s.lower()
+
+
 def _hit(name: str, kw: tuple) -> bool:
-    return any(k in name for k in kw)
+    n = _norm(name)
+    return any(k in n for k in kw)
 
 
 @dataclass

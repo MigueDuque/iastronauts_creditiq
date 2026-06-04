@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
+import { apiFetch } from '../lib/apiClient'
 
 const API = import.meta.env.VITE_API_URL || ''
 
@@ -53,10 +54,9 @@ export default function JobResultPage() {
   // poll status
   useEffect(() => {
     if (!jobId) return
-    const headers = { 'x-tenant-id': 'demo' }
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`${API}/analyses/${jobId}`, { headers })
+        const res = await apiFetch(`${API}/analyses/${jobId}`)
         if (!res.ok) {
           console.error(`[poll] status ${res.status}:`, await res.text())
           return
@@ -66,7 +66,7 @@ export default function JobResultPage() {
         if (data.status === 'completed' || data.status === 'failed') {
           clearInterval(interval)
           if (data.status === 'completed') {
-            const rep = await fetch(`${API}/analyses/${jobId}/report`, { headers })
+            const rep = await apiFetch(`${API}/analyses/${jobId}/report`)
             if (rep.ok) setReport(await rep.json())
             else console.error(`[report] status ${rep.status}:`, await rep.text())
           }

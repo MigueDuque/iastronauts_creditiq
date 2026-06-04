@@ -56,6 +56,7 @@ from .materiality_engine import (
     classify as classify_materiality,
     infer_niif_references,
     calculate_impact_score,
+    build_account_trace,
 )
 from .trend_engine import Trend, detect_trend, detect_trend_full, TrendAnalysis
 from .anomaly_detector import (
@@ -67,6 +68,7 @@ from .variation_reliability import ReliabilityResult, VariationReliability, asse
 from .causality_engine import CausalChain, detect_causality_chains
 from .earnings_quality import EarningsQualityResult, analyze_earnings_quality
 from .concentration_engine import ConcentrationResult, analyze_concentration
+from .hierarchy_engine import classify_accounts, leaf_account_ids
 from .llm_reasoning import (
     LLMAnalysisResult,
     AccountLLMInsight,
@@ -95,7 +97,9 @@ BUCKET = os.environ.get("MAIN_BUCKET", "")
 _VALID_HEALTH: set[str] = {h.value for h in FinancialHealth}
 _VALID_RISK: set[str] = {r.value for r in RiskLevel}
 
-_NIIF_REFERENCE_KEY = "instructions/niff_18_explicacion.md"
+# NIIF 18 reference doc — relocated into the unified niif_notes/ folder (§3.2).
+# The legacy double-f "niff_18_explicacion.md" key is retired.
+_NIIF_REFERENCE_KEY = "instructions/niif_notes/niif_18.md"
 
 
 class FinancialAnalyzerService:
@@ -123,6 +127,11 @@ class FinancialAnalyzerService:
         variations: list[AccountVariation] = [
             calculate_account_variation(acc) for acc in enriched_accounts
         ]
+
+        # ── Account hierarchy: tag each row's role so no consumer mixes a
+        # summary line with its own breakdown on a detail sheet (double-count guard).
+        hierarchy = classify_accounts(variations)
+        leaf_ids = leaf_account_ids(hierarchy)
 
         # ── Step 3: Variation reliability [Improvement #1] ──────────────────
         reliabilities: dict[str, ReliabilityResult] = {
@@ -255,7 +264,7 @@ class FinancialAnalyzerService:
         )
 
         # ── Step 12: Portfolio concentration [Improvement #4] ────────────────
-        concentration: ConcentrationResult = analyze_concentration(variations, totals)
+        concentration: ConcentrationResult = analyze_concentration(variations, totals, leaf_ids=leaf_ids)
         conc_dict = {
             "top_account_name": concentration.top_account_name,
             "top_account_pct": concentration.top_account_pct,
@@ -279,6 +288,7 @@ class FinancialAnalyzerService:
             accounts=enriched_accounts,
             variations=variations,
             totals=totals,
+            leaf_ids=leaf_ids,
         )
         fund_dict = fund_analysis_to_dict(fund_analysis)
         # Carry Agent 1's extracted fund metadata into the fund dict so it flows to the LLM
@@ -353,6 +363,7 @@ class FinancialAnalyzerService:
         niif18_subtotals: NIIF18Subtotals = calculate_niif18_subtotals(
             enriched_accounts,
             depreciation_amortization=totals.depreciation_amortization,
+            leaf_ids=leaf_ids,
         )
         tci_dict: dict = calculate_total_comprehensive_income(
             resultado_neto=niif18_subtotals.resultado_neto,
@@ -488,6 +499,9 @@ class FinancialAnalyzerService:
             anomalies=anomalies,
             causal_chains=causal_chains,
             llm_result=llm_result,
+            totals=totals,
+            threshold=threshold,
+            hierarchy=hierarchy,
         )
 
         # Sort by impact_score descending [Improvement #5]
@@ -512,6 +526,44 @@ class FinancialAnalyzerService:
                 overall_health = det_hint
 
         # ── Step 17: Build output + save to S3 ───────────────────────────────
+        global_computation_trace = {
+            "materiality_threshold": {
+                "formula": "max(max(total_assets, total_revenue) * 0.01, 1.0)",
+                "inputs": {
+                    "total_assets": totals.total_assets,
+                    "total_revenue": totals.total_revenue,
+                },
+                "result": threshold,
+            },
+            "account_counts": {
+                "total": len(variations),
+                "non_total_rows": sum(1 for v in variations if not v.is_total),
+                "with_baseline": sum(1 for v in variations if v.has_previous_value),
+                "high_materiality": len(high_materiality_accounts),
+            },
+            "totals_aggregation": {
+                "note": (
+                    "Totals computed by summing current_value per category, "
+                    "skipping rows where is_total=True to avoid double-counting. "
+                    "Ratio formulas are in financial_ratios._computation_trace.ratios."
+                ),
+                "total_assets": totals.total_assets,
+                "total_liabilities": totals.total_liabilities,
+                "total_equity": totals.total_equity,
+                "total_revenue": totals.total_revenue,
+                "total_expense": totals.total_expense,
+                "current_assets": totals.current_assets,
+                "non_current_assets": totals.non_current_assets,
+                "current_liabilities": totals.current_liabilities,
+                "non_current_liabilities": totals.non_current_liabilities,
+                "inventories": totals.inventories,
+                "receivables": totals.receivables,
+                "payables": totals.payables,
+                "cost_of_sales": totals.cost_of_sales,
+                "depreciation_amortization": totals.depreciation_amortization,
+            },
+        }
+
         result = AnalyzerOutput(
             job_id=payload.job_id,
             tenant_id=payload.tenant_id,
@@ -547,6 +599,7 @@ class FinancialAnalyzerService:
             earnings_sustainability=llm_result.earnings_sustainability,
             financial_diagnostics=diagnostics_dict,
             sheet_concentration=sheet_conc_dict,
+            computation_trace=global_computation_trace,
         )
 
         self._save_to_s3(result)
@@ -620,6 +673,9 @@ class FinancialAnalyzerService:
         anomalies: dict[str, AnomalyResult],
         causal_chains: list[CausalChain],
         llm_result: LLMAnalysisResult,
+        totals: FinancialTotals | None = None,
+        threshold: float = 0.0,
+        hierarchy: dict | None = None,
     ) -> list[AccountAnalysis]:
         """
         Merge deterministic math outputs with LLM qualitative insights.
@@ -686,6 +742,29 @@ class FinancialAnalyzerService:
                     f"Tendencia {trend.value}: {trend_analysis.trend_label}."
                 ]
 
+            # HIGH materiality must carry at least two grounded causes. RevisorInteligente
+            # check 4.5 (and the Agent-3 anti-hallucination "causas_vs_datos" check) expect
+            # ≥2 specific causes; the deterministic fallbacks above only ever produce one.
+            # Append a second cause anchored to the account's own verifiable figures so it is
+            # concrete (cites the absolute movement and the materiality threshold it crosses),
+            # not template boilerplate.
+            if mat == MaterialityLevel.HIGH and len(possible_causes) < 2:
+                if v.has_previous_value:
+                    direction = "aumento" if v.absolute_variation >= 0 else "reducción"
+                    magnitude_cause = (
+                        f"Movimiento absoluto de {v.absolute_variation:+,.1f} COP MM "
+                        f"({direction} de {v.previous_value:,.1f} a {v.current_value:,.1f} COP MM), "
+                        f"que supera el umbral de materialidad de {threshold:,.1f} COP MM."
+                    )
+                else:
+                    magnitude_cause = (
+                        f"Posición nueva sin período comparable: valor actual de "
+                        f"{v.current_value:,.1f} COP MM, que supera el umbral de "
+                        f"materialidad de {threshold:,.1f} COP MM."
+                    )
+                if magnitude_cause not in possible_causes:
+                    possible_causes = possible_causes + [magnitude_cause]
+
             # Executive insight
             if insight and insight.executive_insight:
                 executive_insight = insight.executive_insight
@@ -699,6 +778,17 @@ class FinancialAnalyzerService:
                 executive_insight = (
                     f"Cuenta {v.account_name}: {trend_analysis.trend_label}. "
                     f"Materialidad: {mat.value}. Impact score: {impact:.0f}/100."
+                )
+
+            # Anti-hallucination (Agent 3, check "insight_cifras_verificables"): a HIGH
+            # materiality insight must cite at least one verifiable figure. LLM narratives are
+            # sometimes purely qualitative (e.g. cash-flow story with no numbers); anchor those
+            # with the account's own current value and absolute movement so they stay traceable.
+            if mat == MaterialityLevel.HIGH and not any(ch.isdigit() for ch in executive_insight):
+                executive_insight = (
+                    f"{executive_insight.rstrip('.')}. "
+                    f"Cifras: valor actual {v.current_value:,.1f} COP MM, "
+                    f"movimiento {v.absolute_variation:+,.1f} COP MM."
                 )
 
             # Confidence [Improvement #8]
@@ -716,16 +806,36 @@ class FinancialAnalyzerService:
             # Causality chain participation
             chain_narratives = chain_map.get(v.account_id, [])
 
-            # BUG FIX: never propagate a suppressed variation_pct downstream.
+            # Computation trace — deterministic audit trail of every formula
+            acct_trace = (
+                build_account_trace(
+                    variation=v,
+                    threshold=threshold,
+                    totals=totals,
+                    materiality=mat,
+                    impact_score=impact,
+                    reliability=reliability.reliability,
+                    anomaly_detected=anomaly_detected,
+                )
+                if totals is not None and threshold
+                else None
+            )
+
+            # Never propagate a suppressed variation_pct downstream as a number.
             # Consumers (RevisorInteligente, ReportGenerator, frontend) would treat
-            # it as a real number. Zeroed here; reliability_label carries the explanation.
-            safe_variation_pct = 0.0 if reliability.suppress_pct else v.variation_pct
+            # it as a real signal. Set to None — meaning "no meaningful %" — so it is
+            # distinguishable from a literal 0.0 change. reliability_label carries the
+            # explanation and the true value (if any) stays in computation_trace.
+            safe_variation_pct = None if reliability.suppress_pct else v.variation_pct
+
+            h = (hierarchy or {}).get(v.account_id)
 
             results.append(AccountAnalysis(
                 account_id=v.account_id,
                 account_name=v.account_name,
                 current_value=v.current_value,
                 previous_value=v.previous_value,
+                has_previous_value=v.has_previous_value,
                 absolute_variation=v.absolute_variation,
                 variation_pct=safe_variation_pct,
                 materiality=mat,
@@ -747,6 +857,10 @@ class FinancialAnalyzerService:
                 is_related_party=insight.is_related_party if insight else False,
                 related_party_counterpart=insight.related_party_counterpart if insight else None,
                 investment_signal=insight.investment_signal if insight else None,
+                computation_trace=acct_trace,
+                statement_role=h.statement_role if h else "primary_line",
+                parent_account_id=h.parent_account_id if h else None,
+                is_leaf=h.is_leaf if h else True,
             ))
 
         return results

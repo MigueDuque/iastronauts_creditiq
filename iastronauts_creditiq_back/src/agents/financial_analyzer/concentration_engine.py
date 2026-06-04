@@ -69,19 +69,33 @@ class ConcentrationResult:
 def analyze_concentration(
     variations: list[AccountVariation],
     totals: FinancialTotals,
+    leaf_ids: set[str] | None = None,
 ) -> ConcentrationResult:
     """
     Analyse account and category concentration relative to total financial base.
     Uses total_assets as denominator; falls back to total_revenue for P&L-only statements.
+
+    `leaf_ids` (from hierarchy_engine) restricts the universe to leaf positions, so a
+    portfolio *summary line* never competes with its own per-instrument breakdown — the
+    double-count that previously inflated HHI / top-N. When omitted (e.g. PDF/CSV with no
+    sheet structure) behaviour is unchanged.
     """
     base = totals.total_assets if totals.total_assets > 0 else totals.total_revenue
     base = max(base, 0.001)
 
+    # Drop non-leaf rows (summary lines that are broken down elsewhere) up front so a
+    # parent and its children are never both ranked.
+    universe = variations
+    if leaf_ids is not None:
+        leaves = [v for v in variations if v.account_id in leaf_ids]
+        if leaves:
+            universe = leaves
+
     # Filter to real portfolio positions only before computing concentration
-    portfolio_vars = [v for v in variations if _is_portfolio_position(v)]
+    portfolio_vars = [v for v in universe if _is_portfolio_position(v)]
     # Fall back to all accounts if filtering leaves nothing (non-fund statements)
     if not portfolio_vars:
-        portfolio_vars = variations
+        portfolio_vars = universe
 
     # Sort by absolute current value descending
     sorted_vars = sorted(portfolio_vars, key=lambda v: abs(v.current_value), reverse=True)

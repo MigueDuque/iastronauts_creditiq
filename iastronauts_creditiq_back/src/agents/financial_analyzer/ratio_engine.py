@@ -7,13 +7,69 @@ All monetary values are in COP MM (millions of Colombian pesos).
 """
 
 import logging
-from dataclasses import dataclass
+import unicodedata
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import List
 
 from shared.models import ExtractedAccount
 
 logger = logging.getLogger("financial_analyzer.ratio_engine")
+
+
+def _norm_name(s: str) -> str:
+    """Lowercase, strip accents and collapse whitespace for robust name matching."""
+    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode()
+    return " ".join(s.lower().split())
+
+
+# Canonical *grand-total* row names (accent-free, exact match) that financial
+# statements report directly. Multi-sheet workbooks re-expand a single statement line
+# (e.g. "Activos financieros a valor razonable") into its own detail sheet, so blind
+# cross-sheet summation double-counts. When the statement reports the total we trust
+# it and rescale the summed sub-components to preserve their composition.
+# (§ cross-sheet double-count fix, 2026-06-02)
+_REPORTED_TOTAL_NAMES: dict[str, set[str]] = {
+    "assets": {
+        "total activos", "total de activos", "total del activo",
+        "activos totales", "total activo",
+    },
+    "liabilities": {
+        "total pasivos", "total de pasivos", "total del pasivo",
+        "pasivos totales", "total pasivo",
+    },
+    "equity": {
+        "total patrimonio", "patrimonio total", "total del patrimonio",
+        "total patrimonio neto", "total activos netos",
+        "total activos netos de los inversionistas",
+    },
+    "revenue": {
+        "ingresos operacionales", "total ingresos", "ingresos totales",
+        "total de ingresos", "total ingresos operacionales",
+    },
+    "net_income": {
+        "utilidad del periodo", "perdida del periodo", "ganancia del periodo",
+        "resultado del periodo", "resultado integral del periodo",
+        "resultado integral total del periodo",
+    },
+}
+
+# P&L running-total / subtotal lines that some statements report *inside* the
+# revenue/expense columns (e.g. "Utilidad operacional", "Utilidad del período").
+# They are cumulative results, NOT line items, so summing them with their own
+# components double-counts. Excluded from calculate_niif18_subtotals (accent-free).
+_PL_SUBTOTAL_NAMES: set[str] = {
+    "utilidad operacional", "utilidad de operacion", "perdida operacional",
+    "resultado operativo", "resultado de operacion", "resultado operacional",
+    "utilidad del periodo", "perdida del periodo", "ganancia del periodo",
+    "resultado del periodo", "resultado neto del periodo",
+    "utilidad neta", "perdida neta", "resultado neto",
+    "utilidad antes de impuestos", "perdida antes de impuestos",
+    "resultado antes de impuestos", "utilidad antes de impuesto",
+    "resultado integral", "resultado integral del periodo",
+    "total ingresos", "total ingresos operacionales", "ingresos operacionales",
+    "total gastos", "total gastos operacionales", "total gastos administrativos",
+}
 
 # ── Keyword lists for account classification ──────────────────────────────────
 
@@ -83,6 +139,9 @@ class FinancialTotals:
     depreciation_amortization: float = 0.0
     receivables: float = 0.0
     payables: float = 0.0
+    # Audit trail of which axes were overridden by a statement-reported grand total
+    # (vs. summed from detail rows) and by how much — consumed by RevisorInteligente.
+    reconciliation: dict = field(default_factory=dict)
 
     @property
     def net_income(self) -> float:
@@ -128,11 +187,18 @@ def calculate_account_variation(account: ExtractedAccount) -> AccountVariation:
         abs_var = curr_val - prev_val
         pct_var = (abs_var / prev_val) * 100.0
     elif has_prev:
-        # Previous value exists but is zero — new-period account
+        # Previous value exists but is exactly zero — the position appeared this
+        # period. The absolute movement is the full current value; the % is undefined.
         abs_var = curr_val
         pct_var = 0.0
     else:
-        abs_var = 0.0
+        # No baseline period at all. A brand-new position is a +current_value
+        # movement, NOT zero. The % is undefined (no denominator); reliability
+        # downstream suppresses it. pct_var stays 0.0 here only because the
+        # AccountVariation dataclass field is non-Optional — engines that read it
+        # (anomaly/trend) early-return before reaching it for no-baseline accounts,
+        # and the output-layer variation_pct is set to None when suppressed.
+        abs_var = curr_val
         pct_var = 0.0
 
     return AccountVariation(
@@ -209,11 +275,77 @@ def calculate_financial_totals(accounts: List[ExtractedAccount]) -> FinancialTot
             t.total_revenue += val
 
         elif cat == "expense":
-            t.total_expense += val
+            # Expense lines arrive with inconsistent sign (often negative on the source
+            # statement, e.g. "Gastos operacionales" = -25.26). net_income is defined as
+            # `total_revenue - total_expense`, so total_expense must be a POSITIVE cost
+            # magnitude or the bottom line gets the cost *added back* (the 56.6 → 226.4
+            # inflation that produced an impossible 133% net margin). Normalise to abs.
+            cost = abs(val)
+            t.total_expense += cost
             if _matches(name, _DEPRECIATION_KEYWORDS):
-                t.depreciation_amortization += val
+                t.depreciation_amortization += cost
             if _matches(name, _COGS_KEYWORDS):
-                t.cost_of_sales += val
+                t.cost_of_sales += cost
+
+    # ── Trust statement-reported grand totals over cross-sheet summation ─────────
+    # Detect the explicitly-reported grand-total rows (exact, accent-free name match;
+    # largest magnitude wins so a grand total beats a same-named subtotal). When found,
+    # override the summed figure and rescale its sub-components proportionally so the
+    # composition is preserved but the absolute scale is correct. This removes the
+    # double-count that multi-sheet workbooks introduce by expanding one balance-sheet
+    # line into a dedicated detail sheet.
+    reported: dict[str, float] = {}
+    for acc in accounts:
+        nm = _norm_name(acc.normalized_account_name)
+        for axis, names in _REPORTED_TOTAL_NAMES.items():
+            if nm in names:
+                v = float(acc.current_value)
+                if axis not in reported or abs(v) > abs(reported[axis]):
+                    reported[axis] = v
+
+    summed_net_income = t.net_income  # capture before any override mutates the fields
+
+    def _record(axis: str, summed: float, reported_val: float) -> None:
+        t.reconciliation[axis] = {
+            "summed": round(summed, 3),
+            "reported": round(reported_val, 3),
+            "overridden": True,
+        }
+
+    if "assets" in reported and t.total_assets > 0:
+        summed = t.total_assets
+        factor = reported["assets"] / summed
+        t.total_assets = reported["assets"]
+        for fld in ("current_assets", "non_current_assets", "receivables", "inventories"):
+            setattr(t, fld, getattr(t, fld) * factor)
+        _record("total_assets", summed, reported["assets"])
+
+    if "liabilities" in reported and t.total_liabilities > 0:
+        summed = t.total_liabilities
+        factor = reported["liabilities"] / summed
+        t.total_liabilities = reported["liabilities"]
+        for fld in ("current_liabilities", "non_current_liabilities", "payables"):
+            setattr(t, fld, getattr(t, fld) * factor)
+        _record("total_liabilities", summed, reported["liabilities"])
+
+    if "equity" in reported:
+        _record("total_equity", t.total_equity, reported["equity"])
+        t.total_equity = reported["equity"]
+
+    if "revenue" in reported and t.total_revenue > 0:
+        summed = t.total_revenue
+        factor = reported["revenue"] / summed
+        t.total_revenue = reported["revenue"]
+        t.cost_of_sales = t.cost_of_sales * factor
+        _record("total_revenue", summed, reported["revenue"])
+        # net_income is a property (revenue − expense). When the bottom line is also
+        # reported, back out the expense so the reported net result is preserved exactly;
+        # otherwise rescale expense by the same factor to stay consistent with revenue.
+        if "net_income" in reported:
+            t.total_expense = round(t.total_revenue - reported["net_income"], 3)
+            _record("net_income", summed_net_income, reported["net_income"])
+        else:
+            t.total_expense = t.total_expense * factor
 
     # Round all plain float fields
     for fname in (
@@ -273,7 +405,14 @@ def calculate_ratios(totals: FinancialTotals) -> FinancialRatios:
 # ── Serialization ─────────────────────────────────────────────────────────────
 
 def ratios_to_dict(totals: FinancialTotals, ratios: FinancialRatios) -> dict:
-    """Serialize totals + ratios for the LLM prompt and AnalyzerOutput.financial_ratios."""
+    """Serialize totals + ratios for the LLM prompt and AnalyzerOutput.financial_ratios.
+
+    The _computation_trace key documents every formula, its exact numeric inputs,
+    and the result actually stored so any value can be audited or re-derived
+    without re-running the pipeline.
+    """
+    gross_profit = totals.total_revenue - totals.cost_of_sales
+
     return {
         "totals": {
             "total_assets": totals.total_assets,
@@ -302,6 +441,154 @@ def ratios_to_dict(totals: FinancialTotals, ratios: FinancialRatios) -> dict:
             "roa_pct": ratios.roa,
             "dias_cartera": ratios.dias_cartera,
             "dias_proveedores": ratios.dias_proveedores,
+        },
+        "_computation_trace": {
+            "derived": {
+                "net_income": {
+                    "formula": "total_revenue - total_expense",
+                    "inputs": {
+                        "total_revenue": totals.total_revenue,
+                        "total_expense": totals.total_expense,
+                    },
+                    "result": totals.net_income,
+                },
+                "gross_profit": {
+                    "formula": "total_revenue - cost_of_sales",
+                    "inputs": {
+                        "total_revenue": totals.total_revenue,
+                        "cost_of_sales": totals.cost_of_sales,
+                    },
+                    "result": round(gross_profit, 3),
+                },
+                "ebitda": {
+                    "formula": "net_income + depreciation_amortization",
+                    "inputs": {
+                        "net_income": totals.net_income,
+                        "depreciation_amortization": totals.depreciation_amortization,
+                    },
+                    "result": totals.ebitda,
+                },
+            },
+            "ratios": {
+                "razon_corriente": {
+                    "formula": "current_assets / current_liabilities",
+                    "inputs": {
+                        "current_assets": totals.current_assets,
+                        "current_liabilities": totals.current_liabilities,
+                    },
+                    "result": ratios.razon_corriente,
+                    "computed": totals.current_liabilities > 0,
+                },
+                "prueba_acida": {
+                    "formula": "(current_assets - inventories) / current_liabilities",
+                    "inputs": {
+                        "current_assets": totals.current_assets,
+                        "inventories": totals.inventories,
+                        "current_liabilities": totals.current_liabilities,
+                    },
+                    "result": ratios.prueba_acida,
+                    "computed": totals.current_liabilities > 0,
+                },
+                "capital_trabajo": {
+                    "formula": "current_assets - current_liabilities",
+                    "inputs": {
+                        "current_assets": totals.current_assets,
+                        "current_liabilities": totals.current_liabilities,
+                    },
+                    "result": ratios.capital_trabajo,
+                },
+                "endeudamiento_global": {
+                    "formula": "total_liabilities / total_assets",
+                    "inputs": {
+                        "total_liabilities": totals.total_liabilities,
+                        "total_assets": totals.total_assets,
+                    },
+                    "result": ratios.endeudamiento_global,
+                    "computed": totals.total_assets > 0,
+                },
+                "deuda_patrimonio": {
+                    "formula": "total_liabilities / total_equity",
+                    "inputs": {
+                        "total_liabilities": totals.total_liabilities,
+                        "total_equity": totals.total_equity,
+                    },
+                    "result": ratios.deuda_patrimonio,
+                    "computed": totals.total_equity > 0,
+                },
+                "equity_ratio": {
+                    "formula": "total_equity / total_assets",
+                    "inputs": {
+                        "total_equity": totals.total_equity,
+                        "total_assets": totals.total_assets,
+                    },
+                    "result": ratios.equity_ratio,
+                    "computed": totals.total_assets > 0,
+                },
+                "roe_pct": {
+                    "formula": "(net_income / total_equity) * 100",
+                    "inputs": {
+                        "net_income": totals.net_income,
+                        "total_equity": totals.total_equity,
+                    },
+                    "result": ratios.roe,
+                    "computed": totals.total_equity > 0 and totals.net_income != 0,
+                },
+                "roa_pct": {
+                    "formula": "(net_income / total_assets) * 100",
+                    "inputs": {
+                        "net_income": totals.net_income,
+                        "total_assets": totals.total_assets,
+                    },
+                    "result": ratios.roa,
+                    "computed": totals.total_assets > 0 and totals.net_income != 0,
+                },
+                "margen_bruto_pct": {
+                    "formula": "((total_revenue - cost_of_sales) / total_revenue) * 100",
+                    "inputs": {
+                        "total_revenue": totals.total_revenue,
+                        "cost_of_sales": totals.cost_of_sales,
+                        "gross_profit": round(gross_profit, 3),
+                    },
+                    "result": ratios.margen_bruto_pct,
+                    "computed": totals.total_revenue > 0,
+                },
+                "margen_neto_pct": {
+                    "formula": "(net_income / total_revenue) * 100",
+                    "inputs": {
+                        "net_income": totals.net_income,
+                        "total_revenue": totals.total_revenue,
+                    },
+                    "result": ratios.margen_neto_pct,
+                    "computed": totals.total_revenue > 0,
+                },
+                "margen_ebitda_pct": {
+                    "formula": "(ebitda / total_revenue) * 100",
+                    "inputs": {
+                        "ebitda": totals.ebitda,
+                        "total_revenue": totals.total_revenue,
+                    },
+                    "result": ratios.margen_ebitda_pct,
+                    "computed": totals.total_revenue > 0,
+                },
+                "dias_cartera": {
+                    "formula": "(receivables / total_revenue) * 365",
+                    "inputs": {
+                        "receivables": totals.receivables,
+                        "total_revenue": totals.total_revenue,
+                    },
+                    "result": ratios.dias_cartera,
+                    "computed": totals.total_revenue > 0 and totals.receivables > 0,
+                },
+                "dias_proveedores": {
+                    "formula": "(payables / cost_of_sales) * 365",
+                    "inputs": {
+                        "payables": totals.payables,
+                        "cost_of_sales": totals.cost_of_sales,
+                    },
+                    "result": ratios.dias_proveedores,
+                    "computed": totals.cost_of_sales > 0 and totals.payables > 0,
+                },
+            },
         },
     }
 
@@ -407,12 +694,21 @@ def classify_pl_category(account_name: str, category: str) -> PLCategory:
 def calculate_niif18_subtotals(
     accounts: List[ExtractedAccount],
     depreciation_amortization: float = 0.0,
+    leaf_ids: set[str] | None = None,
 ) -> NIIF18Subtotals:
     """
     Compute NIIF 18 mandatory P&L subtotals from the accounts list.
 
-    Only P&L accounts (revenue, expense, other) are processed.
-    Revenue values are positive contributions; expense values reduce the result.
+    Only P&L *line items* are processed (revenue/expense, leaf rows, non-subtotals):
+      - "other" rows are statement-of-changes / cash-flow lines (opening NAV, contributions,
+        redemptions), NOT P&L — including them inflated resultado_operativo to a 1067% margin.
+      - is_total rows and running-total subtotals ("Utilidad operacional", "Utilidad del
+        período") are excluded so they are not summed with their own components.
+      - `leaf_ids` (from hierarchy_engine) drops a statement line whose breakdown lives on a
+        detail sheet, so the line and its per-item rows are not both counted.
+
+    Revenue values are signed (a valuation loss reduces the result); expense magnitudes
+    always reduce the result regardless of source sign convention.
     EBITDA uses resultado_operativo as base per NIIF 18 MPM rules.
     """
     s = NIIF18Subtotals()
@@ -420,12 +716,18 @@ def calculate_niif18_subtotals(
 
     for acc in accounts:
         cat = acc.category.lower()
-        if cat not in ("revenue", "expense", "other"):
+        if cat not in ("revenue", "expense"):
+            continue
+        if acc.is_total:
+            continue
+        if leaf_ids is not None and acc.account_id not in leaf_ids:
+            continue
+        if _norm_name(acc.normalized_account_name) in _PL_SUBTOTAL_NAMES:
             continue
         pl_cat = classify_pl_category(acc.normalized_account_name, cat)
         val = float(acc.current_value)
         if cat == "expense":
-            cat_net[pl_cat] -= val
+            cat_net[pl_cat] -= abs(val)
         else:
             cat_net[pl_cat] += val
 

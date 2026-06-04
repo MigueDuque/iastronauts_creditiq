@@ -11,6 +11,8 @@ import LinearProgress from '@mui/material/LinearProgress'
 import IconButton from '@mui/material/IconButton'
 import Box from '@mui/material/Box'
 
+import { apiFetch } from '../lib/apiClient'
+
 const UPLOAD_API = import.meta.env.VITE_UPLOAD_API_URL || ''
 const API_URL    = import.meta.env.VITE_API_URL || ''
 
@@ -145,9 +147,9 @@ export default function UploadDialog({ open, onClose }: UploadDialogProps) {
 
   async function uploadFile(state: FileUploadState, folder: string): Promise<Partial<FileUploadState>> {
     try {
-      const res = await fetch(`${UPLOAD_API}/upload-url`, {
+      const res = await apiFetch(`${UPLOAD_API}/upload-url`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-tenant-id': 'demo' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           file_name: state.file.name,
           file_type: fileType(state.file.name),
@@ -213,7 +215,6 @@ export default function UploadDialog({ open, onClose }: UploadDialogProps) {
       const period  = `${selectedYear}-${selectedQuarter}`
 
       const body: Record<string, unknown> = {
-        tenant_id: 'demo',
         business_context: {
           company_name:      company,
           reporting_period:  period,
@@ -227,9 +228,9 @@ export default function UploadDialog({ open, onClose }: UploadDialogProps) {
       }
       if (forceRerun) body.force_rerun = true
 
-      const res = await fetch(`${API_URL}/analyses`, {
+      const res = await apiFetch(`${API_URL}/analyses`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-tenant-id': 'demo' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
 

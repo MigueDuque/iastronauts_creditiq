@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { apiFetch } from '../lib/apiClient'
 
 const API = import.meta.env.VITE_API_URL || ''
 
@@ -210,30 +211,57 @@ function Skeleton({ width = '100%', height = 20, radius = 6 }: { width?: string 
 export default function MarketsPage() {
   const [data, setData] = useState<MarketData | null>(null)
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [lastUpdated, setLastUpdated] = useState<string>('')
 
-  const load = useCallback(async (force = false) => {
+  // Read the cached snapshot from S3 (fast, no external API calls). Returns the
+  // payload so the polling loop can detect when a refresh has landed.
+  const load = useCallback(async (): Promise<MarketData | null> => {
     try {
-      const url = API ? `${API}/market/data${force ? '?force=true' : ''}` : null
-      if (!url) { setLoading(false); return }
-      const res = await fetch(url)
+      if (!API) { setLoading(false); return null }
+      const res = await apiFetch(`${API}/market/data`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const json: MarketData = await res.json()
       setData(json)
       setLastUpdated(json.as_of)
       setError(null)
+      return json
     } catch (e) {
       setError((e as Error).message)
+      return null
     } finally {
       setLoading(false)
     }
   }, [])
 
+  // Manual refresh: POST kicks off a background live fetch (202), then we poll
+  // the cache until `as_of` advances. No automatic interval — data only updates
+  // when the user asks for it, to keep external API usage low.
+  const refresh = useCallback(async () => {
+    if (!API || refreshing) return
+    setRefreshing(true)
+    setError(null)
+    const before = lastUpdated
+    try {
+      const res = await apiFetch(`${API}/market/data`, { method: 'POST' })
+      if (!res.ok && res.status !== 202) throw new Error(`HTTP ${res.status}`)
+      const deadline = Date.now() + 150_000 // give the live fetch up to ~2.5 min
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 4000))
+        const json = await load()
+        if (json?.as_of && json.as_of !== before) return
+      }
+      setError('Refresh is taking longer than expected — try again in a moment.')
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setRefreshing(false)
+    }
+  }, [refreshing, lastUpdated, load])
+
   useEffect(() => {
     load()
-    const t = setInterval(() => load(), 300_000)
-    return () => clearInterval(t)
   }, [load])
 
   const cardStyle: React.CSSProperties = {
@@ -263,17 +291,17 @@ export default function MarketsPage() {
             </p>
           )}
           <button
-            onClick={() => { setLoading(true); load(true) }}
-            disabled={loading}
+            onClick={refresh}
+            disabled={refreshing || loading}
             style={{
               padding: '7px 14px', borderRadius: 8, fontSize: 12, fontWeight: 600,
               border: '1px solid rgba(59,130,246,0.2)',
               background: 'rgba(59,130,246,0.06)', color: '#94a3b8',
-              cursor: loading ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
+              cursor: (refreshing || loading) ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
               transition: 'all 0.15s',
             }}
           >
-            {loading ? 'Loading...' : 'Refresh'}
+            {refreshing ? 'Updating…' : loading ? 'Loading...' : 'Refresh'}
           </button>
         </div>
       </div>
@@ -351,7 +379,7 @@ export default function MarketsPage() {
 
       {/* Footer */}
       <p style={{ marginTop: 24, textAlign: 'center', fontSize: 11, color: '#334155' }}>
-        Data from Yahoo Finance · refreshes every 5 minutes · Colombian stocks prices in COP
+        Data from Yahoo Finance · press Refresh to update · Colombian stocks prices in COP
       </p>
     </div>
   )

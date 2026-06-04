@@ -16,6 +16,7 @@ All logic is purely deterministic. No LLM calls.
 """
 
 import logging
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -56,14 +57,20 @@ _FUND_SIGNALS = (
     "total activo neto", "fondo de inversión",
 )
 
+# All NAV-matching keyword lists are accent-free; account names are accent-stripped
+# via _norm() before matching (see _compute_nav_reconciliation). Contributions and
+# redemptions use word *roots* ("aporte"/"aportes", "retiro"/"retiros") because the
+# source statement uses singular/plural and "de" variants ("Aporte de inversionistas")
+# that exact phrases missed — which is why contributions were silently read from the
+# balance-sheet "Derechos o suscripciones" line and redemptions came back null.
 _OPENING_NAV_KW   = ("activos netos iniciales", "patrimonio inicial", "saldo inicial nav")
 _CLOSING_NAV_KW   = ("total patrimonio", "total activo neto", "total activos netos",
                       "activo neto de inversionistas")
-_CONTRIBUTIONS_KW = ("aportes de inversionistas", "aporte inversionistas", "suscripciones")
-_REDEMPTIONS_KW  = ("retiros de inversionistas", "retiro inversionistas", "redenciones")
-_PERIOD_RETURN_KW = ("ganancia del período", "utilidad del período", "utilidad neta del período",
-                     "ganancia neta del período", "resultado del período",
-                     "pérdida del período", "resultado neto del período")
+_CONTRIBUTIONS_KW = ("aporte", "suscrip")
+_REDEMPTIONS_KW  = ("retiro", "redencion", "rescate")
+_PERIOD_RETURN_KW = ("ganancia del periodo", "utilidad del periodo", "utilidad neta del periodo",
+                     "ganancia neta del periodo", "resultado del periodo",
+                     "perdida del periodo", "resultado neto del periodo")
 
 # Balance-sheet net-assets line = authoritative point-in-time NAV (= patrimonio).
 # This is the figure the AUM / "Patrimonio" KPI must use, because the balance sheet
@@ -151,8 +158,17 @@ class FundAnalysis:
     # Human-readable summary
     insights: list[str] = field(default_factory=list)
 
+    # AUM growth over the period — (closing_nav − opening_nav) / opening_nav × 100
+    aum_change_pct: float | None = None
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _norm(s: str) -> str:
+    """Lowercase + strip accents for robust keyword matching against accented names."""
+    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode()
+    return " ".join(s.lower().split())
+
 
 def _hit(name: str, keywords: tuple) -> bool:
     return any(k in name for k in keywords)
@@ -172,14 +188,23 @@ def _classify_asset(name: str) -> AssetClass:
     return AssetClass.OTHER
 
 
-def _is_individual_position(acc: ExtractedAccount) -> bool:
+def _is_individual_position(acc: ExtractedAccount, leaf_ids: set[str] | None = None) -> bool:
     """
-    True when the account represents a single named holding (not a subtotal/total/category line).
+    True when the account represents a single named holding (not a subtotal/total/category
+    line, a flow/statement-of-changes line, or a fair-value-hierarchy aggregate).
     Used to populate the portfolio positions list.
     """
     if acc.is_total:
         return False  # structural total/subtotal rows always excluded
-    if acc.category not in ("assets", "other"):
+    # Holdings live in the assets category. Statement-of-changes / cash-flow lines
+    # (opening NAV, contributions, redemptions) arrive as "other" and are NOT positions —
+    # counting them previously ranked the opening NAV (52,694) as the top "position".
+    if acc.category != "assets":
+        return False
+    # Drop summary lines that are broken down on a detail sheet, and alternative views of
+    # the same money (fair-value-hierarchy levels) that reconcile to the same parent. The
+    # hierarchy engine already resolved which rows are the canonical leaves.
+    if leaf_ids is not None and acc.account_id not in leaf_ids:
         return False
     name = acc.normalized_account_name.lower()
     if _hit(name, _POSITION_EXCLUDE_KW):
@@ -258,7 +283,8 @@ def _compute_nav_reconciliation(
     statement_closing_candidates: list[float] = []
 
     for acc in accounts:
-        name = acc.normalized_account_name.lower()
+        name = _norm(acc.normalized_account_name)
+        category = (acc.category or "").lower()
         val = acc.current_value
 
         # 1) Balance-sheet net assets — authoritative NAV. Skip flow/roll-forward rows.
@@ -278,12 +304,18 @@ def _compute_nav_reconciliation(
         if acc.is_total:
             continue  # skip other subtotal/total rows to prevent double-counting
 
-        # 3) Roll-forward components
+        # 3) Roll-forward components. Contributions/redemptions are matched ONLY on
+        #    statement-of-changes flow rows (category "other"); this stops the balance-sheet
+        #    equity stock "Derechos o suscripciones de inversionistas" from being misread as
+        #    a contribution flow (the bug behind the +28,034 inflow that should be a −24,660
+        #    net outflow).
+        if val is None:
+            continue
         if _hit(name, _OPENING_NAV_KW):
             statement_opening = val
-        elif _hit(name, _CONTRIBUTIONS_KW):
+        elif category == "other" and _hit(name, _CONTRIBUTIONS_KW):
             contributions = val
-        elif _hit(name, _REDEMPTIONS_KW):
+        elif category == "other" and _hit(name, _REDEMPTIONS_KW):
             # Stored as signed — redemptions are typically negative in the EEFF
             redemptions = val if val < 0 else -abs(val)
         elif _hit(name, _PERIOD_RETURN_KW):
@@ -506,10 +538,16 @@ def analyze_fund(
     accounts: list[ExtractedAccount],
     variations: list[AccountVariation],
     totals: FinancialTotals,
+    leaf_ids: set[str] | None = None,
 ) -> tuple["FundAnalysis", list[CausalChain]]:
     """
     Detect whether this EEFF belongs to an investment fund and perform fund-specific
     analysis if so.
+
+    `leaf_ids` (from hierarchy_engine) restricts portfolio positions to canonical leaf
+    holdings, so a balance-sheet summary line and its detail sheet — or two alternative
+    breakdowns of the same money (issuer view vs. fair-value-hierarchy view) — are never
+    both counted. When omitted (PDF/CSV with no sheet structure) behaviour is unchanged.
 
     Returns (FundAnalysis, list[CausalChain]) — the chains are additional fund-specific
     chains that service.py should merge with the generic causality chains.
@@ -548,7 +586,7 @@ def analyze_fund(
     prev_map = {v.account_id: v.previous_value for v in variations}
 
     for acc in accounts:
-        if not _is_individual_position(acc):
+        if not _is_individual_position(acc, leaf_ids):
             continue
         name = acc.normalized_account_name.lower()
         asset_class = _classify_asset(name)
@@ -646,6 +684,10 @@ def analyze_fund(
 
     net_flow = nav.net_investor_flow if nav else None
 
+    aum_change_pct: float | None = None
+    if nav and nav.opening_nav and nav.opening_nav != 0 and nav.closing_nav is not None:
+        aum_change_pct = round((nav.closing_nav - nav.opening_nav) / abs(nav.opening_nav) * 100, 2)
+
     analysis = FundAnalysis(
         is_investment_fund=True,
         fund_type=fund_type,
@@ -662,6 +704,7 @@ def analyze_fund(
         top1_position_pct=round(top1_pct, 2),
         top3_concentration_pct=round(top3_pct, 2),
         insights=insights,
+        aum_change_pct=aum_change_pct,
     )
 
     logger.info(
@@ -714,6 +757,7 @@ def fund_analysis_to_dict(analysis: FundAnalysis) -> dict:
         "asset_breakdown_cop_mm": analysis.asset_breakdown_cop_mm,
         "nav_reconciliation": nav_dict,
         "net_investor_flow_cop_mm": analysis.net_investor_flow_cop_mm,
+        "aum_change_pct": analysis.aum_change_pct,
         "portfolio_positions": [pos_to_dict(p) for p in analysis.portfolio_positions],
         "new_positions": [pos_to_dict(p) for p in analysis.new_positions],
         "closed_positions": [pos_to_dict(p) for p in analysis.closed_positions],

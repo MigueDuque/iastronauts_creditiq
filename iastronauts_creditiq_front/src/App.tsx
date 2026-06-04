@@ -1,6 +1,8 @@
 import { lazy, Suspense } from 'react'
 import { createBrowserRouter, RouterProvider } from 'react-router-dom'
 import AppLayout from './components/AppLayout'
+import ProtectedRoute from './components/ProtectedRoute'
+import LoginPage from './pages/LoginPage'
 
 const DashboardPage = lazy(() => import('./pages/DashboardPage'))
 const AnalysisPage  = lazy(() => import('./pages/AnalysisPage'))
@@ -9,8 +11,16 @@ const MarketsPage   = lazy(() => import('./pages/MarketsPage'))
 
 const router = createBrowserRouter([
   {
+    path: '/login',
+    element: <LoginPage />,
+  },
+  {
     path: '/',
-    element: <AppLayout />,
+    element: (
+      <ProtectedRoute>
+        <AppLayout />
+      </ProtectedRoute>
+    ),
     children: [
       { index: true,         element: <Suspense fallback={null}><DashboardPage /></Suspense> },
       { path: 'analysis',    element: <Suspense fallback={null}><AnalysisPage /></Suspense> },

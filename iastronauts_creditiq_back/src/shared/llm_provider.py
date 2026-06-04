@@ -6,6 +6,10 @@ from typing import Dict, Any, Optional
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+# Above this output budget the Anthropic SDK rejects non-streaming requests
+# (potential >10 min runtime), so generate_text switches to streaming.
+_ANTHROPIC_NONSTREAM_MAX_TOKENS = 16384
+
 _TENANT_BOUNDARY_TEMPLATE = (
     "\n\n=== TENANT CONTEXT BOUNDARY ===\n"
     "Tenant: {tenant_id} | Analysis: {job_id}\n"
@@ -197,14 +201,32 @@ class LLMProvider:
             self.report_language, max_tokens,
         )
         if self.provider == "anthropic_api":
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=scoped_system,
-                messages=[{"role": "user", "content": user_prompt}]
-            )
-            return response.content[0].text
+            # The SDK rejects non-streaming requests whose max_tokens could take
+            # >10 min; stream large-output calls (e.g. extraction JSON) to avoid it.
+            if max_tokens > _ANTHROPIC_NONSTREAM_MAX_TOKENS:
+                with self.client.messages.stream(
+                    model=self.model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    system=scoped_system,
+                    messages=[{"role": "user", "content": user_prompt}],
+                ) as stream:
+                    final = stream.get_final_message()
+            else:
+                final = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    system=scoped_system,
+                    messages=[{"role": "user", "content": user_prompt}],
+                )
+            if final.stop_reason == "max_tokens":
+                raise RuntimeError(
+                    f"Respuesta truncada: el modelo alcanzó el límite de "
+                    f"max_tokens={max_tokens} (output incompleto). "
+                    "Aumente max_tokens o reduzca el tamaño de la entrada."
+                )
+            return final.content[0].text
 
         elif self.provider == "bedrock":
             # Usando la nueva API "Converse" de Bedrock (más moderna y estandarizada)
@@ -222,7 +244,54 @@ class LLMProvider:
                     "temperature": temperature
                 }
             )
+            if response.get("stopReason") == "max_tokens":
+                raise RuntimeError(
+                    f"Respuesta truncada: el modelo alcanzó el límite de "
+                    f"max_tokens={max_tokens} (output incompleto). "
+                    "Aumente max_tokens o reduzca el tamaño de la entrada."
+                )
             return response['output']['message']['content'][0]['text']
+
+    def generate_chat(
+        self,
+        system_prompt: str,
+        messages: list,
+        temperature: float = 0.7,
+        tenant_id: Optional[str] = None,
+        job_id: Optional[str] = None,
+        max_tokens: int = 2048,
+    ) -> str:
+        """Multi-turn conversation. `messages` is a list of {"role": "user"/"assistant", "content": "..."} dicts."""
+        scoped_system = self._inject_tenant_boundary(system_prompt, tenant_id, job_id)
+        scoped_system = self._inject_language(scoped_system)
+        logger.info(
+            "llm_chat | provider=%s model=%s tenant=%s job=%s turns=%d",
+            self.provider, self.model, tenant_id or "anon", job_id or "N/A", len(messages),
+        )
+        if self.provider == "anthropic_api":
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=scoped_system,
+                messages=messages,
+            )
+            return response.content[0].text
+
+        elif self.provider == "bedrock":
+            bedrock_messages = [
+                {"role": m["role"], "content": [{"text": m["content"]}]}
+                for m in messages
+            ]
+            response = self.client.converse(
+                modelId=self.model,
+                messages=bedrock_messages,
+                system=[{"text": scoped_system}],
+                inferenceConfig={"maxTokens": max_tokens, "temperature": temperature},
+            )
+            return response["output"]["message"]["content"][0]["text"]
+
+        return ""
 
     def generate_json(
         self,

@@ -1,11 +1,15 @@
-
 import IconButton from '@mui/material/IconButton'
+import Tooltip from '@mui/material/Tooltip'
+import { useAuth } from '../contexts/AuthContext'
+import { cognitoEnabled } from '../lib/auth'
 
 interface HeaderProps {
   onMenuToggle?: () => void
 }
 
 export default function Header({ onMenuToggle }: HeaderProps) {
+  const { email, signOut } = useAuth()
+
   return (
     <header
       style={{
@@ -47,7 +51,7 @@ export default function Header({ onMenuToggle }: HeaderProps) {
           )}
         </div>
 
-        {/* Right: action icons */}
+        {/* Right: action icons + user */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           {['search', 'help', 'language'].map((icon) => (
             <IconButton
@@ -57,6 +61,25 @@ export default function Header({ onMenuToggle }: HeaderProps) {
               <span className="material-symbols-outlined" style={{ fontSize: 20 }}>{icon}</span>
             </IconButton>
           ))}
+
+          {/* User chip */}
+          {cognitoEnabled && email && email !== 'local' && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 8 }}>
+              <span style={{ fontSize: 12, color: '#64748B', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {email}
+              </span>
+              <Tooltip title="Cerrar sesión">
+                <IconButton
+                  onClick={signOut}
+                  size="small"
+                  sx={{ color: '#64748B', '&:hover': { color: '#FCA5A5', bgcolor: '#1a0a0a' } }}
+                >
+                  <span className="material-symbols-outlined" style={{ fontSize: 18 }}>logout</span>
+                </IconButton>
+              </Tooltip>
+            </div>
+          )}
+
           <div
             style={{
               width: 32,

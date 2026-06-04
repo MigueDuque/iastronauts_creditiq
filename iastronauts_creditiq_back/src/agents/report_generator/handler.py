@@ -8,15 +8,17 @@ from datetime import datetime
 
 import boto3
 
-from shared.job_store import EXTRACTOR, REPORT_GENERATOR, save as job_save, save_bytes as job_save_bytes, load as job_load
+from shared.job_store import EXTRACTOR, REPORT_GENERATOR, ANALYSIS_SUMMARY, save as job_save, save_bytes as job_save_bytes, load as job_load
 from shared.llm_provider import LLMProvider
 from shared.models import ScorerOutput, FinalReportOutput, NiifNoteDraft
+from shared.niif_notes import load_niif_note
 from shared.s3_instructions import load_text
 from shared.s3_report_store import (
     fetch_historical_reports,
     load_docx_template,
     slugify,
 )
+from .sheet_mapper import match_sheets
 from .template_filler import (
     build_deterministic_fields,
     build_narrative_fallbacks,
@@ -48,8 +50,17 @@ def _enum(value) -> str:
 
 
 def _material_accounts(payload: ScorerOutput, limit: int = 8) -> list:
+    # Exclude aggregate rows (grand_total / subtotal) so a "top finding" is a real
+    # movement, not the sum of others; the same money would otherwise appear several
+    # times (e.g. Total Activos, Total Activos Financieros and the portfolio line are
+    # all the same ~1,540). Falls back to the full list for legacy outputs without
+    # hierarchy tags. Breakdown_detail rows are kept — they are genuine positions.
+    candidates = [
+        a for a in payload.analysis_results
+        if getattr(a, "statement_role", "primary_line") not in ("grand_total", "subtotal")
+    ] or list(payload.analysis_results)
     return sorted(
-        payload.analysis_results,
+        candidates,
         key=lambda a: (
             0 if _enum(a.materiality) == "HIGH" else 1 if _enum(a.materiality) == "MEDIUM" else 2,
             -getattr(a, "impact_score", 0.0),
@@ -78,14 +89,49 @@ def _build_executive_summary(payload: ScorerOutput) -> str:
 def _build_board_summary(payload: ScorerOutput) -> str:
     totals = (payload.financial_ratios or {}).get("totals", {})
     ratios = (payload.financial_ratios or {}).get("ratios", {})
-    recs = (payload.risk_summary or {}).get("risk_recommendations") or []
-    rec_text = " ".join(recs[:2]) if recs else "Se recomienda mantener monitoreo periodico."
+    risk_summary = payload.risk_summary or {}
+    recs = risk_summary.get("risk_recommendations") or []
+    rec_text = " ".join(recs[:3]) if recs else "Se recomienda mantener monitoreo periodico."
+
+    # The board summary is the *detailed* counterpart to the punchier executive summary —
+    # RevisorInteligente check 6.3 expects it to be richer. Lead with the risk headline, then
+    # headline figures, a per-category risk breakdown, key ratios, and up to three
+    # recommendations, so it is comprehensive rather than a two-line note.
+    headline = (risk_summary.get("risk_headline") or "").strip()
+    headline_text = f"{headline} " if headline else ""
+
+    cat_text = ""
+    cats = payload.risk_categories or {}
+    if isinstance(cats, dict) and cats:
+        parts = []
+        for key, cat in cats.items():
+            if not isinstance(cat, dict):
+                continue
+            level = _RISK_ES.get(_enum(cat.get("level")), str(cat.get("level") or "")).strip()
+            score = cat.get("score")
+            label = str(key).replace("_", " ").capitalize()
+            score_txt = f" {score:.0f}/100" if isinstance(score, (int, float)) else ""
+            parts.append(f"{label}: {level}{score_txt}".strip())
+        if parts:
+            cat_text = " Desglose de riesgo — " + "; ".join(parts) + "."
+
+    ratio_bits = []
+    if isinstance(ratios.get("roe_pct"), (int, float)):
+        ratio_bits.append(f"ROE {ratios['roe_pct']:.1f}%")
+    if isinstance(ratios.get("margen_neto_pct"), (int, float)):
+        ratio_bits.append(f"margen neto {ratios['margen_neto_pct']:.1f}%")
+    if isinstance(ratios.get("endeudamiento_global"), (int, float)):
+        ratio_bits.append(f"endeudamiento {ratios['endeudamiento_global'] * 100:.1f}%")
+    ratio_text = f" Indicadores clave: {', '.join(ratio_bits)}." if ratio_bits else ""
+
     return (
+        f"{headline_text}"
         f"Activos: COP {_money(totals.get('total_assets'))} MM, "
         f"patrimonio: COP {_money(totals.get('total_equity'))} MM, "
         f"utilidad neta: COP {_money(totals.get('net_income'))} MM. "
         f"Riesgo {_RISK_ES.get(_enum(payload.overall_risk_score), _enum(payload.overall_risk_score).lower())}, "
-        f"revision humana: {'si' if payload.requires_human_review else 'no'}. {rec_text}"
+        f"revision humana: {'si' if payload.requires_human_review else 'no'}."
+        f"{cat_text}{ratio_text} {rec_text}"
     )
 
 
@@ -95,20 +141,38 @@ def _build_niif_notes(payload: ScorerOutput) -> list[NiifNoteDraft]:
         if not account.requires_niif_note:
             continue
         refs = account.niif_note_references or payload.niif_notes_required or ["NIIF 7"]
-        for ref in refs[:3]:
+        # Draft a note for EVERY standard the account references — not just the first
+        # three. The previous `refs[:3]` cap dropped standards that sat past position 3
+        # (e.g. "NIIF 7" on accounts that already cited NIC 1 / NIC 32 / NIIF 13 first),
+        # yet the account kept the full list in `niif_note_references`. RevisorInteligente
+        # check 3.1 then flagged every dropped standard as a cross-reference ERROR. Notes
+        # are grouped by standard, so the count stays bounded by the ~10 distinct NIIF/NIC
+        # standards regardless of how many refs any single account carries.
+        for ref in refs:
             by_standard[ref].append(account)
 
     notes: list[NiifNoteDraft] = []
     for idx, (standard, accounts) in enumerate(sorted(by_standard.items()), start=1):
         top_accounts = accounts[:6]
         names = ", ".join(a.account_name for a in top_accounts)
-        content = (
-            f"De acuerdo con {standard}, se recomienda revelar las variaciones materiales "
-            f"asociadas a {names}. La medicion debe reconciliar saldos del periodo actual y "
-            "comparativo, explicar cambios de valor razonable, liquidez o contraparte cuando "
-            "aplique, y dejar evidencia de los juicios contables usados por la administracion. "
-            "Esta nota se basa exclusivamente en las cuentas marcadas por los agentes previos."
+        account_tail = (
+            f" En este reporte la nota aplica a: {names}. "
+            "Se basa exclusivamente en las cuentas marcadas por los agentes previos."
         )
+        # Prefer the authored disclosure text for the standard (uploaded under
+        # instructions/niif_notes/). Falls back to the generic template when no
+        # note file is available, so a missing file never blocks the report.
+        authored = load_niif_note(standard).strip()
+        if authored:
+            content = f"{authored}\n\n{account_tail.strip()}"
+        else:
+            content = (
+                f"De acuerdo con {standard}, se recomienda revelar las variaciones materiales "
+                f"asociadas a {names}. La medicion debe reconciliar saldos del periodo actual y "
+                "comparativo, explicar cambios de valor razonable, liquidez o contraparte cuando "
+                "aplique, y dejar evidencia de los juicios contables usados por la administracion. "
+                "Esta nota se basa exclusivamente en las cuentas marcadas por los agentes previos."
+            )
         notes.append(
             NiifNoteDraft(
                 note_id=f"note-{idx:03d}",
@@ -129,8 +193,10 @@ def _build_niif_notes(payload: ScorerOutput) -> list[NiifNoteDraft]:
 _PLACEHOLDER_RE = re.compile(r"\{\{([A-Z0-9_]+)\}\}")
 # Instruction markers ~~text~~ are stripped from the final document deterministically.
 _INSTRUCTION_RE = re.compile(r"~~.+?~~", re.DOTALL)
-# Detects row-based placeholder tables: PREFIX_Rn_Cm
-_ROW_PH_RE = re.compile(r"\{\{([A-Z0-9]+)_R(\d+)_C\d+\}\}")
+# Detects row-based placeholder tables: PREFIX_Rn_Cm. The prefix may itself contain
+# underscores (e.g. IS_ACC, FV_HIER, NAV_CLASS, NAV_FLOW); the `_R\d+_C\d+` suffix is
+# fixed, so greedy matching resolves the prefix correctly via backtracking.
+_ROW_PH_RE = re.compile(r"\{\{([A-Z0-9_]+)_R(\d+)_C\d+\}\}")
 # Hard cap: never expand a table beyond this many data rows.
 _MAX_TABLE_ROWS = 30
 
@@ -152,20 +218,57 @@ def _classify_extractor_account(acc: dict) -> str:
     return "balance_sheet"
 
 
-def _compute_row_needs(extractor_accounts: list[dict]) -> dict[str, int]:
-    """Return how many rows each dynamic table needs, based on raw extractor accounts."""
+def _compute_row_needs(
+    extractor_accounts: list[dict], sheet_mapping: dict[str, str | None] | None = None
+) -> dict[str, int]:
+    """Return how many rows each dynamic table needs, per the matched Excel sheets.
+
+    Counts come from the SAME sheet mapping that fills the tables
+    (``get_accounts_for_canonical``), so every account in a mapped sheet gets a row.
+    Each table's template default is kept as a floor. When no sheet mapping is
+    available (PDF/CSV inputs without ``source_sheet``), falls back to name/keyword
+    heuristics for the statement tables.
+    """
+    from .sheet_mapper import get_accounts_for_canonical
+    from .template_filler import _classify_sheet
+
+    # (canonical sheet key, table prefix, template-default rows, include totals)
+    sheet_tables = [
+        ("BALANCE", "BS", 6, True),
+        ("ESTADO_RESULTADOS", "IS_ACC", 8, True),
+        ("INSTRUMENTOS", "PORTFOLIO", 10, False),
+        ("VALOR_RAZONABLE_ACTIVOS", "FV_HIER", 4, False),
+        ("ACTIVOS_NETOS", "NAV_CLASS", 5, False),
+        ("FLUJO_EFECTIVO", "NAV_FLOW", 4, False),
+    ]
+    needs: dict[str, int] = {}
+    mapped_any = False
+    for canonical, prefix, default, totals in sheet_tables:
+        accs = get_accounts_for_canonical(
+            extractor_accounts, canonical, sheet_mapping or {}, include_totals=totals
+        )
+        if accs:
+            mapped_any = True
+        needs[prefix] = max(default, len(accs))
+    needs["IS_Q2"] = needs["IS_ACC"]
+
+    if mapped_any:
+        return needs
+
+    # Fallback: no source_sheet at all — size the statement tables by heuristic.
     bs = [a for a in extractor_accounts
           if _classify_extractor_account(a) == "balance_sheet" and not a.get("is_total")]
     is_ = [a for a in extractor_accounts
            if _classify_extractor_account(a) == "income_statement" and not a.get("is_total")]
     inv = [a for a in extractor_accounts
-           if a.get("investment_type") or "invers" in (a.get("normalized_account_name") or "").lower()]
-    return {
-        "BS":       max(6,  len(bs)),
-        "IS_ACC":   max(8,  len(is_)),
-        "IS_Q2":    max(8,  len(is_)),
-        "PORTFOLIO": max(10, len(inv)),
-    }
+           if a.get("investment_type")
+           or "invers" in (a.get("normalized_account_name") or "").lower()]
+    inv = [a for a in inv if not a.get("is_total")]
+    needs["BS"] = max(6, len(bs))
+    needs["IS_ACC"] = max(8, len(is_))
+    needs["IS_Q2"] = needs["IS_ACC"]
+    needs["PORTFOLIO"] = max(10, len(inv))
+    return needs
 
 
 def _load_extractor_accounts(job_id: str) -> list[dict]:
@@ -368,6 +471,119 @@ def _render_into_paragraph(para, text: str) -> None:
         _add(line[pos:], bold=False)
 
 
+def _prune_blank_table_rows(doc) -> int:
+    """Delete table rows whose every cell is blank after filling.
+
+    Dynamic tables ship with a row floor (e.g. 8 income-statement rows) and the
+    filler writes "" into rows it has no data for. Those empty rows render as ugly
+    gaps, so they are removed here. A row is removed only when *all* its cells are
+    empty — rows that carry a label or an "N/D" value (intentional content) stay.
+    Header rows always carry static text and are never touched.
+    """
+    removed = 0
+
+    def _process(table):
+        nonlocal removed
+        for row in list(table.rows):
+            cells = row.cells
+            if all(not c.text.strip() for c in cells):
+                row._tr.getparent().remove(row._tr)
+                removed += 1
+                continue
+            for cell in cells:
+                for nested in cell.tables:
+                    _process(nested)
+
+    for table in doc.tables:
+        _process(table)
+    return removed
+
+
+def _para_is_blank(p_elem) -> bool:
+    """True if a <w:p> has no visible text and carries no image/object content.
+
+    Page-break-only paragraphs are still "blank" by text, but they are handled
+    separately by the caller so the break itself is never dropped.
+    """
+    from docx.oxml.ns import qn
+
+    text = "".join(t.text or "" for t in p_elem.iter(qn("w:t")))
+    if text.strip():
+        return False
+    for tag in ("w:drawing", "w:pict", "w:object"):
+        if p_elem.find(".//" + qn(tag)) is not None:
+            return False
+    return True
+
+
+def _para_has_page_break(p_elem) -> bool:
+    """True if the paragraph forces a page break (pageBreakBefore or a <w:br type=page>)."""
+    from docx.oxml.ns import qn
+
+    ppr = p_elem.find(qn("w:pPr"))
+    if ppr is not None and ppr.find(qn("w:pageBreakBefore")) is not None:
+        return True
+    for br in p_elem.iter(qn("w:br")):
+        if br.get(qn("w:type")) == "page":
+            return True
+    return False
+
+
+def _prune_blank_paragraphs(doc) -> int:
+    """Collapse runs of empty body paragraphs that produce blank pages / dead space.
+
+    The template (and the placeholder fill, which clears a paragraph to "" when a
+    narrative field is absent) leaves many empty `<w:p>` paragraphs. Stacked, they
+    render as large vertical gaps and even fully blank pages.
+
+    Rules (body-level paragraphs only — table rows are handled by
+    `_prune_blank_table_rows`):
+      * At most ONE empty spacer paragraph is kept between two pieces of content.
+      * Page-break paragraphs are always preserved (they drive section layout) and
+        do not count against the single-spacer allowance.
+      * Leading empty paragraphs (before any content) and trailing empty spacers
+        (after the last content, before the final sectPr) are removed entirely.
+      * Tables reset the spacer allowance, so one spacer after a table is allowed.
+    """
+    body = doc.element.body
+    children = list(body.iterchildren())
+    removed = 0
+    last_was_blank_spacer = True  # start True → strip leading blanks
+
+    for child in children:
+        tag = child.tag.split("}")[-1]
+        if tag != "p":
+            # Tables / sectPr reset the run; a single spacer after them is allowed.
+            last_was_blank_spacer = False
+            continue
+        if not _para_is_blank(child):
+            last_was_blank_spacer = False
+            continue
+        # Blank paragraph.
+        if _para_has_page_break(child):
+            # Keep the break; treat it as a spacer so adjacent blanks collapse.
+            last_was_blank_spacer = True
+            continue
+        if last_was_blank_spacer:
+            child.getparent().remove(child)
+            removed += 1
+        else:
+            last_was_blank_spacer = True
+
+    # Strip any trailing blank spacers left before the final sectPr.
+    for child in reversed(list(body.iterchildren())):
+        tag = child.tag.split("}")[-1]
+        if tag == "sectPr":
+            continue
+        if tag == "p" and _para_is_blank(child) and not _para_has_page_break(child):
+            child.getparent().remove(child)
+            removed += 1
+            continue
+        break
+
+    return removed
+
+
 def _fill_docx_template(docx_bytes: bytes, field_map: dict[str, str]) -> bytes:
     """Replace {{PLACEHOLDER}} markers in a .docx with the provided field values."""
     try:
@@ -421,6 +637,14 @@ def _fill_docx_template(docx_bytes: bytes, field_map: dict[str, str]) -> bytes:
                 _replace_paragraph(para)
             for table in hf.tables:
                 _replace_table(table)
+
+    pruned = _prune_blank_table_rows(doc)
+    if pruned:
+        logger.info("prune_blank_rows | removed=%d", pruned)
+
+    pruned_paras = _prune_blank_paragraphs(doc)
+    if pruned_paras:
+        logger.info("prune_blank_paragraphs | removed=%d", pruned_paras)
 
     buf = io.BytesIO()
     doc.save(buf)
@@ -682,6 +906,151 @@ def _call_llm_for_fields(
 _DOCX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
+def _build_analysis_summary_md(payload: ScorerOutput, executive_summary: str, board_summary: str) -> str:
+    """Build a self-contained markdown summary of the full analysis.
+
+    Saved as analysis_summary.md alongside the other job artifacts so it can be
+    loaded cheaply on any future request (audit, chat, re-review) without having
+    to re-fetch and parse all agent outputs.
+    """
+    def _fmt(v) -> str:
+        if v is None:
+            return "N/D"
+        try:
+            return f"{float(v):,.1f}"
+        except (TypeError, ValueError):
+            return str(v)
+
+    def _pct_fmt(v) -> str:
+        if v is None:
+            return "N/D"
+        try:
+            f = float(v)
+            return f"{'+' if f > 0 else ''}{f:.1f}%"
+        except (TypeError, ValueError):
+            return str(v)
+
+    periods = " / ".join(payload.periods) if payload.periods else "N/D"
+    totals = (payload.financial_ratios or {}).get("totals") or {}
+    ratios = (payload.financial_ratios or {}).get("ratios") or {}
+    rs = payload.risk_summary or {}
+    cats = payload.risk_categories or {}
+    synth = payload.executive_synthesis or {}
+    fa = payload.fund_analysis or {}
+    kpis = payload.executive_kpis or {}
+
+    lines: list[str] = [
+        f"# Resumen de Análisis — {payload.company_name}",
+        f"**Períodos:** {periods}  |  **Moneda:** {payload.currency or 'COP'}  "
+        f"|  **Generado:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
+        f"**Job ID:** {payload.job_id}",
+        "",
+        "---",
+        "",
+        "## Resumen Ejecutivo",
+        executive_summary,
+        "",
+        "## Resumen para Junta Directiva",
+        board_summary,
+        "",
+        "---",
+        "",
+        "## Perfil de Riesgo",
+        f"- **Riesgo global:** {payload.overall_risk_score}",
+        f"- **Salud financiera:** {payload.overall_financial_health}",
+        f"- **Score de validación:** {payload.validation_score}/100",
+        f"- **Requiere revisión humana:** {'Sí' if payload.requires_human_review else 'No'}",
+    ]
+
+    for key, cat in cats.items():
+        findings = "; ".join((cat.get("key_findings") or [])[:2])
+        lines.append(f"- **{cat.get('label', key)}:** {cat.get('level')} ({cat.get('score', 0)}/100) — {findings}")
+
+    if rs.get("risk_headline"):
+        lines += ["", f"**Titular de riesgo:** {rs['risk_headline']}"]
+
+    recs = rs.get("risk_recommendations") or []
+    if recs:
+        lines += ["", "**Recomendaciones:**"]
+        for r in recs[:5]:
+            lines.append(f"- {r}")
+
+    lines += ["", "---", "", "## KPIs Ejecutivos"]
+    for k, v in list(kpis.items())[:10]:
+        lines.append(f"- **{k}:** {v}")
+
+    lines += ["", "---", "", "## Cifras Clave (COP miles)"]
+    for label, key in [
+        ("Total Activos", "total_assets"),
+        ("Total Pasivos", "total_liabilities"),
+        ("Patrimonio / Activos Netos", "total_equity"),
+        ("Ingresos / Resultado", "total_revenue"),
+        ("Utilidad Neta", "net_income"),
+    ]:
+        lines.append(f"- **{label}:** {_fmt(totals.get(key))}")
+
+    for label, key in [("ROE", "roe_pct"), ("ROA", "roa_pct"), ("Deuda/Patrimonio", "debt_to_equity")]:
+        v = ratios.get(key)
+        if v is not None:
+            lines.append(f"- **{label}:** {_pct_fmt(v)}")
+
+    if fa.get("is_fund"):
+        recon = fa.get("nav_reconciliation") or {}
+        lines += [
+            "", "**Fondo de inversión — NAV:**",
+            f"- NAV apertura: {_fmt(recon.get('opening_nav'))}",
+            f"- NAV cierre: {_fmt(recon.get('closing_nav'))}",
+            f"- Flujo neto: {_fmt(recon.get('net_investor_flow'))}",
+        ]
+
+    # Material accounts. AccountAnalysis has no `is_total` — that field lives on the
+    # raw ExtractedAccount. Exclude aggregate rows via the hierarchy tag instead
+    # (same approach as _material_accounts); referencing a.is_total raised an
+    # AttributeError that silently dropped analysis_summary.md on every run.
+    material = sorted(
+        [a for a in payload.analysis_results
+         if getattr(a, "statement_role", "primary_line") not in ("grand_total", "subtotal")],
+        key=lambda a: (0 if _enum(a.materiality) == "HIGH" else 1, -(a.impact_score or 0)),
+    )[:15]
+    if material:
+        lines += ["", "---", "", "## Cuentas Materiales", "| Cuenta | Actual | Anterior | Δ% | Materialidad |",
+                  "|--------|-------:|---------:|----:|:------------:|"]
+        for a in material:
+            lines.append(
+                f"| {a.account_name} | {_fmt(a.current_value)} | {_fmt(a.previous_value)} "
+                f"| {_pct_fmt(a.variation_pct)} | {_enum(a.materiality)} |"
+            )
+
+    # Anomalies
+    anomalies = [a for a in payload.analysis_results if a.anomaly_detected][:8]
+    if anomalies:
+        lines += ["", "---", "", "## Anomalías Detectadas"]
+        for a in anomalies:
+            insight = a.executive_insight or ""
+            lines.append(f"- **{a.account_name}** (Δ{_pct_fmt(a.variation_pct)}): {insight}")
+
+    # Portfolio story
+    if synth.get("portfolio_story"):
+        lines += ["", "---", "", "## Historia del Portafolio", synth["portfolio_story"]]
+
+    if payload.portfolio_thesis:
+        lines += ["", "**Tesis de portafolio:** " + payload.portfolio_thesis]
+
+    board_alerts = synth.get("board_alerts") or []
+    if board_alerts:
+        lines += ["", "**Alertas para la Junta:**"]
+        for alert in board_alerts:
+            lines.append(f"- {alert}")
+
+    # NIIF
+    niif_refs = payload.niif_notes_required or []
+    if niif_refs:
+        lines += ["", "---", "", f"## Requerimientos NIIF", ", ".join(niif_refs)]
+
+    lines += ["", "---", f"*Generado por CreditIQ Multi-Agente · Job {payload.job_id}*"]
+    return "\n".join(lines)
+
+
 
 
 def lambda_handler(event: dict, context) -> dict:
@@ -714,7 +1083,24 @@ def lambda_handler(event: dict, context) -> dict:
 
     # Load Agent 1 raw accounts to drive dynamic table expansion and richer LLM context.
     extractor_accounts = _load_extractor_accounts(payload.job_id)
-    row_needs = _compute_row_needs(extractor_accounts) if extractor_accounts else {}
+
+    # Resolve actual Excel sheet names → canonical template table keys.
+    # The LLM is used only for sheet names that keyword matching cannot classify.
+    actual_sheets = sorted({
+        acc["source_sheet"]
+        for acc in extractor_accounts
+        if acc.get("source_sheet")
+    })
+    sheet_mapping = match_sheets(
+        actual_sheets,
+        llm=LLMProvider(model=llm_model),
+        tenant_id=payload.tenant_id,
+        job_id=payload.job_id,
+    ) if actual_sheets else {}
+
+    # Row counts for dynamic table expansion are derived from the SAME sheet mapping
+    # that fills the tables, so every account in a mapped sheet gets a row.
+    row_needs = _compute_row_needs(extractor_accounts, sheet_mapping) if extractor_accounts else {}
 
     digest = _build_llm_digest(payload, historical, extractor_accounts=extractor_accounts)
 
@@ -736,9 +1122,10 @@ def lambda_handler(event: dict, context) -> dict:
         )
 
         # 1. Deterministic calculated cells — the bulk of the template (tables, KPIs).
-        det_map = build_deterministic_fields(
+        det_map, field_audit = build_deterministic_fields(
             payload, generated_at=reference_date, job_id=payload.job_id,
-            row_needs=row_needs,
+            row_needs=row_needs, extractor_accounts=extractor_accounts,
+            sheet_mapping=sheet_mapping,
         )
         # 2. Deterministic narrative fallbacks — used if the LLM omits/fails a field.
         fallback_map = build_narrative_fallbacks(payload)
@@ -756,12 +1143,40 @@ def lambda_handler(event: dict, context) -> dict:
             llm_val = llm_map.get(ph)
             if llm_val and llm_val.strip():
                 field_map[ph] = llm_val
+                field_audit[ph] = "llm_narrative"
             elif ph in det_map:
                 field_map[ph] = det_map[ph]
             elif ph in fallback_map:
                 field_map[ph] = fallback_map[ph]
+                field_audit[ph] = "deterministic_fallback"
             else:
                 field_map[ph] = ""
+                field_audit[ph] = "N/D (no source)"
+
+        # Build fill summary for the audit log
+        nd_fields = [k for k, v in field_map.items() if not v or v == "N/D"]
+        filled_fields = [k for k, v in field_map.items() if v and v != "N/D"]
+        audit_payload = {
+            "job_id": payload.job_id,
+            "generated_at": reference_date.isoformat(),
+            "sheet_mapping": {k: v for k, v in (sheet_mapping or {}).items()},
+            "summary": {
+                "total_placeholders": len(placeholders),
+                "filled": len(filled_fields),
+                "nd_gaps": len(nd_fields),
+                "llm_narrative_filled": sum(1 for p in narrative if (llm_map.get(p) or "").strip()),
+            },
+            "nd_fields": nd_fields,
+            "provenance": field_audit,
+        }
+        try:
+            job_save(payload.job_id, "report_generator_audit", audit_payload)
+            logger.info(
+                "audit_saved | job=%s filled=%d nd=%d",
+                payload.job_id, len(filled_fields), len(nd_fields),
+            )
+        except Exception as exc:
+            logger.warning("audit_save_failed | job=%s error=%s", payload.job_id, exc)
 
         filled_bytes = _fill_docx_template(template_bytes, field_map)
         docx_key = job_save_bytes(
@@ -772,10 +1187,11 @@ def lambda_handler(event: dict, context) -> dict:
             "docx",
         )
         docx_s3_url = f"s3://{bucket}/{docx_key}"
-        llm_filled = sum(1 for p in narrative if (llm_map.get(p) or "").strip())
+        llm_filled = audit_payload["summary"]["llm_narrative_filled"]
         logger.info(
-            "docx_saved | job=%s key=%s filled=%d llm_narrative=%d/%d",
-            payload.job_id, docx_key, len(field_map), llm_filled, len(narrative),
+            "docx_saved | job=%s key=%s filled=%d nd=%d llm_narrative=%d/%d",
+            payload.job_id, docx_key, len(filled_fields), len(nd_fields),
+            llm_filled, len(narrative),
         )
     else:
         logger.warning("docx_template_not_found | job=%s bucket=%s", payload.job_id, bucket)
@@ -805,6 +1221,17 @@ def lambda_handler(event: dict, context) -> dict:
         cross_statement_signals=payload.cross_statement_signals,
         earnings_sustainability=payload.earnings_sustainability,
     )
+
+    # ── Save analysis_summary.md ─────────────────────────────────────────────
+    # A self-contained markdown summary of the full analysis, saved alongside the
+    # other job artifacts. Used by the chat handler and audit workflows to load
+    # rich context cheaply without re-fetching all agent outputs.
+    try:
+        summary_md = _build_analysis_summary_md(payload, result.executive_summary, result.board_summary)
+        job_save_bytes(result.job_id, ANALYSIS_SUMMARY, summary_md.encode("utf-8"), "text/markdown", "md")
+        logger.info("analysis_summary_saved | job=%s chars=%d", result.job_id, len(summary_md))
+    except Exception as exc:
+        logger.warning("analysis_summary_save_failed | job=%s error=%s", result.job_id, exc)
 
     output = result.model_dump(mode="json")
     try:

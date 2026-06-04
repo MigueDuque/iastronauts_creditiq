@@ -6,7 +6,7 @@ import time
 
 import boto3
 import pandas as pd
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import RetryError, retry, stop_after_attempt, wait_exponential
 
 from shared.llm_provider import LLMProvider
 from shared.models import ExtractedAccount, ExtractorOutput, OrchestratorOutput
@@ -208,8 +208,9 @@ REGLAS DE SELECCIÓN DE COLUMNAS (CRÍTICO)
    - IGNORAR las columnas trimestrales — no son comparables con el acumulado.
 
    Si la tabla de inversiones tiene columnas "Nominal YYYY | Valor YYYY":
-   - Usar SOLO las columnas "Valor YYYY" (valor de mercado o razonable).
-   - IGNORAR las columnas "Nominal YYYY" (cantidad de unidades, no monetario).
+   - Usar la columna "Valor YYYY" (valor de mercado o razonable) como current_value/previous_value.
+   - Capturar la columna "Nominal YYYY" del período MÁS RECIENTE en nominal_value
+     (cantidad/valor nominal de la posición). Si no existe, nominal_value: null.
 
 3. POSICIONES NUEVAS O CERRADAS (valor = 0 en un período):
    - Si el valor del período anterior es 0 y el actual es > 0 → es una posición NUEVA.
@@ -264,6 +265,21 @@ def _get_extraction_prompt() -> str:
     return _extraction_system_prompt_cache
 
 
+def _unwrap_retry_error(exc: Exception) -> str:
+    """Surface the underlying cause of a tenacity RetryError.
+
+    ``RetryError`` repr is opaque (``RetryError[<Future ... raised Exception>]``),
+    hiding the real failure. Return the message of the last underlying exception.
+    """
+    if isinstance(exc, RetryError):
+        last = exc.last_attempt
+        if last is not None and last.failed:
+            inner = last.exception()
+            if inner is not None:
+                return f"{type(inner).__name__}: {inner}"
+    return f"{type(exc).__name__}: {exc}"
+
+
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=8))
 def _call_llm_extraction(
     raw_text: str,
@@ -282,7 +298,7 @@ def _call_llm_extraction(
         temperature=0.0,
         tenant_id=tenant_id,
         job_id=job_id,
-        max_tokens=16384,
+        max_tokens=32000,   # headroom: large fund workbooks emit ~15k JSON tokens
     )
     return result if isinstance(result, dict) else {"accounts": result, "periods": []}
 
@@ -337,6 +353,8 @@ def _build_accounts(raw_items: list[dict], source_file: str) -> tuple[list[Extra
             raw_sheet = item.get("source_sheet")
             raw_inv_type = item.get("investment_type")
             raw_issuer = item.get("issuer_name")
+            nominal_raw = item.get("nominal_value")
+            nominal_value = float(nominal_raw) if nominal_raw is not None else None
             accounts.append(ExtractedAccount(
                 account_id=f"act-{i+1:03d}",   # re-indexed globally after merge
                 raw_account_name=str(item.get("raw_account_name", "")),
@@ -351,6 +369,7 @@ def _build_accounts(raw_items: list[dict], source_file: str) -> tuple[list[Extra
                 is_total=bool(item.get("is_total", False)),
                 investment_type=str(raw_inv_type) if raw_inv_type else None,
                 issuer_name=str(raw_issuer) if raw_issuer else None,
+                nominal_value=nominal_value,
             ))
         except (TypeError, ValueError) as e:
             warnings.append(f"Cuenta {i + 1} de '{source_file}' omitida — error de parseo: {e}")
@@ -460,8 +479,9 @@ def lambda_handler(event: dict, context) -> dict:
             logger.info("accounts_extracted | file=%s count=%d", file.file_name, len(file_accounts))
 
         except Exception as e:
-            warnings.append(f"Error procesando '{file.file_name}': {e}")
-            logger.error("extraction_error | file=%s error=%s", file.file_name, e, exc_info=True)
+            cause = _unwrap_retry_error(e)
+            warnings.append(f"Error procesando '{file.file_name}': {cause}")
+            logger.error("extraction_error | file=%s error=%s", file.file_name, cause, exc_info=True)
 
     # Merge and deduplicate periods; keep the two most recent
     seen: set[str] = set()

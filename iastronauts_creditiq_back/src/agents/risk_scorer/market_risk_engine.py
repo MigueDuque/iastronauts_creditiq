@@ -76,9 +76,15 @@ def score_market_risk(
     total_revenue = totals.get("total_revenue", 0.0)
     total_assets = totals.get("total_assets", 0.0)
 
-    # Fair value income dependency
-    fair_value_income_ratio = earnings_quality.get("fair_value_income_ratio", 0.0)
-    fair_value_pct = round(fair_value_income_ratio * 100, 2)
+    # Fair value income dependency. earnings_quality stores this as a PERCENTAGE (0–100),
+    # not a 0–1 ratio — blindly multiplying by 100 turned 72.2% into 7220%. Only scale up
+    # when the value is plainly a fraction.
+    fair_value_income_ratio = earnings_quality.get("fair_value_income_ratio", 0.0) or 0.0
+    fair_value_pct = (
+        round(fair_value_income_ratio * 100, 2)
+        if fair_value_income_ratio <= 1.0
+        else round(fair_value_income_ratio, 2)
+    )
 
     # If fair_value_income_ratio is 0 but we have the accounts, compute directly.
     # Match only income accounts (category=revenue) to avoid picking up asset accounts
@@ -116,6 +122,7 @@ def score_market_risk(
             for a in analysis_results
             if "acciones" in a.get("account_name", "").lower()
             and "total" not in a.get("account_name", "").lower()
+            and a.get("is_leaf", True)
             and a.get("current_value", 0.0) > 0
         )
         investable = sum(
@@ -129,6 +136,7 @@ def score_market_risk(
             and "total" not in a.get("account_name", "").lower()
             and "flujo" not in a.get("account_name", "").lower()
             and "neto" not in a.get("account_name", "").lower()
+            and a.get("is_leaf", True)
             and a.get("current_value", 0.0) > 0
         )
         if investable > 0:
@@ -152,6 +160,10 @@ def score_market_risk(
                     or "fondo de invers" in a.get("account_name", "").lower()
                 )
                 and "total" not in a.get("account_name", "").lower()
+                # is_leaf drops fair-value-hierarchy aggregates ("Acciones Locales - Nivel 1
+                # …") that duplicate the per-issuer rows — they pushed top_issuer to 50% and
+                # the portfolio base to ~2× the real value.
+                and a.get("is_leaf", True)
                 and a.get("current_value", 0.0) > 0
             ],
             reverse=True,
