@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import List, Dict, Any, Tuple
 from shared.models import ExtractedAccount
 from shared.models.base import MaterialityLevel
@@ -13,20 +14,30 @@ logger.setLevel(logging.INFO)
 
 # Per-account statement_type values that are always movements, never positions.
 _MOVEMENT_STATEMENT_TYPES: frozenset[str] = frozenset({"cash_flow", "equity_changes"})
+# Explicit statement_type values that are always positions, never movements.
+# When the extractor set one of these, it is authoritative and the fuzzy
+# sheet-name / account-name heuristics below are skipped (they exist only to
+# recover the type when the extractor left it blank — e.g. PDF/CSV inputs).
+_POSITION_STATEMENT_TYPES: frozenset[str] = frozenset({"balance_sheet", "income_statement"})
 
-_CASH_FLOW_SHEET_KEYWORDS: tuple[str, ...] = (
+# Multi-word phrases — safe to match as substrings.
+_CASH_FLOW_SHEET_PHRASES: tuple[str, ...] = (
     "flujo de efectivo",
     "flujo de caja",
     "cash flow",
     "estado de flujos",
     "flujos de efectivo",
     "flujos de caja",
-    # common abbreviations used by Colombian fund administrators
-    "efe",   # Estado de Flujos de Efectivo
-    "efnc",  # Estado de Flujos No Corrientes
-    "effe",
-    "efc",   # Estado de Flujos de Caja
 )
+# Short abbreviations used by Colombian fund administrators. These are matched as
+# whole tokens only — a naive substring match wrongly flagged the common word
+# "efectivo" (a cash position) because it contains "efe".
+_CASH_FLOW_SHEET_ABBREVS: frozenset[str] = frozenset({
+    "efe",    # Estado de Flujos de Efectivo
+    "efnc",   # Estado de Flujos No Corrientes
+    "effe",
+    "efc",    # Estado de Flujos de Caja
+})
 _CASH_FLOW_NAME_KEYWORDS: tuple[str, ...] = (
     "flujo de efectivo",
     "flujo neto",
@@ -65,18 +76,27 @@ def is_cash_flow_account(account) -> bool:
 
     Accepts ExtractedAccount, AccountVariation, or any object with the relevant
     attributes. Check order (strongest signal first):
-      1. statement_type field explicitly set by the extractor LLM
+      1. statement_type explicitly set by the extractor LLM — authoritative both
+         ways: a movement type → True; a position type → False (skip heuristics).
       2. source_sheet name keyword match (Excel only)
       3. account name keyword fallback (PDF / CSV)
     """
-    # 1. Explicit per-account type set by extractor LLM — most reliable
+    # 1. Explicit per-account type set by extractor LLM — authoritative.
     stmt = getattr(account, "statement_type", None) or ""
     if stmt in _MOVEMENT_STATEMENT_TYPES:
         return True
+    if stmt in _POSITION_STATEMENT_TYPES:
+        # The extractor classified this as a closing position. Trust it and do
+        # NOT fall through to fuzzy name/sheet matching (which mislabels e.g. a
+        # "EFECTIVO" cash-position sheet as a cash-flow statement).
+        return False
 
-    # 2. Excel sheet name (strong signal when source_sheet is present)
-    sheet = getattr(account, "source_sheet", None) or ""
-    if any(kw in sheet.lower() for kw in _CASH_FLOW_SHEET_KEYWORDS):
+    # 2. Excel sheet name (only when statement_type is missing/unknown).
+    sheet = (getattr(account, "source_sheet", None) or "").lower()
+    if any(kw in sheet for kw in _CASH_FLOW_SHEET_PHRASES):
+        return True
+    # Abbreviations are matched as whole tokens, never as substrings.
+    if _CASH_FLOW_SHEET_ABBREVS.intersection(re.findall(r"[a-z]+", sheet)):
         return True
 
     # 3. Account name keywords (fallback for PDF / when statement_type is absent)

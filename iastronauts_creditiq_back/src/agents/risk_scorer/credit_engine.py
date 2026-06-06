@@ -211,6 +211,7 @@ def score_credit(
         for a in _fpa.get("assessments", [])
         if a.get("dimension") == "counterparty"
     ]
+    _worst_cp: str | None = None
     if _cp_statuses:
         _worst_cp = max(_cp_statuses, key=lambda s: {"breach": 2, "near": 1, "within": 0}.get(s, 0))
         if _worst_cp == "within" and custodian_deduction > 0:
@@ -224,9 +225,9 @@ def score_credit(
     findings: List[str] = []
     drivers: List[str] = []
 
+    _fpa_assessments = (_fpa or {}).get("assessments", [])
+
     if is_investment_fund and top_issuer_pct is not None:
-        # Resolve the policy limit for this issuer if available
-        _fpa_assessments = (_fpa or {}).get("assessments", [])
         _issuer_limit: float | None = next(
             (a.get("limit_pct") for a in _fpa_assessments if a.get("dimension") == "issuer"),
             None,
@@ -279,7 +280,7 @@ def score_credit(
         _cp_limit_note = (
             f" (límite permitido: {_cp_limit:.0f}%)" if _cp_limit is not None else ""
         )
-        _cp_worst = _worst_cp if _cp_statuses else None  # type: ignore[possibly-undefined]
+        _cp_worst = _worst_cp if _cp_statuses else None
         if _cp_worst == "within" and top_custodian_pct is not None:
             findings.append(
                 f"Custodio principal {top_custodian_name} concentra el {top_custodian_pct:.1f}% "

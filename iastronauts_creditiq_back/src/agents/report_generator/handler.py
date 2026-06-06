@@ -9,6 +9,7 @@ from datetime import datetime
 import boto3
 
 from shared.job_store import EXTRACTOR, REPORT_GENERATOR, ANALYSIS_SUMMARY, save as job_save, save_bytes as job_save_bytes, load as job_load
+from shared.financial_math import is_cash_flow_account
 from shared.llm_provider import LLMProvider
 from shared.models import ScorerOutput, FinalReportOutput, NiifNoteDraft
 from shared.niif_notes import load_niif_note
@@ -55,9 +56,16 @@ def _material_accounts(payload: ScorerOutput, limit: int = 8) -> list:
     # times (e.g. Total Activos, Total Activos Financieros and the portfolio line are
     # all the same ~1,540). Falls back to the full list for legacy outputs without
     # hierarchy tags. Breakdown_detail rows are kept — they are genuine positions.
+    #
+    # Also exclude movement rows (cash-flow / equity-changes statements): their
+    # period-over-period % (contributions +238%, opening NAV +381%) is not an
+    # interpretable position variation, so they must not appear in the "material
+    # variations" list that drives the executive summary and LLM digest. Their
+    # magnitude is surfaced separately through the fund-flow / cash-flow tables.
     candidates = [
         a for a in payload.analysis_results
         if getattr(a, "statement_role", "primary_line") not in ("grand_total", "subtotal")
+        and not is_cash_flow_account(a)
     ] or list(payload.analysis_results)
     return sorted(
         candidates,
@@ -1114,7 +1122,8 @@ def _build_analysis_summary_md(payload: ScorerOutput, executive_summary: str, bo
     # AttributeError that silently dropped analysis_summary.md on every run.
     material = sorted(
         [a for a in payload.analysis_results
-         if getattr(a, "statement_role", "primary_line") not in ("grand_total", "subtotal")],
+         if getattr(a, "statement_role", "primary_line") not in ("grand_total", "subtotal")
+         and not is_cash_flow_account(a)],
         key=lambda a: (0 if _enum(a.materiality) == "HIGH" else 1, -(a.impact_score or 0)),
     )[:15]
     if material:

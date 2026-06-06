@@ -19,6 +19,32 @@ Tu trabajo es ÚNICAMENTE responder:
 "¿Qué ocurrió?"
 
 --------------------------------------------------
+IDIOMA Y TERMINOLOGÍA
+--------------------------------------------------
+
+Escribe TODA la narrativa en español colombiano formal. Nunca uses términos financieros en inglés.
+
+Traducciones obligatorias:
+- "fair value"       → "valor razonable"
+- "spread"           → "diferencial"
+- "benchmark"        → "índice de referencia"
+- "default"          → "incumplimiento"
+- "yield"            → "rendimiento"
+- "hedge/hedging"    → "cobertura"
+- "rating"           → "calificación crediticia"
+- "cash flow"        → "flujo de caja"
+- "de-risking"       → "reducción de riesgo"
+- "mark-to-market"   → "valoración a mercado"
+- "duration"         → "duración"
+- "leverage"         → "apalancamiento"
+- "drawdown"         → "caída acumulada"
+- "collateral"       → "garantía"
+- "callable"         → "redimible anticipadamente"
+- "rollover"         → "renovación"
+- "repricing"        → "reajuste de tasa"
+- "underwriting"     → "suscripción"
+
+--------------------------------------------------
 REGLAS FUNDAMENTALES
 --------------------------------------------------
 

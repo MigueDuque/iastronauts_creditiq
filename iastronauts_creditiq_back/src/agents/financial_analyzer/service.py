@@ -230,10 +230,16 @@ class FinancialAnalyzerService:
             VariationReliability.EXTREME_VARIATION,
             VariationReliability.PERIOD_LENGTH_MISMATCH,
         }
+        # Movement rows (cash-flow / equity-changes statements) are period flows,
+        # not closing positions — their period-over-period % is economically
+        # meaningless (e.g. opening NAV +381% YoY, contributions +238%), so they
+        # must never be flagged as anomalies. Their magnitude is still surfaced
+        # through the dedicated fund-flow / cash-flow paths.
         anomalies: dict[str, AnomalyResult] = {
             v.account_id: (
                 AnomalyResult(anomaly_detected=False)
                 if reliabilities[v.account_id].reliability in _SKIP_ANOMALY
+                or is_cash_flow_account(v)
                 else detect_account_anomaly(v, threshold, trends[v.account_id])
             )
             for v in variations
@@ -1001,7 +1007,13 @@ class FinancialAnalyzerService:
             # it as a real signal. Set to None — meaning "no meaningful %" — so it is
             # distinguishable from a literal 0.0 change. reliability_label carries the
             # explanation and the true value (if any) stays in computation_trace.
-            safe_variation_pct = None if reliability.suppress_pct else v.variation_pct
+            # Movement rows (cash-flow / equity-changes) are also suppressed: the %
+            # change of a period flow vs the prior period (e.g. contributions +238%,
+            # opening NAV +381%) is not an economically interpretable variation.
+            safe_variation_pct = (
+                None if (reliability.suppress_pct or is_cash_flow_account(v))
+                else v.variation_pct
+            )
 
             h = (hierarchy or {}).get(v.account_id)
 
@@ -1037,6 +1049,8 @@ class FinancialAnalyzerService:
                 statement_role=h.statement_role if h else "primary_line",
                 parent_account_id=h.parent_account_id if h else None,
                 is_leaf=h.is_leaf if h else True,
+                statement_type=getattr(v, "statement_type", None),
+                source_sheet=getattr(v, "source_sheet", None),
             ))
 
         return results

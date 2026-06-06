@@ -55,6 +55,8 @@ Respond with **ONLY** a valid JSON object. No preamble, no explanation, no markd
 
 **Rules:**
 
+- Write ALL content in formal Colombian Spanish. Never use English financial terms in the output prose.
+  Mandatory translations: "fair value" → "valor razonable" | "spread" → "diferencial" | "benchmark" → "índice de referencia" | "default" → "incumplimiento" | "yield" → "rendimiento" | "hedge/hedging" → "cobertura" | "rating" → "calificación crediticia" | "cash flow" → "flujo de caja" | "de-risking" → "reducción de riesgo" | "mark-to-market" → "valoración a mercado" | "duration" → "duración" | "leverage" → "apalancamiento" | "drawdown" → "caída acumulada" | "collateral" → "garantía" | "callable" → "redimible anticipadamente" | "rollover" → "renovación".
 - Every field in the input list **MUST** appear as a key in your output JSON.
 - Values must be plain strings. Use `\n` for paragraph breaks where needed.
 - Do **NOT** include fields not present in the input list.

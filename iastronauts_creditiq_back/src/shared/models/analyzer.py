@@ -79,6 +79,16 @@ class AccountAnalysis(BaseModel):
     # position safe to use for concentration/position-level aggregation.
     is_leaf: bool = True
 
+    # ── Statement provenance (propagated from the extractor) ──────────────────
+    # Carried through so downstream consumers (RiskScorer, ReportGenerator) can
+    # apply the movement-account predicate (is_cash_flow_account) reliably on the
+    # explicit statement_type instead of falling back to fragile name matching.
+    # "cash_flow" and "equity_changes" rows are period movements, not closing
+    # positions — they must NOT enter material-variation / anomaly / top-variation
+    # rankings (their period-over-period % is economically meaningless).
+    statement_type: str | None = None  # balance_sheet | income_statement | cash_flow | equity_changes
+    source_sheet: str | None = None    # Excel sheet name (None for PDF/CSV)
+
     # ── Computation audit trail ───────────────────────────────────────────────
     # Deterministic trace of every formula used to produce this account's values.
     # Keys: absolute_variation, variation_pct, materiality_threshold,

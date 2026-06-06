@@ -96,7 +96,22 @@ async def create_analysis(request: Request):
 @app.get("/analyses/{analysis_id}")
 async def get_status(analysis_id: str, request: Request):
     from api.analysis_status.handler import lambda_handler
-    result = lambda_handler(_event(request, None, {"analysis_id": analysis_id}), None)
+
+    event = _event(request, None, {"analysis_id": analysis_id})
+
+    # Local dev: look up the stored tenant_id and inject it so the ownership
+    # check in analysis_status passes even when the job was created in the cloud
+    # with a real Cognito tenant_id instead of the local x-tenant-id header value.
+    try:
+        from shared.job_store import load as _job_load, TENANT as _TENANT
+        _td = _job_load(analysis_id, _TENANT)
+        _tid = _td.get("tenant_id")
+        if _tid:
+            event["headers"]["x-tenant-id"] = _tid
+    except Exception:
+        pass
+
+    result = lambda_handler(event, None)
 
     body = result.get("body", "{}")
     if isinstance(body, str):
