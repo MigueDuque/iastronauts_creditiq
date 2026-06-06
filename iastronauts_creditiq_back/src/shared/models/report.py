@@ -48,3 +48,14 @@ class FinalReportOutput(BaseModel):
     risk_categories: dict = {}
     # LLM risk narrative: paragraphs + category_narratives + recommendations + headline
     risk_summary: dict = {}
+
+    # ── Comparative period basis (propagated from ExtractorOutput) ───────────
+    comparative_basis: dict = {}
+
+    # ── Fund Policy Assessment (Sprint 2 Item 1, propagated from Analyzer) ───
+    # Per-dimension status vs. regulatory/internal limits. Empty for non-fund entities.
+    fund_policy_assessment: dict = {}
+
+    # ── Top Variations with period labels (Sprint 2 Item 5) ──────────────────
+    # Top 15 non-cash-flow accounts by |absolute_variation|, with explicit period labels.
+    top_variations: list[dict] = []

@@ -1,0 +1,5 @@
+{
+  "stage": "scale_normalization",
+  "input": "input.json",
+  "description": "Document with 'Cifras en miles de COP' — values in thousands, must be divided by 1000 to reach MM. Canonical totals must match scale_millions case."
+}

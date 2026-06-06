@@ -1,0 +1,13 @@
+{
+  "description": "Mid-year (Jun 2025) statement: balance_sheet must compare to Dec 2024 (prior_year_end); income_statement and cash_flow must compare to Jun 2024 (same_period_prior_year).",
+  "metrics": {
+    "balance_sheet_rule": "prior_year_end",
+    "balance_sheet_comparative": "2024-12",
+    "income_statement_rule": "same_period_prior_year",
+    "income_statement_comparative": "2024-06",
+    "cash_flow_rule": "same_period_prior_year",
+    "current": "2025-06",
+    "has_mismatch_warning": true
+  },
+  "tolerances": {}
+}

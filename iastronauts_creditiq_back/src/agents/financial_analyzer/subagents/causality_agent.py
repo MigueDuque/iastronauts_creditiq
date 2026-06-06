@@ -77,6 +77,8 @@ def _build_prompt(
     fund_analysis: dict | None,
     business_context_snippet: str,
     macro_context: dict | None,
+    policy_clauses: str = "",
+    comparative_basis: dict | None = None,
 ) -> str:
     top_accounts = sorted(
         [v for v in variations if materialities.get(v.account_id, MaterialityLevel.LOW) in _HIGH_PRIORITY],
@@ -88,6 +90,24 @@ def _build_prompt(
         f"EMPRESA: {company_name} | PERÍODOS: {' vs '.join(periods)}",
         f"CONTEXTO: {business_context_snippet[:300]}",
     ]
+
+    # Period-homogeneity warning — critical for not misinterpreting flow accounts
+    if comparative_basis:
+        is_basis = comparative_basis.get("income_statement", {})
+        cf_basis = comparative_basis.get("cash_flow", {})
+        if not is_basis.get("periods_homogeneous", True) or not cf_basis.get("periods_homogeneous", True):
+            curr_m = is_basis.get("current_period_months") or cf_basis.get("current_period_months", "?")
+            comp_m = is_basis.get("comparative_period_months") or cf_basis.get("comparative_period_months", "?")
+            factor = is_basis.get("annualization_factor") or cf_basis.get("annualization_factor", "?")
+            lines.append(
+                f"\n⚠️  ADVERTENCIA CRÍTICA DE PERÍODO: El estado de resultados y flujo de caja "
+                f"cubren {curr_m} meses; el período comparativo cubre {comp_m} meses. "
+                f"Las cuentas marcadas [WARN:Períodos no homogéneos] NO representan cambios reales "
+                f"de actividad — la variación refleja la diferencia de duración. "
+                f"Factor de anualización: {factor}x (valor actual × {factor} = equivalente anual). "
+                f"OBLIGATORIO: Para estas cuentas, NO uses la variación % como evidencia de tendencia. "
+                f"Usa el valor absoluto actual y el factor de anualización como contexto."
+            )
 
     # Movement intelligence output
     if movement_result.key_movements:
@@ -120,6 +140,15 @@ def _build_prompt(
             lines.append("  NUEVAS: " + ", ".join(p.get("name", "") for p in new_pos[:3]))
         if closed_pos:
             lines.append("  CERRADAS: " + ", ".join(p.get("name", "") for p in closed_pos[:3]))
+
+    # Fund policy clauses (from tenant policy document — Sprint 3 Item 8)
+    if policy_clauses:
+        lines.append(
+            "\nPOLÍTICA DE INVERSIÓN (RESTRICCIONES REGULATORIAS):\n"
+            + policy_clauses[:1_500]
+            + "\nINSTRUCCIÓN: Usa estas cláusulas como evidencia de tipo 'policy' (ref=cláusula) "
+            "cuando identifiques que una posición respeta o supera un límite definido."
+        )
 
     # Compact macro context
     if macro_context:
@@ -156,12 +185,22 @@ def _build_prompt(
             )
 
     lines.append(
-        '\nINSTRUCCIÓN: Devuelve JSON con:\n'
-        '{"account_causality":[{"account_id":"...","possible_causes":["causa1","causa2"],'
-        '"executive_insight":"...","linked_accounts":[],"confidence":0.8}],'
-        '"cross_account_dynamics":[{"explanation":"...","impacted_accounts":[],"confidence":0.7}]}\n'
-        'REGLA: possible_causes DEBEN ser causas estratégicas específicas (2-3 por cuenta). '
-        'PROHIBIDO repetir porcentajes. OBLIGATORIO referenciar emisores, flujos o contexto estratégico.'
+        '\nINSTRUCCIÓN — EVIDENCIA PRIMERO (Evidence First):\n'
+        'Cada causa debe estar respaldada por evidencia concreta. '
+        'Si no existe evidencia suficiente, escribe EXACTAMENTE: '
+        '"No existe evidencia suficiente para determinar la causa de esta variación." '
+        'NUNCA inventes causas especulativas sin evidencia.\n\n'
+        'Devuelve JSON con:\n'
+        '{"account_causality":[{"account_id":"...","possible_causes":["causa1 (evidencia: [account_id])"],'
+        '"executive_insight":"...","linked_accounts":["act-001"],"confidence":0.8,'
+        '"evidence":[{"claim":"causa estratégica","evidence_type":"account","ref":"act-001"}]}],'
+        '"cross_account_dynamics":[{"explanation":"...","impacted_accounts":[],"confidence":0.7}]}\n\n'
+        'REGLAS:\n'
+        '- evidence_type: "account" (ref=account_id) | "variation" (ref=account_id) | '
+        '"news" (ref=titular) | "policy" (ref=cláusula) | "note" (ref=NIIF estándar)\n'
+        '- ref SIEMPRE debe identificar el dato concreto que sustenta la causa.\n'
+        '- possible_causes DEBEN ser causas estratégicas específicas (2-3 por cuenta).\n'
+        '- PROHIBIDO repetir porcentajes crudos. OBLIGATORIO referenciar emisores, flujos o contexto.'
     )
     return "\n".join(lines)
 
@@ -185,12 +224,22 @@ def _parse(raw: dict) -> CausalityAnalysisResult:
             continue
         try:
             causes = [str(c)[:300] for c in item.get("possible_causes", []) if c][:3]
+            evidence = []
+            for e in item.get("evidence", []):
+                if not isinstance(e, dict):
+                    continue
+                claim = str(e.get("claim", ""))[:300]
+                ev_type = str(e.get("evidence_type", ""))
+                ref = str(e.get("ref", ""))[:200]
+                if claim and ev_type:
+                    evidence.append({"claim": claim, "evidence_type": ev_type, "ref": ref})
             account_causality.append(AccountCausality(
                 account_id=str(item["account_id"]),
                 possible_causes=causes,
                 executive_insight=str(item.get("executive_insight", ""))[:350],
                 linked_accounts=[str(a) for a in item.get("linked_accounts", []) if a],
                 confidence=min(max(float(item.get("confidence", 0.8)), 0.0), 1.0),
+                evidence=evidence,
             ))
         except Exception:
             continue
@@ -228,13 +277,16 @@ def run_causality_analysis(
     fund_analysis: dict | None = None,
     business_context_snippet: str = "",
     macro_context: dict | None = None,
+    policy_clauses: str = "",
+    comparative_basis: dict | None = None,
 ) -> CausalityAnalysisResult:
     """Explain WHY movements occurred. Returns empty result on failure."""
     try:
         system_prompt = _get_prompt()
         user_prompt = _build_prompt(
             company_name, periods, variations, materialities, reliabilities,
-            movement_result, causality_chains, fund_analysis, business_context_snippet, macro_context,
+            movement_result, causality_chains, fund_analysis, business_context_snippet,
+            macro_context, policy_clauses, comparative_basis,
         )
         logger.info("causality_start | job=%s prompt_chars=%d", job_id, len(user_prompt))
         raw = _call_llm(system_prompt, user_prompt, llm, tenant_id, job_id)

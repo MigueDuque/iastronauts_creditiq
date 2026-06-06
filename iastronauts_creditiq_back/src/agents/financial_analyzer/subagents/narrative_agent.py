@@ -65,6 +65,8 @@ def _build_prompt(
     thesis_result: FinancialThesisResult,
     movement_result: MovementIntelligenceResult,
     causality_result: CausalityAnalysisResult,
+    comparative_basis: dict | None = None,
+    policy_clauses: str = "",
 ) -> str:
     lines = [
         f"EMPRESA: {company_name} | PERÍODOS: {' vs '.join(periods)}",
@@ -104,6 +106,18 @@ def _build_prompt(
         for r in movement_result.portfolio_rotations[:2]:
             lines.append(f"  - {r.rationale}")
 
+    if comparative_basis:
+        lines.append("\nBASES COMPARATIVAS IFRS (obligatorio para nombrar períodos en variaciones):")
+        for stmt, entry in comparative_basis.items():
+            cur = entry.get("current", "?")
+            comp = entry.get("comparative", "?")
+            rule = entry.get("rule", "?")
+            lines.append(f"  {stmt}: {cur} vs {comp} [{rule}]")
+
+    if policy_clauses:
+        lines.append("\nPOLÍTICA DE INVERSIÓN (referencia para contexto regulatorio en la narrativa):")
+        lines.append(policy_clauses[:1_000])
+
     lines.append(
         '\nINSTRUCCIÓN: Devuelve JSON con:\n'
         '{"executive_narrative":"(3-4 oraciones, nivel junta directiva)",'
@@ -112,7 +126,10 @@ def _build_prompt(
         '"niif_notes_required":["NIIF 9","NIC 28"],'
         '"narrative_layers":{"executive":"...","tactical":"...","technical":"..."}}\n'
         'ESTILO: Castellano institucional colombiano. Formal. Accionable. Sin jerga técnica excesiva.\n'
-        'niif_notes_required: solo estándares NIIF/NIC reales. Omitir si no aplica.'
+        'niif_notes_required: solo estándares NIIF/NIC reales. Omitir si no aplica.\n'
+        'REGLA DE PERÍODOS: Al mencionar cualquier variación, siempre nombra ambos períodos usando '
+        'comparative_basis. Ejemplo: "entre junio 2025 y diciembre 2024" para balance, '
+        '"entre junio 2025 y junio 2024" para estado de resultados. Nunca inventes la base comparativa.'
     )
     return "\n".join(lines)
 
@@ -158,6 +175,8 @@ def run_executive_narrative(
     llm: LLMProvider,
     tenant_id: str,
     job_id: str,
+    comparative_basis: dict | None = None,
+    policy_clauses: str = "",
 ) -> ExecutiveNarrativeResult:
     """Generate executive narrative from pre-computed intelligence. Returns empty result on failure."""
     try:
@@ -165,6 +184,8 @@ def run_executive_narrative(
         user_prompt = _build_prompt(
             company_name, periods, business_context_snippet,
             thesis_result, movement_result, causality_result,
+            comparative_basis=comparative_basis,
+            policy_clauses=policy_clauses,
         )
         logger.info("narrative_start | job=%s prompt_chars=%d", job_id, len(user_prompt))
         raw = _call_llm(system_prompt, user_prompt, llm, tenant_id, job_id)

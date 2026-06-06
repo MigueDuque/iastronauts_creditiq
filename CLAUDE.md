@@ -32,6 +32,29 @@ Set `LOCAL_DEV_BYPASS_SFN=true` in `.env` to run Agent 1 in a background thread,
 
 ---
 
+## Testing
+
+```bash
+# From iastronauts_creditiq_back/
+pytest tests/                          # smoke + template + remediation + eval cases
+python -m tests.eval.runner            # engine eval scorecard (exit 1 on regression)
+python -m tests.eval.runner --update   # re-snapshot golden after an INTENTIONAL engine change
+```
+
+**Engine eval harness (`tests/eval/`)** — scored regression check that replaces "run one
+analysis and eyeball it". Each golden case runs through the real deterministic code path
+(no LLM, no AWS) and diffs `probes` (per-dimension scores/levels, composite, risk
+categories) against a recorded `expected.json` snapshot. After an intended engine change,
+`--update` and **review the `git diff` of `expected.json` — that diff is the review**. An
+unintended probe move is the regression it exists to catch (guards the multi-engine
+fan-out, e.g. sheet double-count). Add cases under `cases/<name>/` (`meta.json` + stage
+input `input.json`). See `tests/eval/README.md`.
+
+The deterministic core of an agent should be a pure, LLM/S3-free function the eval can call
+(pattern: `risk_scorer/scoring.py::compute_risk`, shared with `handler.py`).
+
+---
+
 ## Architecture
 
 Sequential Step Functions pipeline (`step_functions/analysis_workflow.json`):

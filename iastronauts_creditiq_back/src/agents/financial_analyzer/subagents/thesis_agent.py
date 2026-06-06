@@ -77,6 +77,7 @@ def _build_prompt(
     ratios_dict: dict,
     macro_context: dict | None,
     financial_diagnostics: dict | None,
+    policy_clauses: str = "",
 ) -> str:
     lines = [f"EMPRESA: {company_name} | PERÍODOS: {' vs '.join(periods)}"]
 
@@ -143,6 +144,10 @@ def _build_prompt(
             macro_parts.append("sectores: " + ", ".join(str(s)[:40] for s in sector_ctx[:2]))
         if macro_parts:
             lines.append("\nCONTEXTO MACRO: " + " | ".join(macro_parts))
+
+    if policy_clauses:
+        lines.append("\nPOLÍTICA DE INVERSIÓN (fuente autorizada — restringe interpretación estratégica):")
+        lines.append(policy_clauses[:1_500])
 
     # Pre-computed cross-statement diagnostic signals (inputs for cross_statement_signals output)
     if financial_diagnostics:
@@ -276,6 +281,7 @@ def run_financial_thesis(
     ratios_dict: dict | None = None,
     macro_context: dict | None = None,
     financial_diagnostics: dict | None = None,
+    policy_clauses: str = "",
 ) -> FinancialThesisResult:
     """Transform causal findings into strategic interpretation. Returns safe default on failure."""
     try:
@@ -284,6 +290,7 @@ def run_financial_thesis(
             company_name, periods, movement_result, causality_result,
             executive_synthesis, earnings_quality, concentration, ratios_dict or {},
             macro_context, financial_diagnostics,
+            policy_clauses=policy_clauses,
         )
         logger.info("thesis_start | job=%s prompt_chars=%d", job_id, len(user_prompt))
         raw = _call_llm(system_prompt, user_prompt, llm, tenant_id, job_id)

@@ -367,6 +367,9 @@ class TestAgentImports:
     def test_revisor_inteligente_imports(self):
         import agents.revisor_inteligente.handler  # noqa: F401
 
+    def test_management_report_imports(self):
+        import agents.management_report.handler  # noqa: F401
+
 
 # ── Shared model integrity ─────────────────────────────────────────────────────
 

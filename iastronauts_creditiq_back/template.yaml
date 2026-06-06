@@ -20,6 +20,13 @@ Parameters:
     # llm_provider.py (~4x the cost). Override per-deploy if a richer model is
     # wanted for the analytical agents.
     Default: claude-haiku-4-5-20251001
+  LlmModelExtractor:
+    Type: String
+    # Per-agent override for the DocumentExtractor (Agent 1). Extraction is mechanical
+    # JSON normalization and is the single most expensive LLM call in the pipeline
+    # (largest output). Keep it on cheap Haiku even when LlmModel is bumped to a richer
+    # model for the analytical agents. handler.py reads this via LLM_MODEL_EXTRACTOR.
+    Default: claude-haiku-4-5-20251001
   AnthropicApiKey:
     Type: String
     NoEcho: true
@@ -791,6 +798,11 @@ Resources:
       Role: !GetAtt AgentLambdaRole.Arn
       Timeout: 300
       MemorySize: 512
+      # Merged with the global Environment.Variables (SAM unions the maps).
+      # Pins extraction to the cheap model independent of LlmModel.
+      Environment:
+        Variables:
+          LLM_MODEL_EXTRACTOR: !Ref LlmModelExtractor
 
   AnalyzerFunction:
     Type: AWS::Serverless::Function

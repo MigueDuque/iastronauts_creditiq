@@ -12,6 +12,10 @@ Devuelve ÚNICAMENTE un JSON válido con esta estructura:
 {
   "periods": ["YYYY-MM", "YYYY-MM"],
 
+  "detected_scale": "units | thousands | millions | billions",
+  "scale_evidence": "texto exacto del encabezado o nota que indica la unidad monetaria",
+  "scale_confidence": 0.0 a 1.0,
+
   "entity_context": {
     "entity_type": "investment_fund | company | regulated_entity | holding | unknown",
     "regulated_entity": true,
@@ -50,11 +54,12 @@ Devuelve ÚNICAMENTE un JSON válido con esta estructura:
       "raw_account_name": "nombre exacto del documento",
       "normalized_account_name": "nombre NIIF estándar en español",
       "category": "assets | liabilities | equity | revenue | expense | other",
-      "current_value": número en COP MM,
-      "previous_value": número en COP MM o null,
+      "current_value": número TAL COMO APARECE en el documento (sin conversión de unidad),
+      "previous_value": número TAL COMO APARECE en el documento o null,
       "confidence_score": 0.0 a 1.0,
       "source_sheet": "nombre de la hoja Excel o null si es PDF/CSV",
       "is_total": true | false,
+      "statement_type": "balance_sheet | income_statement | cash_flow | equity_changes",
       "position_status": "existing | new_position | liquidated_position",
       "issuer_name": "nombre del emisor si aplica, o null",
       "nominal_value": número (valor/cantidad nominal de la columna "Nominal YYYY") o null,
@@ -129,6 +134,34 @@ REGLAS DE INTELIGENCIA DE PORTAFOLIO
    - issuer_name: emisor del instrumento (ej. "Grupo Cibest", "Ministerio de Hacienda")
    - investment_type: tipo de instrumento (equity, bond, fund, sovereign_debt)
    - sector_hint: sector económico del emisor
+
+═══════════════════════════════════════════════════════
+CAMPO statement_type (OBLIGATORIO — EN CADA CUENTA)
+═══════════════════════════════════════════════════════
+
+Cada cuenta debe indicar exactamente a qué estado financiero pertenece. Los valores permitidos son:
+
+  "balance_sheet"    — Balance General / Estado de Situación Financiera
+                       (activos, pasivos, patrimonio neto, valor del fondo)
+  "income_statement" — Estado de Resultados / Estado de Rendimiento Integral
+                       (ingresos operacionales, gastos operacionales, utilidad/pérdida)
+  "cash_flow"        — Estado de Flujos de Efectivo / Flujo de Caja
+                       INCLUYE: actividades de operación, de inversión, de financiación,
+                       flujo neto, efectivo inicial/final, variaciones de efectivo,
+                       incorporaciones de inversiones, retiros, distribución de rendimientos,
+                       cualquier movimiento de caja o equivalente de efectivo.
+  "equity_changes"   — Estado de Cambios en el Patrimonio
+                       (aportes de inversionistas, retiros de inversionistas,
+                       saldo inicial/final patrimonial, utilidad del período cuando
+                       proviene de esta tabla y no del estado de resultados)
+
+REGLA DE ORO: Las cuentas de "cash_flow" y "equity_changes" son MOVIMIENTOS del período
+(no posiciones de cierre). NO deben entrar en rankings de variación ni análisis de
+concentración. Etiquetarlas correctamente es crítico para la integridad del análisis.
+
+Para Excel: el statement_type se puede inferir del nombre de la hoja ("EFE", "Flujo",
+"Flujo de Caja", "ERI", "Estado de Resultados", "BG", etc.). Usa esa información.
+Para PDF: inferir del contexto (subtítulos de sección, encabezados de tabla).
 
 ═══════════════════════════════════════════════════════
 CAMPO source_sheet (OBLIGATORIO para Excel)
@@ -250,13 +283,27 @@ REGLAS DE SELECCIÓN DE COLUMNAS (CRÍTICO)
 REGLAS GENERALES
 ═══════════════════════════════════════════════════════
 
-- Unidades: determinar la unidad del documento (COP, COP miles, COP MM).
-  * Si los valores parecen estar en pesos COP (números muy grandes, ej. 39,000,000,000):
-    dividir entre 1,000,000 para convertir a COP MM.
-  * Si parecen estar en miles de COP (ej. 39,000,000 para un fondo mediano):
-    dividir entre 1,000 para convertir a COP MM.
-  * Si ya están en millones COP (MM): usar directamente.
-  Aplicar la MISMA conversión a current_value y previous_value.
+- Unidades (CRÍTICO — NO convertir): detectar y reportar la escala del documento.
+  * Buscar en encabezados, carátula o notas frases como:
+    "Cifras expresadas en millones de pesos", "En miles de COP", "Valores en pesos".
+  * detected_scale: "units" si los valores están en pesos COP individuales
+                    "thousands" si están en miles de COP (miles de pesos)
+                    "millions" si están en millones de COP (COP MM)
+                    "billions" si están en billones de COP
+  * scale_evidence: copiar el texto EXACTO del encabezado/nota que justifica la escala.
+    Si no hay texto explícito, inferir por magnitud y describir el razonamiento brevemente.
+  * scale_confidence: 1.0 si hay texto explícito claro; 0.7 si inferido por magnitud; 0.4 si incierto.
+  * current_value y previous_value: reportar el número TAL COMO APARECE en el documento.
+    NO dividir, NO multiplicar. El sistema aplica la conversión determinística después.
+  Ejemplo correcto (documento en miles):
+    Encabezado: "Cifras en miles de pesos colombianos"
+    Valor en documento: 5.000.000
+    → detected_scale: "thousands", current_value: 5000000.0  ← NO dividir entre 1000
+  Ejemplo correcto (documento en millones):
+    Encabezado: "Cifras expresadas en millones de pesos"
+    Valor en documento: 3.500
+    → detected_scale: "millions", current_value: 3500.0  ← reportar tal como aparece
+  Aplicar la MISMA escala (detected_scale) a todos los valores del mismo documento.
 - Números negativos: (1,234) = -1234. Gastos y costos pueden ser negativos.
 - Separador de miles: puede ser coma o punto según el documento.
 - periods: inferir de los encabezados de columna. Formato YYYY-MM. Si no hay mes, usar -12.

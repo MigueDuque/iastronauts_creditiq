@@ -1,0 +1,10 @@
+{
+  "description": "Document with 'Cifras en miles de COP' — values in thousands, must be divided by 1000 to reach MM. Canonical totals must match scale_millions case.",
+  "metrics": {
+    "asset_total_cop_mm": 4000.0,
+    "equity_total_cop_mm": 3900.0,
+    "account_count": 3,
+    "detected_scale": "thousands"
+  },
+  "tolerances": {}
+}

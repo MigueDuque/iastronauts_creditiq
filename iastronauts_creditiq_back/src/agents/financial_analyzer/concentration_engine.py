@@ -9,29 +9,7 @@ Pure deterministic — no LLM.
 from dataclasses import dataclass, field
 
 from .ratio_engine import AccountVariation, FinancialTotals
-
-# Cash-flow and flow-statement accounts contaminate portfolio concentration metrics.
-# Flows are NOT positions — excluding them gives a correct picture of holdings.
-_CASH_FLOW_KEYWORDS: tuple[str, ...] = (
-    "flujo de efectivo",
-    "flujo neto",
-    "cash flow",
-    "efectivo inicial",
-    "efectivo final",
-    "aumento neto de efectivo",
-    "net cash",
-    "variación de efectivo",
-    "flujo de caja",
-    "flujo neto de",
-    "aportes de inversionistas",
-    "retiros de inversionistas",
-    "patrimonio neto inicial",
-    "patrimonio neto final",
-    "utilidad del período",
-    "ganancia del período",
-    "pérdida del período",
-    "resultado del período",
-)
+from shared.financial_math import is_cash_flow_account
 
 
 def _is_portfolio_position(variation: AccountVariation) -> bool:
@@ -44,8 +22,8 @@ def _is_portfolio_position(variation: AccountVariation) -> bool:
     # (which by the accounting identity sum to ≈ assets) is what produced top-3 > 100%.
     if variation.category.lower() != "assets":
         return False
-    name = variation.account_name.lower()
-    if any(kw in name for kw in _CASH_FLOW_KEYWORDS):
+    # Cash-flow statement rows are movements, not positions — use shared predicate.
+    if is_cash_flow_account(variation):
         return False
     # Negative values are typical of flows/expenses, not balance-sheet positions
     if variation.current_value < 0:

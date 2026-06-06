@@ -16,54 +16,14 @@ import logging
 from dataclasses import asdict
 
 from shared.llm_provider import LLMProvider
-from shared.models import AnalyzerOutput, ScorerOutput, RiskLevel
+from shared.models import AnalyzerOutput, ScorerOutput
 from shared.job_store import save as job_save, RISK_SCORER
 
-from .liquidity_engine import score_liquidity
-from .credit_engine import score_credit
-from .solvency_engine import score_solvency
-from .market_risk_engine import score_market_risk
-from .operational_engine import score_operational
-from .composite_scorer import compute_composite, build_risk_categories
+from .scoring import compute_risk
 from .llm_reasoning import generate_risk_narrative
 
 logger = logging.getLogger("risk_scorer")
 logger.setLevel(logging.INFO)
-
-
-def _is_investment_fund(payload: AnalyzerOutput) -> bool:
-    fund = payload.fund_analysis or {}
-    if fund.get("is_investment_fund"):
-        return True
-    company = (payload.company_name or "").lower()
-    return any(kw in company for kw in ("fondo", "fund", "p.acciones", "acciones", "renta", "liquidez"))
-
-
-def _enrich_business_context(payload: AnalyzerOutput, is_fund: bool):
-    """Fill business_context fields the pipeline can derive itself.
-
-    `analysis_confidence` weights `input_quality` (completeness of business_context) at
-    25%. `fiscal_year` and `industry` were arriving null on every run — even though both
-    are derivable from data already in hand — which forced input_quality to 0.0 and dragged
-    the documented confidence down to ~59% ("Confianza Baja") regardless of the actual
-    analysis quality. Derive them here so the score reflects what is genuinely known;
-    `strategic_context` is left untouched because it truly requires a human analyst.
-    """
-    bc = payload.business_context
-    if bc is None:
-        return bc
-
-    # fiscal_year ← reporting_period or the most recent period (both are "YYYY-MM").
-    if not getattr(bc, "fiscal_year", None):
-        ref = getattr(bc, "reporting_period", None) or (payload.periods[0] if payload.periods else None)
-        if ref and len(ref) >= 4 and ref[:4].isdigit():
-            bc.fiscal_year = ref[:4]
-
-    # industry ← deterministic label when the entity is an investment fund.
-    if not getattr(bc, "industry", None) and is_fund:
-        bc.industry = "Fondo de inversión / gestión de activos"
-
-    return bc
 
 
 def lambda_handler(event: dict, context) -> dict:
@@ -74,65 +34,18 @@ def lambda_handler(event: dict, context) -> dict:
     payload = AnalyzerOutput.model_validate(event)
     logger.info("RiskScorer: job_id=%s company=%s", payload.job_id, payload.company_name)
 
-    analysis_list = [a.model_dump() for a in payload.analysis_results]
-    is_fund = _is_investment_fund(payload)
-    _enrich_business_context(payload, is_fund)
-    sheet_concentration = payload.sheet_concentration or {}
-
-    # ─── 1. Run 5 deterministic risk engines ──────────────────────────────────
-    liquidity = score_liquidity(
-        financial_ratios=payload.financial_ratios,
-        executive_synthesis=payload.executive_synthesis,
-        fund_analysis=payload.fund_analysis,
-        analysis_results=analysis_list,
-        is_investment_fund=is_fund,
+    # ─── 1+2. Deterministic engines + composite (pure core, shared with eval) ──
+    comp = compute_risk(payload)
+    is_fund = comp.is_fund
+    liquidity, credit, solvency, market, operational = (
+        comp.liquidity, comp.credit, comp.solvency, comp.market, comp.operational
     )
-
-    credit = score_credit(
-        financial_ratios=payload.financial_ratios,
-        analysis_results=analysis_list,
-        fund_analysis=payload.fund_analysis,
-        is_investment_fund=is_fund,
-        sheet_concentration=sheet_concentration,
-    )
-
-    solvency = score_solvency(
-        financial_ratios=payload.financial_ratios,
-        analysis_results=analysis_list,
-    )
-
-    market = score_market_risk(
-        financial_ratios=payload.financial_ratios,
-        earnings_quality=payload.earnings_quality,
-        portfolio_concentration=payload.portfolio_concentration,
-        fund_analysis=payload.fund_analysis,
-        analysis_results=analysis_list,
-        is_investment_fund=is_fund,
-        sheet_concentration=sheet_concentration,
-        currency=payload.currency,
-    )
-
-    operational = score_operational(
-        financial_ratios=payload.financial_ratios,
-        analysis_results=analysis_list,
-    )
+    composite = comp.composite
+    risk_categories = comp.risk_categories
 
     logger.info(
         "Risk scores — liquidity:%d credit:%d solvency:%d market:%d operational:%d",
         liquidity.score, credit.score, solvency.score, market.score, operational.score,
-    )
-
-    # ─── 2. Composite score + anti-hallucination ───────────────────────────────
-    composite = compute_composite(
-        liquidity=liquidity,
-        credit=credit,
-        solvency=solvency,
-        market=market,
-        operational=operational,
-        analysis_results=analysis_list,
-        financial_ratios=payload.financial_ratios,
-        is_investment_fund=is_fund,
-        business_context=payload.business_context,
     )
 
     # Mejora 6: propagate anti-hallucination failures onto the affected accounts
@@ -154,15 +67,6 @@ def lambda_handler(event: dict, context) -> dict:
         composite.overall_risk_score.value,
         composite.validation_score,
         composite.requires_human_review,
-    )
-
-    # ─── 2b. Report-facing risk categories (Crédito / Mercado / Financiero) ────
-    risk_categories = build_risk_categories(
-        liquidity=liquidity,
-        credit=credit,
-        solvency=solvency,
-        market=market,
-        operational=operational,
     )
 
     # ─── 3. LLM risk narrative ─────────────────────────────────────────────────
@@ -274,6 +178,9 @@ def lambda_handler(event: dict, context) -> dict:
         risk_summary=risk_summary,
         fund_context_adjusted=is_fund,
         computation_trace=composite.computation_trace,
+        comparative_basis=payload.comparative_basis,
+        fund_policy_assessment=payload.fund_policy_assessment,
+        top_variations=payload.top_variations,
     )
 
     logger.info("RiskScorer complete: overall_risk=%s", result.overall_risk_score.value)

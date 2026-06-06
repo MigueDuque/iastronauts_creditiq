@@ -9,6 +9,7 @@ Standards covered
 ─────────────────
   NIC 1  — Presentation of Financial Statements (completeness, equation, equity)
   NIC 2  — Inventories (cost of sales linkage)
+  NIC 34 — Interim Financial Reporting (comparative base, required periods)
   CAT    — Category misclassification detection
   EXT    — Extraction quality gates (count, confidence)
 
@@ -454,6 +455,83 @@ def _rule_cat_001_misclassification(
     return flags
 
 
+# ── NIC 34 helpers ────────────────────────────────────────────────────────────
+
+def _is_interim(periods: list[str]) -> bool:
+    """Return True when the most recent period is NOT a December year-end statement."""
+    if not periods:
+        return False
+    try:
+        month = int(periods[0].split("-")[1])
+        return month != 12
+    except (IndexError, ValueError):
+        return False
+
+
+def _rule_nic34_001_requires_comparative(periods: list[str]) -> NiifValidationFlag | None:
+    """
+    NIC 34.20: an interim financial report must include a comparative period.
+    Only fires for non-December (interim) statements — year-end statements are
+    already covered by NIC1-008.
+    """
+    if not _is_interim(periods):
+        return None
+    if len(periods) < 2:
+        return NiifValidationFlag(
+            rule_id="NIC34-001",
+            standard="NIC 34",
+            severity="ERROR",
+            message=(
+                f"Estado financiero intermedio (período {periods[0] if periods else '?'}) "
+                "sin período comparativo. NIC 34.20 exige información financiera comparativa "
+                "para todos los estados intermedios. El análisis de variaciones no es posible."
+            ),
+            affected_accounts=[],
+        )
+    return None
+
+
+def _rule_nic34_002_balance_comparative_base(periods: list[str]) -> NiifValidationFlag | None:
+    """
+    NIC 34.20(b): the interim balance sheet must compare against the prior year-end
+    (December), not against the same interim date of the prior year.
+
+    Fires when both detected periods are in the same month (e.g. Jun-25 vs Jun-24)
+    AND that month is not December — the balance sheet comparison is non-standard.
+    Note: this is an INFO because the document may have deliberately chosen a different
+    comparative; the reviewer should confirm.
+    """
+    if not _is_interim(periods) or len(periods) < 2:
+        return None
+    try:
+        month_current = int(periods[0].split("-")[1])
+        month_comparative = int(periods[1].split("-")[1])
+    except (IndexError, ValueError):
+        return None
+
+    # If comparative is December it's correct; if it matches current month for balance → flag
+    if month_comparative == 12:
+        return None  # correct IFRS base
+
+    if month_current == month_comparative:
+        return NiifValidationFlag(
+            rule_id="NIC34-002",
+            standard="NIC 34",
+            severity="INFO",
+            message=(
+                f"Estado intermedio ({periods[0]}) comparado contra {periods[1]} "
+                f"(mismo mes, año anterior). "
+                "NIC 34.20(b) establece que el estado de situación financiera intermedio "
+                f"debe compararse contra el cierre del ejercicio anual anterior "
+                f"({periods[0][:4]}-12 o {int(periods[0][:4])-1}-12), no contra el intermedio previo. "
+                "El estado de resultados sí se compara contra el mismo período del año anterior. "
+                "Verifique que las variaciones de balance se interpreten con la base correcta."
+            ),
+            affected_accounts=[],
+        )
+    return None
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def validate_niif(
@@ -496,6 +574,12 @@ def validate_niif(
 
     # NIC 2
     if (f := _rule_nic2_001_inventories_without_cogs(accounts)):
+        flags.append(f)
+
+    # NIC 34 — Interim Financial Reporting
+    if (f := _rule_nic34_001_requires_comparative(periods)):
+        flags.append(f)
+    if (f := _rule_nic34_002_balance_comparative_base(periods)):
         flags.append(f)
 
     # Category misclassification

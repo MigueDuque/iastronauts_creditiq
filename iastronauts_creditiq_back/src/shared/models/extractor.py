@@ -16,6 +16,7 @@ class ExtractedAccount(BaseModel):
     source_file: str
     source_sheet: str | None = None  # Excel sheet name where this row was found (None for PDF/CSV)
     is_total: bool = False            # True when this row is a sum/subtotal/total — skip when re-summing categories
+    statement_type: str | None = None  # "balance_sheet" | "income_statement" | "cash_flow" | "equity_changes" — set by LLM during extraction
     investment_type: str | None = None  # equity | bond | sovereign_debt | trust_rights | futures | fund | cash | null
     issuer_name: str | None = None       # Emisor del instrumento financiero (ej. "Ecopetrol S.A.")
     nominal_value: float | None = None   # Valor/cantidad nominal del instrumento ("Nominal YYYY"); None si no aplica
@@ -74,3 +75,13 @@ class ExtractorOutput(BaseModel):
     fund_metadata: dict | None = None   # keys: fund_type, creation_date, administrator,
                                         # custodian, risk_profile, benchmark,
                                         # investment_policy_summary
+
+    # Monetary scale — explicit, deterministic; LLM reports raw values + scale, handler normalizes
+    detected_scale: str = "millions"      # "units" | "thousands" | "millions" | "billions"
+    scale_evidence: str = ""             # exact header/note text that justified the scale
+    scale_confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+
+    # Comparative period basis — keyed by statement type; resolved deterministically from detected periods
+    # Each entry: {current: "YYYY-MM", comparative: "YYYY-MM", rule: str}
+    # Rules: "prior_year_end" | "same_period_prior_year" | "as_presented"
+    comparative_basis: dict = Field(default_factory=dict)

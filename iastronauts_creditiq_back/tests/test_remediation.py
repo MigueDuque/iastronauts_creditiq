@@ -69,6 +69,7 @@ class _FakeAccount:
         self.current_value = current
         self.previous_value = previous
         self.source_sheet = None
+        self.statement_type = None
         self.is_total = False
 
 

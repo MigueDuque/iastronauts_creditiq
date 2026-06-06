@@ -6,6 +6,89 @@ from shared.models.base import MaterialityLevel
 logger = logging.getLogger("financial_math")
 logger.setLevel(logging.INFO)
 
+# ── Cash-flow / equity-changes exclusion ─────────────────────────────────────
+# These accounts express movements over a period, not closing positions.
+# They must not enter top-variations, materiality rankings, or concentration
+# metrics. Do NOT use this predicate in liquidity / cash-flow analysis paths.
+
+# Per-account statement_type values that are always movements, never positions.
+_MOVEMENT_STATEMENT_TYPES: frozenset[str] = frozenset({"cash_flow", "equity_changes"})
+
+_CASH_FLOW_SHEET_KEYWORDS: tuple[str, ...] = (
+    "flujo de efectivo",
+    "flujo de caja",
+    "cash flow",
+    "estado de flujos",
+    "flujos de efectivo",
+    "flujos de caja",
+    # common abbreviations used by Colombian fund administrators
+    "efe",   # Estado de Flujos de Efectivo
+    "efnc",  # Estado de Flujos No Corrientes
+    "effe",
+    "efc",   # Estado de Flujos de Caja
+)
+_CASH_FLOW_NAME_KEYWORDS: tuple[str, ...] = (
+    "flujo de efectivo",
+    "flujo neto",
+    "flujo de caja",
+    "cash flow",
+    "net cash",
+    "efectivo inicial",
+    "efectivo final",
+    "aumento neto de efectivo",
+    "variación de efectivo",
+    "flujo neto de",
+    # typical cash-flow line items in Colombian fund EEFF
+    "actividades de operación",
+    "actividades de inversión",
+    "actividades de financiación",
+    "actividades operativas",
+    "actividades de financiamiento",
+    "incorporaciones en inversiones",
+    "enajenaciones de inversiones",
+    "distribución de rendimientos",
+    "rendimientos distribuidos",
+    # equity-changes statement items (also movements, not positions)
+    "aportes de inversionistas",
+    "retiros de inversionistas",
+    "patrimonio neto inicial",
+    "patrimonio neto final",
+    "saldo inicial del período",
+    "saldo final del período",
+)
+
+
+def is_cash_flow_account(account) -> bool:
+    """
+    Return True when the account is a movement row (cash-flow or equity-changes
+    statement) — not a balance-sheet closing position.
+
+    Accepts ExtractedAccount, AccountVariation, or any object with the relevant
+    attributes. Check order (strongest signal first):
+      1. statement_type field explicitly set by the extractor LLM
+      2. source_sheet name keyword match (Excel only)
+      3. account name keyword fallback (PDF / CSV)
+    """
+    # 1. Explicit per-account type set by extractor LLM — most reliable
+    stmt = getattr(account, "statement_type", None) or ""
+    if stmt in _MOVEMENT_STATEMENT_TYPES:
+        return True
+
+    # 2. Excel sheet name (strong signal when source_sheet is present)
+    sheet = getattr(account, "source_sheet", None) or ""
+    if any(kw in sheet.lower() for kw in _CASH_FLOW_SHEET_KEYWORDS):
+        return True
+
+    # 3. Account name keywords (fallback for PDF / when statement_type is absent)
+    name = (
+        getattr(account, "normalized_account_name", None)
+        or getattr(account, "account_name", None)
+        or ""
+    )
+    return any(kw in name.lower() for kw in _CASH_FLOW_NAME_KEYWORDS)
+
+
+# ── Equity-flow exclusion ─────────────────────────────────────────────────────
 # These equity-category accounts come from the statement of changes in equity
 # (aportes, retiros, opening/closing balances, period result).  Including them
 # in total_equity double-counts values already reflected in the balance-sheet

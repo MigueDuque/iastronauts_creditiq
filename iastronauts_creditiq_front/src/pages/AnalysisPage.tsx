@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
@@ -391,6 +391,9 @@ export default function AnalysisPage() {
   const [previousJobs, setPreviousJobs] = useState<JobSummary[]>([])
   const [loadingJobs, setLoadingJobs] = useState(false)
   const [jobFilter, setJobFilter] = useState('')
+  const [statusFilter, setStatusFilter] = useState<'all' | 'completed' | 'in_progress' | 'failed'>('all')
+  const [sortMode, setSortMode] = useState<'newest' | 'oldest' | 'alpha'>('newest')
+  const [periodFilter, setPeriodFilter] = useState<string | null>(null)
   const [showRestartDialog, setShowRestartDialog] = useState(false)
   const [restartIntent, setRestartIntent] = useState<'agent2' | 'agent3' | 'agent4' | null>(null)
   const [selectedModel, setSelectedModel] = useState<string>('claude-haiku-4-5-20251001')
@@ -613,7 +616,7 @@ export default function AnalysisPage() {
   }
 
   async function openJobPicker() {
-    setShowJobPicker(true); setJobFilter(''); setLoadingJobs(true)
+    setShowJobPicker(true); setJobFilter(''); setStatusFilter('all'); setSortMode('newest'); setPeriodFilter(null); setLoadingJobs(true)
     try {
       const res = await apiFetch(`${API}/jobs`)
       if (res.ok) setPreviousJobs((await res.json()).jobs ?? [])
@@ -1961,6 +1964,94 @@ export default function AnalysisPage() {
             />
           </div>
 
+          {/* Status filter chips */}
+          {(() => {
+            const chips: { key: typeof statusFilter; label: string; color: string }[] = [
+              { key: 'all', label: 'All', color: '#94A3B8' },
+              { key: 'completed', label: 'Completed', color: '#56F2C1' },
+              { key: 'in_progress', label: 'In Progress', color: '#56CCF2' },
+              { key: 'failed', label: 'Failed', color: '#FF4D6D' },
+            ]
+            return (
+              <div className="flex flex-wrap gap-1.5 mb-3">
+                {chips.map(chip => {
+                  const active = statusFilter === chip.key
+                  return (
+                    <button
+                      key={chip.key}
+                      onClick={() => setStatusFilter(chip.key)}
+                      className="text-[10px] font-mono px-2.5 py-1 rounded transition-all"
+                      style={active
+                        ? { background: `${chip.color}22`, color: chip.color, border: `1px solid ${chip.color}60` }
+                        : { background: 'transparent', color: '#64748B', border: '1px solid var(--color-border)' }
+                      }
+                    >
+                      {chip.label}
+                    </button>
+                  )
+                })}
+              </div>
+            )
+          })()}
+
+          {/* Sort toggle */}
+          {(() => {
+            const sorts: { key: typeof sortMode; label: string; icon: string }[] = [
+              { key: 'newest', label: 'Newest', icon: 'arrow_downward' },
+              { key: 'oldest', label: 'Oldest', icon: 'arrow_upward' },
+              { key: 'alpha', label: 'A–Z', icon: 'sort_by_alpha' },
+            ]
+            return (
+              <div className="flex items-center gap-1.5 mb-3">
+                <span className="text-[9px] font-mono text-outline uppercase tracking-widest mr-1 select-none">Sort</span>
+                {sorts.map(s => {
+                  const active = sortMode === s.key
+                  return (
+                    <button
+                      key={s.key}
+                      onClick={() => setSortMode(s.key)}
+                      className="flex items-center gap-1 text-[10px] font-mono px-2 py-1 rounded transition-all"
+                      style={active
+                        ? { background: 'var(--color-primary)22', color: 'var(--color-primary)', border: '1px solid var(--color-primary)60' }
+                        : { background: 'transparent', color: '#64748B', border: '1px solid var(--color-border)' }
+                      }
+                    >
+                      <span className="material-symbols-outlined text-[11px]">{s.icon}</span>
+                      {s.label}
+                    </button>
+                  )
+                })}
+              </div>
+            )
+          })()}
+
+          {/* Period quick-filter — only when ≥2 distinct periods exist */}
+          {!loadingJobs && (() => {
+            const uniquePeriods = [...new Set(previousJobs.map(j => j.periods[0]).filter(Boolean))].sort().reverse() as string[]
+            if (uniquePeriods.length < 2) return null
+            return (
+              <div className="flex flex-wrap items-center gap-1.5 mb-3">
+                <span className="text-[9px] font-mono text-outline uppercase tracking-widest mr-1 select-none">Period</span>
+                {uniquePeriods.map(p => {
+                  const active = periodFilter === p
+                  return (
+                    <button
+                      key={p}
+                      onClick={() => setPeriodFilter(active ? null : p)}
+                      className="text-[10px] font-mono px-2.5 py-1 rounded transition-all"
+                      style={active
+                        ? { background: '#A78BFA22', color: '#A78BFA', border: '1px solid #A78BFA60' }
+                        : { background: 'transparent', color: '#64748B', border: '1px solid var(--color-border)' }
+                      }
+                    >
+                      {formatPeriod(p)}
+                    </button>
+                  )
+                })}
+              </div>
+            )
+          })()}
+
           {loadingJobs && (
             <div className="flex items-center justify-center py-10 gap-3 text-outline">
               <span className="material-symbols-outlined text-[18px] animate-spin">autorenew</span>
@@ -1973,34 +2064,93 @@ export default function AnalysisPage() {
           )}
 
           {!loadingJobs && previousJobs.length > 0 && (() => {
-            const visible = previousJobs.filter(j =>
-              !jobFilter ||
-              (j.company_name ?? '').toLowerCase().includes(jobFilter.toLowerCase()) ||
-              j.job_id.toLowerCase().includes(jobFilter.toLowerCase())
-            )
+            const IN_PROGRESS = new Set(['pending', 'processing', 'extraction_complete', 'analysis_complete', 'scoring_complete'])
+            const FAILED = new Set(['failed', 'cancelled'])
+            const visible = previousJobs.filter(j => {
+              if (statusFilter === 'completed' && j.status !== 'completed') return false
+              if (statusFilter === 'in_progress' && !IN_PROGRESS.has(j.status)) return false
+              if (statusFilter === 'failed' && !FAILED.has(j.status)) return false
+              if (periodFilter && j.periods[0] !== periodFilter) return false
+              return !jobFilter ||
+                (j.company_name ?? '').toLowerCase().includes(jobFilter.toLowerCase()) ||
+                j.job_id.toLowerCase().includes(jobFilter.toLowerCase())
+            })
+
+            const sorted = [...visible].sort((a, b) => {
+              if (sortMode === 'oldest') return a.date < b.date ? -1 : a.date > b.date ? 1 : 0
+              if (sortMode === 'alpha') {
+                const na = a.company_name ?? '￿'
+                const nb = b.company_name ?? '￿'
+                return na.localeCompare(nb, undefined, { sensitivity: 'base' })
+              }
+              return a.date > b.date ? -1 : a.date < b.date ? 1 : 0
+            })
+
+            const JobCard = ({ job }: { job: JobSummary }) => {
+              const { label: dateLabel, relative: dateRelative } = formatJobDate(job.date)
+              const periodLabel = job.periods.length >= 2
+                ? `${formatPeriod(job.periods[0])} vs ${formatPeriod(job.periods[1])}`
+                : job.periods.length === 1
+                ? formatPeriod(job.periods[0])
+                : null
+              return (
+                <button
+                  onClick={() => selectJob(job)}
+                  className="w-full text-left bg-surface-container-low hover:bg-surface-container rounded border border-border hover:border-on-surface-variant transition-all p-3.5 flex flex-col gap-1.5"
+                >
+                  {/* Row 1: name + status */}
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-body-sm font-body-sm font-semibold text-on-surface truncate flex-1">
+                      {job.company_name ?? <span className="text-outline font-mono text-[11px]">{job.job_id}</span>}
+                    </span>
+                    <StatusBadge status={job.status} />
+                  </div>
+                  {/* Row 2: period · relative date + pipeline bar */}
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 text-[10px] font-mono min-w-0">
+                      {periodLabel
+                        ? <span className="text-on-surface-variant truncate">{periodLabel}</span>
+                        : <span className="text-outline">—</span>
+                      }
+                      <span className="text-outline shrink-0">· {dateRelative} · {dateLabel}</span>
+                    </div>
+                    <PipelineBar status={job.status} />
+                  </div>
+                  {/* Row 3: job ID */}
+                  <div className="text-[9px] font-mono text-outline opacity-40 truncate">{job.job_id}</div>
+                </button>
+              )
+            }
+
+            if (sortMode === 'alpha') {
+              return (
+                <>
+                  {sorted.length === 0 && <p className="text-label-sm font-label-sm text-outline text-center py-6">No jobs match the current filters.</p>}
+                  <div className="flex flex-col gap-1.5 max-h-96 overflow-y-auto pr-1">
+                    {sorted.map(job => <JobCard key={job.job_id} job={job} />)}
+                  </div>
+                </>
+              )
+            }
+
+            const DATE_BUCKETS: DateBucket[] = ['Today', 'This week', 'This month', 'Older']
+            const grouped = new Map<DateBucket, typeof sorted>()
+            for (const job of sorted) {
+              const b = getDateBucket(job.date)
+              if (!grouped.has(b)) grouped.set(b, [])
+              grouped.get(b)!.push(job)
+            }
             return (
               <>
-                {visible.length === 0 && <p className="text-label-sm font-label-sm text-outline text-center py-6">No jobs match "{jobFilter}"</p>}
+                {sorted.length === 0 && <p className="text-label-sm font-label-sm text-outline text-center py-6">No jobs match the current filters.</p>}
                 <div className="flex flex-col gap-1.5 max-h-96 overflow-y-auto pr-1">
-                  {visible.map(job => (
-                    <button
-                      key={job.job_id}
-                      onClick={() => selectJob(job)}
-                      className="w-full text-left bg-surface-container-low hover:bg-surface-container rounded border border-border hover:border-on-surface-variant transition-all p-3.5 flex flex-col gap-2"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-body-sm font-body-sm font-semibold text-on-surface truncate flex-1">
-                          {job.company_name ?? <span className="text-outline font-mono text-[11px]">{job.job_id}</span>}
-                        </span>
-                        <StatusBadge status={job.status} />
+                  {DATE_BUCKETS.filter(b => grouped.has(b)).map(bucket => (
+                    <React.Fragment key={bucket}>
+                      <div className="text-[9px] font-mono text-outline uppercase tracking-widest px-1 pt-2 pb-0.5 first:pt-0 select-none">
+                        {bucket}
                       </div>
-                      <div className="flex items-center gap-3">
-                        <PipelineDots status={job.status} />
-                        <span className="text-[10px] font-mono text-outline">{job.date}</span>
-                        {job.periods.length > 0 && <span className="text-[10px] font-mono text-outline">· {job.periods.join(' → ')}</span>}
-                        <span className="text-[9px] font-mono text-outline opacity-50 truncate">{job.job_id}</span>
-                      </div>
-                    </button>
+                      {grouped.get(bucket)!.map(job => <JobCard key={job.job_id} job={job} />)}
+                    </React.Fragment>
                   ))}
                 </div>
               </>
@@ -2360,16 +2510,70 @@ function Modal({ onClose, wide, children }: { onClose: () => void; wide?: boolea
   )
 }
 
-function PipelineDots({ status }: { status: string }) {
-  const done = status === 'completed' ? 4 : status === 'scoring_complete' ? 3 : status === 'analysis_complete' ? 2 : status === 'extraction_complete' ? 1 : 0
-  const running = status === 'processing' || status === 'pending'
-  const colors = [AGENT_COLOR.agent1, AGENT_COLOR.agent2, AGENT_COLOR.agent3, AGENT_COLOR.agent4]
+function formatPeriod(periodStr: string): string {
+  const [y, m] = periodStr.split('-').map(Number)
+  return new Intl.DateTimeFormat('en-US', { month: 'short', year: 'numeric' }).format(new Date(y, m - 1, 1))
+}
+
+function formatJobDate(dateStr: string): { label: string; relative: string } {
+  const [y, m, d] = dateStr.split('-').map(Number)
+  const date = new Date(y, m - 1, d)
+  const today = new Date(); today.setHours(0, 0, 0, 0)
+  const diffDays = Math.round((today.getTime() - date.getTime()) / 86_400_000)
+  const label = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).format(date)
+  let relative: string
+  if (diffDays === 0) relative = 'Today'
+  else if (diffDays === 1) relative = 'Yesterday'
+  else if (diffDays < 7) relative = `${diffDays} days ago`
+  else if (diffDays < 30) relative = `${Math.floor(diffDays / 7)} week${Math.floor(diffDays / 7) > 1 ? 's' : ''} ago`
+  else if (diffDays < 365) relative = `${Math.floor(diffDays / 30)} month${Math.floor(diffDays / 30) > 1 ? 's' : ''} ago`
+  else relative = `${Math.floor(diffDays / 365)} year${Math.floor(diffDays / 365) > 1 ? 's' : ''} ago`
+  return { label, relative }
+}
+
+type DateBucket = 'Today' | 'This week' | 'This month' | 'Older'
+function getDateBucket(dateStr: string): DateBucket {
+  const [y, m, d] = dateStr.split('-').map(Number)
+  const date = new Date(y, m - 1, d)
+  const today = new Date(); today.setHours(0, 0, 0, 0)
+  const diffDays = Math.round((today.getTime() - date.getTime()) / 86_400_000)
+  if (diffDays === 0) return 'Today'
+  if (diffDays < 7) return 'This week'
+  const now = new Date()
+  if (date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth()) return 'This month'
+  return 'Older'
+}
+
+
+function PipelineBar({ status }: { status: string }) {
+  const STEPS = [
+    { label: 'Extract', color: AGENT_COLOR.agent1 },
+    { label: 'Analyze', color: AGENT_COLOR.agent2 },
+    { label: 'Score',   color: AGENT_COLOR.agent3 },
+    { label: 'Report',  color: AGENT_COLOR.agent4 },
+  ]
+  const filled =
+    status === 'completed'           ? 4 :
+    status === 'scoring_complete'    ? 3 :
+    status === 'analysis_complete'   ? 2 :
+    status === 'extraction_complete' ? 1 : 0
+  const isFailed  = status === 'failed' || status === 'cancelled'
+  const isRunning = status === 'processing' || status === 'pending'
   return (
-    <div className="flex items-center gap-1">
-      {[0, 1, 2, 3].map(i => (
-        <div key={i} className={`w-2 h-2 rounded-full ${i === done && running ? 'animate-pulse' : ''}`}
-          style={{ background: i < done ? colors[i] : i === done && running ? '#56CCF2' : '#1e2030' }} />
-      ))}
+    <div className="flex items-center gap-0.5 shrink-0">
+      {STEPS.map((step, i) => {
+        const isActive  = i < filled
+        const isFailSeg = isFailed && i === 0
+        const isPulse   = isRunning && i === filled
+        return (
+          <div
+            key={i}
+            title={step.label}
+            className={`h-1 w-5 rounded-sm transition-all ${isPulse ? 'animate-pulse' : ''}`}
+            style={{ background: isFailSeg ? '#FF4D6D' : isActive ? step.color : '#1e2030' }}
+          />
+        )
+      })}
     </div>
   )
 }

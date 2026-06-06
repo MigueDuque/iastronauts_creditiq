@@ -36,6 +36,7 @@ EXTRACTOR = "extractor_response"
 FINANCIAL_ANALYZER = "financial_analyzer_response"
 RISK_SCORER = "risk_scorer_response"
 REPORT_GENERATOR = "report_generator_response"
+MANAGEMENT_REPORT = "management_report_response"
 REVISOR = "revisor_response"
 STATUS = "status"
 # Written once at job creation; never overwritten by agents or status updates.

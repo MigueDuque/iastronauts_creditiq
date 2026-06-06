@@ -10,6 +10,45 @@ logger.setLevel(logging.INFO)
 # (potential >10 min runtime), so generate_text switches to streaming.
 _ANTHROPIC_NONSTREAM_MAX_TOKENS = 16384
 
+
+class LLMError(Exception):
+    """Base class for LLMProvider failures."""
+
+
+class LLMTruncationError(LLMError):
+    """Model hit max_tokens — output is incomplete. NOT retryable (a retry with the
+    same budget reproduces the failure and re-bills the full call). Surface it so the
+    caller can raise max_tokens or shrink the input."""
+
+
+class LLMTransientError(LLMError):
+    """A transient API error (rate limit / 5xx / overloaded / connection / timeout).
+    Retryable. The Anthropic SDK already auto-retries these a few times internally;
+    this lets a caller's own retry layer scope retries to *only* transient failures."""
+
+
+class LLMInvalidJSONError(LLMError):
+    """Model returned text that did not parse as JSON. Not retryable in the text path;
+    use force_tool_json=True to make the model return a guaranteed-valid dict instead."""
+
+
+def _log_cache_usage(message, model: str, job_id: Optional[str]) -> None:
+    """Emit prompt-cache hit/write/uncached token counts so cache effectiveness is
+    auditable in CloudWatch. cache_read≈0.1x, cache_write≈1.25x, input=full price.
+    A persistent cache_read=0 across calls means a silent invalidator broke the prefix."""
+    try:
+        u = message.usage
+        logger.info(
+            "llm_cache | model=%s job=%s cache_read=%s cache_write=%s input=%s output=%s",
+            model, job_id or "N/A",
+            getattr(u, "cache_read_input_tokens", None),
+            getattr(u, "cache_creation_input_tokens", None),
+            getattr(u, "input_tokens", None),
+            getattr(u, "output_tokens", None),
+        )
+    except Exception:
+        pass
+
 _TENANT_BOUNDARY_TEMPLATE = (
     "\n\n=== TENANT CONTEXT BOUNDARY ===\n"
     "Tenant: {tenant_id} | Analysis: {job_id}\n"
@@ -176,6 +215,62 @@ class LLMProvider:
         language = _LANGUAGE_NAMES.get(self.report_language, _LANGUAGE_NAMES["es"])
         return system_prompt + _LANGUAGE_DIRECTIVE_TEMPLATE.format(language=language)
 
+    def _dynamic_suffix(self, tenant_id: Optional[str], job_id: Optional[str]) -> str:
+        """The per-call/per-tenant tail of the system prompt: tenant boundary + language
+        directive. Kept SEPARATE from the static prompt so the static prefix stays a
+        stable prompt-cache key across calls, tenants, and retries."""
+        suffix = ""
+        if tenant_id:
+            suffix += _TENANT_BOUNDARY_TEMPLATE.format(tenant_id=tenant_id, job_id=job_id or "N/A")
+        if self.report_language != "en":
+            language = _LANGUAGE_NAMES.get(self.report_language, _LANGUAGE_NAMES["es"])
+            suffix += _LANGUAGE_DIRECTIVE_TEMPLATE.format(language=language)
+        return suffix
+
+    def _anthropic_system_blocks(
+        self, system_prompt: str, tenant_id: Optional[str], job_id: Optional[str]
+    ) -> list:
+        """Build the Anthropic `system` as content blocks with prompt caching.
+
+        The large static prompt goes first with `cache_control: ephemeral` — identical
+        bytes across every call, so within the 5-min TTL repeated calls (per-file loops,
+        retries, back-to-back analyses) read it at ~10% of input price instead of paying
+        full price each time. The volatile tenant/language tail is a separate, uncached
+        trailing block so it never invalidates the cached prefix.
+
+        Caching is silently a no-op when the prefix is below the model's minimum
+        cacheable size (4096 tokens for Haiku 4.5) — no error, just no benefit.
+        """
+        blocks = [{
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": {"type": "ephemeral"},
+        }]
+        suffix = self._dynamic_suffix(tenant_id, job_id)
+        if suffix:
+            blocks.append({"type": "text", "text": suffix})
+        return blocks
+
+    def _wrap_api_error(self, exc: Exception) -> Exception:
+        """Map an anthropic SDK exception to LLMTransientError when it's retryable,
+        otherwise return it unchanged."""
+        try:
+            import anthropic
+        except Exception:
+            return exc
+        transient = (
+            anthropic.RateLimitError,
+            anthropic.InternalServerError,
+            anthropic.APIConnectionError,
+            anthropic.APITimeoutError,
+        )
+        overloaded = getattr(anthropic, "OverloadedError", None)
+        if overloaded is not None:
+            transient = transient + (overloaded,)
+        if isinstance(exc, transient):
+            return LLMTransientError(str(exc))
+        return exc
+
     def generate_text(
         self,
         system_prompt: str,
@@ -193,35 +288,38 @@ class LLMProvider:
         max_tokens: override output token limit (default 4096; use up to 16384
         for extraction calls that return large JSON arrays).
         """
-        scoped_system = self._inject_tenant_boundary(system_prompt, tenant_id, job_id)
-        scoped_system = self._inject_language(scoped_system)
         logger.info(
             "llm_call | provider=%s model=%s tenant=%s job=%s lang=%s max_tokens=%d",
             self.provider, self.model, tenant_id or "anon", job_id or "N/A",
             self.report_language, max_tokens,
         )
         if self.provider == "anthropic_api":
-            # The SDK rejects non-streaming requests whose max_tokens could take
-            # >10 min; stream large-output calls (e.g. extraction JSON) to avoid it.
-            if max_tokens > _ANTHROPIC_NONSTREAM_MAX_TOKENS:
-                with self.client.messages.stream(
-                    model=self.model,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    system=scoped_system,
-                    messages=[{"role": "user", "content": user_prompt}],
-                ) as stream:
-                    final = stream.get_final_message()
-            else:
-                final = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    system=scoped_system,
-                    messages=[{"role": "user", "content": user_prompt}],
-                )
+            system_blocks = self._anthropic_system_blocks(system_prompt, tenant_id, job_id)
+            try:
+                # The SDK rejects non-streaming requests whose max_tokens could take
+                # >10 min; stream large-output calls (e.g. extraction JSON) to avoid it.
+                if max_tokens > _ANTHROPIC_NONSTREAM_MAX_TOKENS:
+                    with self.client.messages.stream(
+                        model=self.model,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        system=system_blocks,
+                        messages=[{"role": "user", "content": user_prompt}],
+                    ) as stream:
+                        final = stream.get_final_message()
+                else:
+                    final = self.client.messages.create(
+                        model=self.model,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        system=system_blocks,
+                        messages=[{"role": "user", "content": user_prompt}],
+                    )
+            except Exception as exc:
+                raise self._wrap_api_error(exc) from exc
+            _log_cache_usage(final, self.model, job_id)
             if final.stop_reason == "max_tokens":
-                raise RuntimeError(
+                raise LLMTruncationError(
                     f"Respuesta truncada: el modelo alcanzó el límite de "
                     f"max_tokens={max_tokens} (output incompleto). "
                     "Aumente max_tokens o reduzca el tamaño de la entrada."
@@ -229,6 +327,8 @@ class LLMProvider:
             return final.content[0].text
 
         elif self.provider == "bedrock":
+            scoped_system = self._inject_tenant_boundary(system_prompt, tenant_id, job_id)
+            scoped_system = self._inject_language(scoped_system)
             # Usando la nueva API "Converse" de Bedrock (más moderna y estandarizada)
             response = self.client.converse(
                 modelId=self.model,
@@ -245,7 +345,7 @@ class LLMProvider:
                 }
             )
             if response.get("stopReason") == "max_tokens":
-                raise RuntimeError(
+                raise LLMTruncationError(
                     f"Respuesta truncada: el modelo alcanzó el límite de "
                     f"max_tokens={max_tokens} (output incompleto). "
                     "Aumente max_tokens o reduzca el tamaño de la entrada."
@@ -301,11 +401,25 @@ class LLMProvider:
         tenant_id: Optional[str] = None,
         job_id: Optional[str] = None,
         max_tokens: int = 4096,
+        force_tool_json: bool = False,
     ) -> Dict[str, Any]:
         """
         Genera una respuesta estructurada en formato JSON.
         Ideal para agentes extractores y analistas.
+
+        force_tool_json (anthropic_api only): force the model to answer through a single
+        tool call, so the SDK returns an already-parsed dict. This eliminates the whole
+        class of JSON-parse failures (and the wasteful retries they triggered) — the API
+        guarantees the tool input is valid JSON. The system prompt still drives the
+        content; the tool is a permissive object so the structure isn't over-constrained.
+        Falls back to the text path on bedrock.
         """
+        if force_tool_json and self.provider == "anthropic_api":
+            return self._generate_json_via_tool(
+                system_prompt, user_prompt, temperature,
+                tenant_id=tenant_id, job_id=job_id, max_tokens=max_tokens,
+            )
+
         # Instrucción estricta para Claude de que retorne SOLO JSON
         json_system_prompt = f"{system_prompt}\n\nIMPORTANT: You must output ONLY valid JSON. Do not include markdown blocks like ```json. Just raw JSON."
 
@@ -314,7 +428,7 @@ class LLMProvider:
             json_system_prompt, user_prompt, temperature,
             tenant_id=tenant_id, job_id=job_id, max_tokens=max_tokens,
         )
-        
+
         try:
             # Limpiar posible markdown si el modelo lo agrega por error
             cleaned = text_response.strip()
@@ -324,9 +438,64 @@ class LLMProvider:
                 cleaned = cleaned[3:]
             if cleaned.endswith("```"):
                 cleaned = cleaned[:-3]
-                
+
             return json.loads(cleaned.strip())
         except json.JSONDecodeError as e:
             logger.error(f"Error parseando JSON del modelo: {e}")
             logger.error(f"Respuesta original: {text_response}")
-            raise Exception("El modelo no devolvió un JSON válido.")
+            raise LLMInvalidJSONError("El modelo no devolvió un JSON válido.")
+
+    # Single forced tool: the model must answer by calling it, and the SDK hands us
+    # `block.input` already parsed into a dict. Permissive schema (the prompt defines
+    # the real shape) to avoid changing extraction content vs the free-text JSON path.
+    _JSON_TOOL_NAME = "emit_result"
+
+    def _generate_json_via_tool(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float,
+        tenant_id: Optional[str],
+        job_id: Optional[str],
+        max_tokens: int,
+    ) -> Dict[str, Any]:
+        system_blocks = self._anthropic_system_blocks(system_prompt, tenant_id, job_id)
+        tool = {
+            "name": self._JSON_TOOL_NAME,
+            "description": "Return the structured result as a JSON object following the "
+                           "schema described in the system prompt.",
+            "input_schema": {"type": "object", "additionalProperties": True},
+        }
+        logger.info(
+            "llm_json_tool | model=%s tenant=%s job=%s max_tokens=%d",
+            self.model, tenant_id or "anon", job_id or "N/A", max_tokens,
+        )
+        kwargs = dict(
+            model=self.model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system_blocks,
+            messages=[{"role": "user", "content": user_prompt}],
+            tools=[tool],
+            tool_choice={"type": "tool", "name": self._JSON_TOOL_NAME},
+        )
+        try:
+            if max_tokens > _ANTHROPIC_NONSTREAM_MAX_TOKENS:
+                with self.client.messages.stream(**kwargs) as stream:
+                    final = stream.get_final_message()
+            else:
+                final = self.client.messages.create(**kwargs)
+        except Exception as exc:
+            raise self._wrap_api_error(exc) from exc
+
+        _log_cache_usage(final, self.model, job_id)
+        if final.stop_reason == "max_tokens":
+            raise LLMTruncationError(
+                f"Respuesta truncada: el modelo alcanzó max_tokens={max_tokens} "
+                "antes de completar el tool call (output incompleto). "
+                "Aumente max_tokens o reduzca el tamaño de la entrada."
+            )
+        for block in final.content:
+            if getattr(block, "type", None) == "tool_use" and block.name == self._JSON_TOOL_NAME:
+                return block.input if isinstance(block.input, dict) else {}
+        raise LLMInvalidJSONError("El modelo no devolvió un tool_use con el resultado JSON.")

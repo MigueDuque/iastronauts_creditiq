@@ -198,7 +198,8 @@ _INSTRUCTION_RE = re.compile(r"~~.+?~~", re.DOTALL)
 # fixed, so greedy matching resolves the prefix correctly via backtracking.
 _ROW_PH_RE = re.compile(r"\{\{([A-Z0-9_]+)_R(\d+)_C\d+\}\}")
 # Hard cap: never expand a table beyond this many data rows.
-_MAX_TABLE_ROWS = 30
+# Kept at 12 to stay within the 8-page target (sprint 4 polish).
+_MAX_TABLE_ROWS = 12
 
 _INCOME_KW = ("ingreso", "gasto", "costo", "utilidad", "resultado", "pérdida", "perdida", "comisi")
 
@@ -250,7 +251,7 @@ def _compute_row_needs(
         if accs:
             mapped_any = True
         needs[prefix] = max(default, len(accs))
-    needs["IS_Q2"] = needs["IS_ACC"]
+    needs["IS_Q2"] = 4  # quarterly stub is always N/D — keep at template minimum
 
     if mapped_any:
         return needs
@@ -266,7 +267,7 @@ def _compute_row_needs(
     inv = [a for a in inv if not a.get("is_total")]
     needs["BS"] = max(6, len(bs))
     needs["IS_ACC"] = max(8, len(is_))
-    needs["IS_Q2"] = needs["IS_ACC"]
+    needs["IS_Q2"] = 4  # quarterly stub is always N/D — keep at template minimum
     needs["PORTFOLIO"] = max(10, len(inv))
     return needs
 
@@ -832,6 +833,69 @@ def _build_llm_digest(payload: ScorerOutput, historical: list, extractor_account
             lines.append(f"- {r}")
         lines.append("")
 
+    fpa = payload.fund_policy_assessment or {}
+    if fpa and fpa.get("assessments"):
+        lines.append("## POLÍTICA DE FONDO (LÍMITES REGULATORIOS)")
+        lines.append(f"Tipo de fondo: {fpa.get('fund_type', 'N/A')} | Fuente: {fpa.get('policy_source', 'default')}")
+        lines.append(f"Resumen: {fpa.get('summary', '')}")
+        limits = fpa.get("limits", {})
+        if limits:
+            lines.append(
+                f"Límites: por emisor {limits.get('per_issuer_pct', '?')}% | "
+                f"sector {limits.get('per_sector_pct', '?')}% | "
+                f"contraparte {limits.get('per_counterparty_pct', '?')}%"
+            )
+        breaches = [a for a in fpa.get("assessments", []) if a.get("status") == "breach"]
+        nears = [a for a in fpa.get("assessments", []) if a.get("status") == "near"]
+        if breaches:
+            lines.append("INCUMPLIMIENTOS:")
+            for b in breaches[:5]:
+                lines.append(
+                    f"  - {b.get('dimension')} / {b.get('name')}: "
+                    f"{b.get('exposure_pct', 0):.1f}% vs límite {b.get('limit_pct', 0):.1f}% "
+                    f"(exceso: {abs(b.get('headroom_pct', 0)):.1f}%)"
+                )
+        if nears:
+            lines.append("CERCA DEL LÍMITE:")
+            for n in nears[:5]:
+                lines.append(
+                    f"  - {n.get('dimension')} / {n.get('name')}: "
+                    f"{n.get('exposure_pct', 0):.1f}% vs límite {n.get('limit_pct', 0):.1f}% "
+                    f"(margen: {n.get('headroom_pct', 0):.1f}%)"
+                )
+        if not breaches and not nears:
+            lines.append("Todas las dimensiones dentro de los límites permitidos.")
+        lines.append("INSTRUCCIÓN: Menciona siempre el porcentaje de exposición y el límite permitido al redactar concentraciones.")
+        lines.append("")
+
+    tv = payload.top_variations or []
+    if tv:
+        lines.append("## TOP VARIACIONES CON PERÍODO COMPARATIVO")
+        lines.append("| Cuenta | Período actual | Período comparativo | Δ Absoluta | Δ% | Materialidad |")
+        lines.append("|--------|:--------------:|:-------------------:|----------:|----:|:------------:|")
+        for v in tv[:10]:
+            cur_p = v.get("current_period", "?")
+            cmp_p = v.get("comparative_period", "?")
+            lines.append(
+                f"| {v.get('account_name', '')} | {cur_p} | {cmp_p} "
+                f"| {_money(v.get('absolute_variation', 0))} "
+                f"| {_pct(v.get('variation_pct'))} | {v.get('materiality', 'LOW')} |"
+            )
+        lines.append("INSTRUCCIÓN: Al nombrar variaciones usa siempre 'variación entre {período_actual} y {período_comparativo}'.")
+        lines.append("")
+
+    cb = payload.comparative_basis or {}
+    if cb:
+        lines.append("## BASES COMPARATIVAS (IFRS)")
+        lines.append("REGLA: Al mencionar cualquier variación debes nombrar ambos períodos explícitamente.")
+        for stmt, entry in cb.items():
+            cur = entry.get("current", "?")
+            comp = entry.get("comparative", "?")
+            rule = entry.get("rule", "?")
+            warn = entry.get("mismatch_warning", "")
+            lines.append(f"- {stmt}: {cur} vs {comp} [{rule}]" + (f" ⚠ {warn}" if warn else ""))
+        lines.append("")
+
     # Extractor accounts grouped by source_sheet — gives the LLM the raw sheet
     # structure that the Word template tables directly mirror (e.g. Inversiones,
     # Balance, Resultados). Capped per sheet to stay within token budget.
@@ -897,6 +961,47 @@ def _call_llm_for_fields(
     except Exception as exc:
         logger.error("llm_for_fields failed | job=%s error=%s", payload.job_id, exc)
         return {}
+
+
+def _deduplicate_narrative_fields(llm_map: dict[str, str]) -> dict[str, str]:
+    """Remove sentences from executive/conclusion fields that already appear verbatim
+    in a finding body. Findings are the most specific section and win on conflict.
+
+    Priority (highest keeps the sentence):
+      1. FINDING_*_BODY
+      2. NEXT_STEPS / CONCLUSION fields
+      3. EXEC_CONCLUSIONS / RESUMEN fields (pruned last)
+    """
+    def _sentences(text: str) -> list[str]:
+        """Split text into non-trivial sentences (≥ 6 words)."""
+        parts = re.split(r"(?<=[.!?])\s+", (text or "").strip())
+        return [s.strip() for s in parts if len(s.split()) >= 6]
+
+    def _normalize(s: str) -> str:
+        return re.sub(r"\s+", " ", s.lower().strip().rstrip(".!?"))
+
+    # Collect all sentence fingerprints from the highest-priority sections.
+    seen: set[str] = set()
+    for key, val in llm_map.items():
+        if re.search(r"FINDING_\d+_BODY", key, re.IGNORECASE):
+            for s in _sentences(val):
+                seen.add(_normalize(s))
+
+    if not seen:
+        return llm_map  # nothing to deduplicate against
+
+    result = dict(llm_map)
+    # Fields that should be pruned if they repeat finding sentences
+    _EXEC_KEYS = re.compile(r"EXEC|RESUMEN|SINTESIS|EJECUTIVO|SUMMARY|NEXT_STEP|CONCLUSION|CIERRE|PERSPECTIVA", re.IGNORECASE)
+    for key, val in llm_map.items():
+        if not _EXEC_KEYS.search(key):
+            continue
+        sentences = _sentences(val)
+        kept = [s for s in sentences if _normalize(s) not in seen]
+        if len(kept) < len(sentences):
+            result[key] = " ".join(kept) if kept else val  # preserve original if all removed
+            logger.debug("dedup | field=%s removed=%d/%d sentences", key, len(sentences) - len(kept), len(sentences))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1135,6 +1240,11 @@ def lambda_handler(event: dict, context) -> dict:
             if narrative else {}
         )
 
+        # 4. De-duplication pass: ensure each conclusion appears in exactly one section.
+        #    Findings are most specific (kept); executive summary and next_steps lose
+        #    sentences already present verbatim in a finding body.
+        llm_map = _deduplicate_narrative_fields(llm_map)
+
         # Merge per placeholder. Precedence: LLM > deterministic > fallback > "".
         # Every extracted placeholder gets a value, so no raw {{TOKEN}} leaks through
         # and a .docx is always produced once the template loads.
@@ -1220,6 +1330,9 @@ def lambda_handler(event: dict, context) -> dict:
         structured_analysis=payload.structured_analysis,
         cross_statement_signals=payload.cross_statement_signals,
         earnings_sustainability=payload.earnings_sustainability,
+        comparative_basis=payload.comparative_basis,
+        fund_policy_assessment=payload.fund_policy_assessment,
+        top_variations=payload.top_variations,
     )
 
     # ── Save analysis_summary.md ─────────────────────────────────────────────

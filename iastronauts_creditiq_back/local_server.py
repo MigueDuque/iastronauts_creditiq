@@ -389,6 +389,70 @@ def _run_agent5(job_id: str) -> None:
         _running_jobs.discard(job_id)
 
 
+def _run_management_report(job_id: str, llm_model: str | None = None) -> None:
+    """Generate the optional board/committee management report (Sprint 4 Item 10).
+
+    Reads from risk_scorer_response (same input as Agent 4) and writes to
+    management_report_response.  Does NOT alter the main pipeline status.
+    """
+    from shared.job_store import load as job_load, save as job_save, RISK_SCORER, MANAGEMENT_REPORT
+
+    _running_jobs.add(job_id)
+    try:
+        payload = job_load(job_id, RISK_SCORER)
+        if llm_model:
+            payload["llm_model"] = llm_model
+        from agents.management_report.handler import lambda_handler as mgmt_handler
+        result = mgmt_handler(payload, None)
+        job_save(job_id, MANAGEMENT_REPORT, result)
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        print(f"management_report_failed | job={job_id} error={exc}")
+    finally:
+        _running_jobs.discard(job_id)
+
+
+@app.post("/analyses/{analysis_id}/management-report")
+async def generate_management_report(analysis_id: str, request: Request):
+    """Generate an optional board/committee management report on demand.
+
+    This is an isolated, opt-in endpoint — NOT part of the standard pipeline.
+    Requires a completed analysis (risk_scorer_response must exist).
+    The main pipeline status is NOT altered by this call.
+
+    Optional body: { "llm_model": "claude-opus-4-8" }
+    """
+    llm_model: str | None = None
+    try:
+        body_bytes = await request.body()
+        if body_bytes:
+            llm_model = json.loads(body_bytes).get("llm_model") or None
+    except Exception:
+        pass
+
+    thread = threading.Thread(
+        target=_run_management_report, args=(analysis_id,),
+        kwargs={"llm_model": llm_model}, daemon=True,
+    )
+    thread.start()
+    return JSONResponse(
+        content={"analysis_id": analysis_id, "status": "generating_management_report"},
+        status_code=202,
+    )
+
+
+@app.get("/analyses/{analysis_id}/management-report")
+async def get_management_report(analysis_id: str):
+    """Return the management report artifact if it has been generated."""
+    from shared.job_store import load as job_load, MANAGEMENT_REPORT
+    try:
+        data = job_load(analysis_id, MANAGEMENT_REPORT)
+        return JSONResponse(content=data)
+    except Exception:
+        return JSONResponse(content={"status": "not_generated"}, status_code=404)
+
+
 # ── Job listing ────────────────────────────────────────────────────────────────
 
 @app.get("/jobs")

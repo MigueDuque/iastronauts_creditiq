@@ -1,0 +1,5 @@
+{
+  "stage": "risk_scorer",
+  "input": "input.json",
+  "description": "BTG P.INMOBILIARIO — real estate investment fund, 80 accounts, periods 2025-06 vs 2024-12. Exercises fund-aware risk weights, counterparty/interest-rate/FX market risk, and the 3 report-facing risk categories."
+}

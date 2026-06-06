@@ -59,6 +59,7 @@ def score_credit(
     fund_analysis: dict,
     is_investment_fund: bool,
     sheet_concentration: dict | None = None,
+    fund_policy_assessment: dict | None = None,
 ) -> CreditRiskResult:
     ratios = financial_ratios.get("ratios", {})
     totals = financial_ratios.get("totals", {})
@@ -202,6 +203,21 @@ def score_credit(
             elif top_custodian_pct >= 50.0:
                 custodian_deduction = 5
 
+    # Policy-aware counterparty adjustment: if the custodian is within the fund's
+    # permitted counterparty limit, halve the deduction (within-limit ≠ high risk).
+    _fpa = fund_policy_assessment or {}
+    _cp_statuses = [
+        a.get("status")
+        for a in _fpa.get("assessments", [])
+        if a.get("dimension") == "counterparty"
+    ]
+    if _cp_statuses:
+        _worst_cp = max(_cp_statuses, key=lambda s: {"breach": 2, "near": 1, "within": 0}.get(s, 0))
+        if _worst_cp == "within" and custodian_deduction > 0:
+            custodian_deduction = custodian_deduction // 2  # within-limit: soften penalty
+        elif _worst_cp == "breach":
+            custodian_deduction = min(custodian_deduction + 5, 15)  # breach: escalate
+
     score = max(0, pts_dias + pts_ar + pts_trend - custodian_deduction)
 
     # ─── Build narrative findings ──────────────────────────────────────────────
@@ -209,16 +225,37 @@ def score_credit(
     drivers: List[str] = []
 
     if is_investment_fund and top_issuer_pct is not None:
+        # Resolve the policy limit for this issuer if available
+        _fpa_assessments = (_fpa or {}).get("assessments", [])
+        _issuer_limit: float | None = next(
+            (a.get("limit_pct") for a in _fpa_assessments if a.get("dimension") == "issuer"),
+            None,
+        )
+        _limit_note = (
+            f" (límite permitido: {_issuer_limit:.0f}%)" if _issuer_limit is not None else ""
+        )
         if top_issuer_pct >= 30.0:
-            findings.append(f"Concentración crítica en emisor individual: {top_issuer_name} representa el {top_issuer_pct:.1f}% de la cartera de inversiones.")
+            findings.append(
+                f"Concentración crítica en emisor individual: {top_issuer_name} "
+                f"representa el {top_issuer_pct:.1f}% de la cartera{_limit_note}."
+            )
             drivers.append(f"Concentración en emisor único >30% ({top_issuer_name})")
         elif top_issuer_pct >= 20.0:
-            findings.append(f"Concentración elevada en un emisor: {top_issuer_name} ({top_issuer_pct:.1f}% de la cartera).")
+            findings.append(
+                f"Concentración elevada en un emisor: {top_issuer_name} "
+                f"({top_issuer_pct:.1f}% de la cartera{_limit_note})."
+            )
             drivers.append(f"Concentración en emisor único >20% ({top_issuer_name})")
         elif top_issuer_pct >= 15.0:
-            findings.append(f"Concentración moderada en {top_issuer_name} ({top_issuer_pct:.1f}% de la cartera).")
+            findings.append(
+                f"Concentración moderada en {top_issuer_name} "
+                f"({top_issuer_pct:.1f}% de la cartera{_limit_note})."
+            )
         else:
-            findings.append(f"Diversificación adecuada por emisor; mayor posición: {top_issuer_name} ({top_issuer_pct:.1f}%).")
+            findings.append(
+                f"Diversificación adecuada por emisor; mayor posición: "
+                f"{top_issuer_name} ({top_issuer_pct:.1f}%{_limit_note})."
+            )
     else:
         if dias_cartera < 30.0:
             findings.append(f"Rotación de cartera de clientes eficiente ({dias_cartera:.1f} días).")
@@ -235,19 +272,35 @@ def score_credit(
         drivers.append("Operaciones con partes relacionadas identificadas")
 
     if top_custodian_pct is not None:
-        if top_custodian_pct >= 90.0:
+        _cp_limit: float | None = next(
+            (a.get("limit_pct") for a in _fpa_assessments if a.get("dimension") == "counterparty"),
+            None,
+        )
+        _cp_limit_note = (
+            f" (límite permitido: {_cp_limit:.0f}%)" if _cp_limit is not None else ""
+        )
+        _cp_worst = _worst_cp if _cp_statuses else None  # type: ignore[possibly-undefined]
+        if _cp_worst == "within" and top_custodian_pct is not None:
             findings.append(
-                f"Riesgo de contraparte crítico: {top_custodian_pct:.1f}% del efectivo está depositado en un único custodio ({top_custodian_name})."
+                f"Custodio principal {top_custodian_name} concentra el {top_custodian_pct:.1f}% "
+                f"del efectivo, permaneciendo dentro del límite permitido{_cp_limit_note}."
+            )
+        elif top_custodian_pct >= 90.0:
+            findings.append(
+                f"Riesgo de contraparte crítico: {top_custodian_pct:.1f}% del efectivo "
+                f"depositado en {top_custodian_name}{_cp_limit_note}."
             )
             drivers.append(f"Efectivo concentrado >90% en un solo custodio ({top_custodian_name})")
         elif top_custodian_pct >= 70.0:
             findings.append(
-                f"Concentración elevada de contraparte: {top_custodian_pct:.1f}% del efectivo en {top_custodian_name}."
+                f"Concentración elevada de contraparte: {top_custodian_pct:.1f}% del efectivo "
+                f"en {top_custodian_name}{_cp_limit_note}."
             )
             drivers.append(f"Efectivo concentrado >70% en un solo custodio ({top_custodian_name})")
         elif num_custodians and num_custodians >= 3 and top_custodian_pct < 50.0:
             findings.append(
-                f"Riesgo de contraparte diversificado: efectivo distribuido en {num_custodians} custodios (mayor: {top_custodian_pct:.1f}%)."
+                f"Riesgo de contraparte diversificado: efectivo distribuido en "
+                f"{num_custodians} custodios (mayor: {top_custodian_pct:.1f}%{_cp_limit_note})."
             )
 
     return CreditRiskResult(

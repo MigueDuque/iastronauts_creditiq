@@ -71,6 +71,7 @@ def score_market_risk(
     is_investment_fund: bool,
     sheet_concentration: dict | None = None,
     currency: str = "COP",
+    fund_policy_assessment: dict | None = None,
 ) -> MarketRiskResult:
     totals = financial_ratios.get("totals", {})
     total_revenue = totals.get("total_revenue", 0.0)
@@ -206,6 +207,22 @@ def score_market_risk(
     else:
         pts_hhi = 20  # neutral if no data
 
+    # ─── Policy adjustment: if concentration is within-limit, it is not a risk ─
+    # A concentration flagged by HHI/top-N thresholds is only a genuine risk when
+    # it also breaches the fund's permitted limit. This prevents false positives
+    # (e.g. a 28% position in a 35%-limit fund being flagged as HIGH risk).
+    _fpa = fund_policy_assessment or {}
+    _fpa_assessments = _fpa.get("assessments", [])
+    _issuer_statuses = [a.get("status") for a in _fpa_assessments if a.get("dimension") == "issuer"]
+    if _issuer_statuses:
+        _worst_issuer = max(_issuer_statuses, key=lambda s: {"breach": 2, "near": 1, "within": 0}.get(s, 0))
+        if _worst_issuer == "within":
+            # All issuers within limits: restore up to 15 pts that HHI/top-N took away
+            pts_hhi = min(pts_hhi + 15, 35)
+        elif _worst_issuer == "breach":
+            # At least one issuer over the permitted limit: escalate (cap the rescue)
+            pts_hhi = max(pts_hhi - 10, 0)
+
     # ─── Component 3: Equity exposure / diversification ───────────────────────
     if is_investment_fund:
         # Pure equity fund → inherent market risk; score on diversification breadth
@@ -291,8 +308,30 @@ def score_market_risk(
         drivers.append(f"HHI elevado ({hhi:.3f})")
 
     if top_issuer_pct is not None and top_issuer_pct >= 30.0:
-        findings.append(f"Mayor posición individual representa el {top_issuer_pct:.1f}% de la cartera: riesgo idiosincrático significativo.")
-        drivers.append(f"Posición individual >30% de la cartera")
+        # Include the permitted limit in the finding when a policy assessment is available
+        _fpa_assessments_m = (_fpa or {}).get("assessments", [])
+        _issuer_lim = next(
+            (a.get("limit_pct") for a in _fpa_assessments_m if a.get("dimension") == "issuer"),
+            None,
+        )
+        _issuer_lim_note = (
+            f" (límite permitido: {_issuer_lim:.0f}%)" if _issuer_lim is not None else ""
+        )
+        _issuer_worst = next(
+            (a.get("status") for a in _fpa_assessments_m if a.get("dimension") == "issuer"),
+            None,
+        )
+        if _issuer_worst == "within":
+            findings.append(
+                f"Mayor posición individual: {top_issuer_pct:.1f}% de la cartera, "
+                f"permaneciendo dentro del límite permitido{_issuer_lim_note}."
+            )
+        else:
+            findings.append(
+                f"Mayor posición individual representa el {top_issuer_pct:.1f}% de la cartera: "
+                f"riesgo idiosincrático significativo{_issuer_lim_note}."
+            )
+            drivers.append(f"Posición individual >30% de la cartera")
 
     if top3_concentration_pct is not None and top3_concentration_pct >= 70.0:
         findings.append(f"Top 3 posiciones concentran el {top3_concentration_pct:.1f}% del portafolio de inversiones.")

@@ -17,6 +17,7 @@ class VariationReliability(str, Enum):
     NEW_ACCOUNT = "NEW_ACCOUNT"                    # no prior period — no baseline exists
     INSUFFICIENT_BASELINE = "INSUFFICIENT_BASELINE"  # prior ≈ 0 → % is meaningless
     EXTREME_VARIATION = "EXTREME_VARIATION"          # >500% likely a restatement/reclassification
+    PERIOD_LENGTH_MISMATCH = "PERIOD_LENGTH_MISMATCH"  # comparing different durations (e.g. Q1 vs full-year)
 
 
 # Previous must be ≥ 5% of current to produce a meaningful percentage
@@ -25,6 +26,10 @@ _BASELINE_RATIO_FLOOR: float = 0.05
 _ABSOLUTE_FLOOR_COP_MM: float = 0.5
 # Percentage above which we flag a probable reclassification
 _EXTREME_VARIATION_PCT: float = 500.0
+
+# Statement types whose values are cumulative flows — period length matters for comparison
+_FLOW_STATEMENT_TYPES: frozenset[str] = frozenset({"income_statement", "cash_flow"})
+_FLOW_CATEGORIES: frozenset[str] = frozenset({"revenue", "expense"})
 
 
 @dataclass
@@ -35,11 +40,52 @@ class ReliabilityResult:
     explanation: str      # audit-trail text
 
 
-def assess_reliability(variation: AccountVariation) -> ReliabilityResult:
+def assess_reliability(
+    variation: AccountVariation,
+    periods_homogeneous: bool = True,
+    current_period_months: int = 12,
+    comparative_period_months: int = 12,
+    annualization_factor: float | None = None,
+) -> ReliabilityResult:
     """
     Assess whether the percentage variation of an account is statistically reliable.
     Call this before anomaly detection and before building the LLM prompt.
+
+    periods_homogeneous: False when the current and comparative columns cover different
+        durations (e.g. Q1 2025 = 3 months vs FY 2024 = 12 months). Only meaningful
+        for flow accounts (income statement, cash flow); balance-sheet items are always
+        point-in-time snapshots, so callers should pass periods_homogeneous=True for them.
     """
+    # Period-length mismatch: the raw % variation is structurally misleading for flow accounts.
+    # Check this FIRST — it overrides other reliability signals for these accounts.
+    is_flow = (
+        getattr(variation, "statement_type", None) in _FLOW_STATEMENT_TYPES
+        or variation.category in _FLOW_CATEGORIES
+    )
+    if is_flow and not periods_homogeneous and variation.has_previous_value:
+        annualized_note = ""
+        if annualization_factor and annualization_factor > 1:
+            annualized_approx = variation.current_value * annualization_factor
+            annualized_note = (
+                f" Equivalente anualizado estimado: {annualized_approx:,.1f} COP MM "
+                f"(×{annualization_factor:.2f})."
+            )
+        return ReliabilityResult(
+            reliability=VariationReliability.PERIOD_LENGTH_MISMATCH,
+            display_label=(
+                f"Períodos no homogéneos ({current_period_months}m vs {comparative_period_months}m) "
+                f"— variación % no interpretable directamente"
+            ),
+            suppress_pct=True,
+            explanation=(
+                f"'{variation.account_name}' es una cuenta de flujo comparada entre períodos de "
+                f"distinta duración: {current_period_months} meses actuales vs "
+                f"{comparative_period_months} meses comparativos. "
+                f"Una variación de {variation.variation_pct:+.0f}% refleja la diferencia de "
+                f"duración, no necesariamente un cambio real de actividad.{annualized_note}"
+            ),
+        )
+
     if not variation.has_previous_value:
         return ReliabilityResult(
             reliability=VariationReliability.NEW_ACCOUNT,

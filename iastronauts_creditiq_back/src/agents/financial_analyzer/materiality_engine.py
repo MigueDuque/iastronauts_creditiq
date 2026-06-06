@@ -295,10 +295,12 @@ def infer_niif_references(
     account_name: str,
     category: str,
     materiality: MaterialityLevel | None = None,
+    periods: list[str] | None = None,
 ) -> list[str]:
     """
     Keyword-based NIIF standard lookup.
     Returns a sorted, deduplicated list of applicable NIIF/NIC references.
+    Pass `periods` (YYYY-MM strings) to auto-add NIC 34 for interim statements.
     """
     name_lower = account_name.lower()
     cat_lower = category.lower()
@@ -316,6 +318,18 @@ def infer_niif_references(
         refs.add("NIC 12")
     if "flujo de efectivo" in name_lower or "flujo neto" in name_lower:
         refs.add("NIC 7")
+    # NIC 34 — Interim reporting: explicit account keywords
+    if any(kw in name_lower for kw in ("intermedio", "interino", "condensado", "trimestral", "semestral")):
+        refs.add("NIC 34")
+
+    # NIC 34 — Interim reporting: period-level detection (month ≠ 12 → interim statement)
+    if periods:
+        try:
+            month = int(periods[0].split("-")[1])
+            if month != 12:
+                refs.add("NIC 34")
+        except (IndexError, ValueError):
+            pass
 
     # HIGH materiality always warrants NIC 1 disclosure
     if materiality == MaterialityLevel.HIGH and refs:

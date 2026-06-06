@@ -1,0 +1,44 @@
+{
+  "detected_scale": "thousands",
+  "accounts": [
+    {
+      "account_id": "act-001",
+      "raw_account_name": "Inversiones financieras",
+      "normalized_account_name": "Instrumentos financieros de inversión",
+      "category": "assets",
+      "current_value": 3500000.0,
+      "previous_value": 3200000.0,
+      "currency": "COP",
+      "confidence_score": 1.0,
+      "source_file": "eeff_miles.xlsx",
+      "source_sheet": "Balance",
+      "is_total": false
+    },
+    {
+      "account_id": "act-002",
+      "raw_account_name": "Efectivo y equivalentes",
+      "normalized_account_name": "Efectivo y equivalentes de efectivo",
+      "category": "assets",
+      "current_value": 500000.0,
+      "previous_value": 400000.0,
+      "currency": "COP",
+      "confidence_score": 1.0,
+      "source_file": "eeff_miles.xlsx",
+      "source_sheet": "Balance",
+      "is_total": false
+    },
+    {
+      "account_id": "act-003",
+      "raw_account_name": "Patrimonio de los inversionistas",
+      "normalized_account_name": "Patrimonio neto atribuible a partícipes",
+      "category": "equity",
+      "current_value": 3900000.0,
+      "previous_value": 3500000.0,
+      "currency": "COP",
+      "confidence_score": 1.0,
+      "source_file": "eeff_miles.xlsx",
+      "source_sheet": "Balance",
+      "is_total": false
+    }
+  ]
+}

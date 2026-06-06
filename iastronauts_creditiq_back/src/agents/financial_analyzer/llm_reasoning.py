@@ -59,6 +59,7 @@ class AccountLLMInsight:
     is_related_party: bool = False
     related_party_counterpart: str | None = None
     investment_signal: str | None = None
+    evidence: list[dict] = field(default_factory=list)  # Evidence First: machine-checkable causal claims
 
 
 @dataclass
@@ -183,6 +184,7 @@ def _assemble_result(
             llm_confidence_hint=caus.confidence,
             llm_evidence_sources=caus.linked_accounts,
             investment_signal=movement.movement_type if movement else None,
+            evidence=caus.evidence,
         )
 
     # Ensure HIGH materiality accounts always have an entry (may not have causality data)
@@ -242,6 +244,8 @@ def run_llm_analysis(
     macro_context: dict | None = None,
     executive_synthesis: dict | None = None,
     financial_diagnostics: dict | None = None,
+    comparative_basis: dict | None = None,
+    policy_clauses: str = "",
 ) -> LLMAnalysisResult:
     """
     Multi-agent LLM pipeline for qualitative financial reasoning.
@@ -292,6 +296,8 @@ def run_llm_analysis(
         fund_analysis=fund_analysis,
         business_context_snippet=business_context_snippet,
         macro_context=macro_context,
+        policy_clauses=policy_clauses,
+        comparative_basis=comparative_basis,
     )
 
     # Step 3 — Financial Thesis: what does this mean strategically?
@@ -309,6 +315,7 @@ def run_llm_analysis(
         ratios_dict=ratios_dict,
         macro_context=macro_context,
         financial_diagnostics=financial_diagnostics,
+        policy_clauses=policy_clauses,
     )
 
     # Step 4 — Executive Narrative: communicate the conclusions
@@ -322,6 +329,8 @@ def run_llm_analysis(
         llm=llm,
         tenant_id=tenant_id,
         job_id=job_id,
+        comparative_basis=comparative_basis,
+        policy_clauses=policy_clauses,
     )
 
     result = _assemble_result(

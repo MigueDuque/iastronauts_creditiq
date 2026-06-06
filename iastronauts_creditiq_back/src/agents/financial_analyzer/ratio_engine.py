@@ -118,8 +118,9 @@ class AccountVariation:
     has_previous_value: bool
     absolute_variation: float   # current − previous, COP MM
     variation_pct: float        # percentage change; 0.0 if no prior period
-    source_sheet: str | None = None  # Excel sheet name (None for PDF/CSV)
-    is_total: bool = False           # True when this row is a sum/subtotal row
+    source_sheet: str | None = None    # Excel sheet name (None for PDF/CSV)
+    statement_type: str | None = None  # "balance_sheet" | "income_statement" | "cash_flow" | "equity_changes"
+    is_total: bool = False             # True when this row is a sum/subtotal row
 
 
 @dataclass
@@ -213,6 +214,7 @@ def calculate_account_variation(account: ExtractedAccount) -> AccountVariation:
         absolute_variation=round(abs_var, 3),
         variation_pct=round(pct_var, 2),
         source_sheet=account.source_sheet,
+        statement_type=account.statement_type,
         is_total=account.is_total,
     )
 

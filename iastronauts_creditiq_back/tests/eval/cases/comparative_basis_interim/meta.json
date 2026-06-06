@@ -1,0 +1,5 @@
+{
+  "stage": "comparative_basis",
+  "input": "input.json",
+  "description": "Mid-year (Jun 2025) statement: balance_sheet must compare to Dec 2024 (prior_year_end); income_statement and cash_flow must compare to Jun 2024 (same_period_prior_year)."
+}

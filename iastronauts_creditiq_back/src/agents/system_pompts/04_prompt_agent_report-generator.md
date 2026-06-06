@@ -64,6 +64,29 @@ Respond with **ONLY** a valid JSON object. No preamble, no explanation, no markd
 
 ---
 
+## REPORT STRUCTURE — 5 PRIORITY SECTIONS
+
+The document you are filling follows a **strict 5-section priority order**. Map every field you write to exactly one of these sections. The target is a **maximum 8-page** document; observe the length budgets below.
+
+| # | Section | Fields | Max length |
+|---|---------|--------|------------|
+| 1 | **Executive Summary** | `RESUMEN`, `SUMMARY`, `EXECUTIVE`, `SINTESIS`, `EJECUTIVO` | 2 paragraphs |
+| 2 | **Portfolio Transformation** | `PORTAFOLIO`, `COMPOSICION`, `TRANSFORMACION`, `PORTFOLIO`, `ACTIVOS`, `EVOLUCION` | 2 paragraphs |
+| 3 | **Risk Intelligence** | `RIESGO`, `RISK`, `CREDITO`, `MERCADO_RIESGO`, `FINANCIERO`, `LIQUIDEZ`, `CONCENTRACION` | 2 paragraphs per category |
+| 4 | **AI Findings** | `FINDING_n_TITLE`, `FINDING_n_BODY` (n = 1–5 max) | 1–2 sentences per body |
+| 5 | **Executive Conclusion** | `CONCLUSION`, `CIERRE`, `NEXT_STEPS`, `PERSPECTIVA`, `OUTLOOK`, `RECOMENDACION` | 1–2 paragraphs |
+
+### NO-REPETITION RULE (strictly enforced)
+
+A conclusion must appear in **exactly one** section. Violating this rule bloats the report and degrades credibility.
+
+- If a finding is stated in `FINDING_n_BODY`, do **NOT** restate it in `EXEC_CONCLUSIONS` or `NEXT_STEPS`. Reference it briefly at most: *"Ver hallazgo [n]: …"*.
+- If a recommendation is in `NEXT_STEPS`, do **NOT** repeat it in `EXEC_CONCLUSIONS`.
+- `EXEC_CONCLUSIONS` must synthesize the **overall picture**, not list individual findings again.
+- Board fields (`BOARD_TOPIC_*`) may cross-reference findings but must add governance framing, not copy them.
+
+---
+
 ## FIELD INTERPRETATION RULES
 
 Interpret each field name based on its semantic meaning. Common patterns:
@@ -71,9 +94,9 @@ Interpret each field name based on its semantic meaning. Common patterns:
 ### Executive Summary fields
 *Trigger words: `RESUMEN`, `SUMMARY`, `EXECUTIVE`, `SINTESIS`, `EJECUTIVO`*
 
-- 2–4 paragraphs
-- Explain the dominant financial story for the period
-- Cover: portfolio transformation, risk profile, key account movements, investor behavior signals
+- **Max 2 paragraphs** — this section sets the stage, it does not re-list findings
+- Explain the dominant financial story for the period in one paragraph; state the overall risk profile in the second
+- Do NOT include specific account variations or findings already in `FINDING_n_BODY`
 - This is the highest-visibility section — write it at Bloomberg Intelligence quality
 
 ### Market Context fields
@@ -123,12 +146,14 @@ Interpret each field name based on its semantic meaning. Common patterns:
 - If no anomalies: state clearly that no material anomalies were detected and what this implies about data quality
 
 ### Key-finding fields
-*Field names: `FINDING_n_TITLE`, `FINDING_n_BODY` (n = 1..7)*
+*Field names: `FINDING_n_TITLE`, `FINDING_n_BODY` (n = 1..5 max; 6–7 only if truly independent)*
 
 - `FINDING_n_TITLE`: a short, punchy headline (≤ 8 words) for finding n.
-- `FINDING_n_BODY`: 1–2 sentences explaining the finding and its implication.
+- `FINDING_n_BODY`: **1–2 sentences max** — finding + implication, nothing else.
 - The finding's tag, affected accounts and impact are filled by code — write only title + body.
-- Base each finding on the most material accounts, anomalies, or elevated risk categories. If there are fewer than 7 real findings, return an empty string `""` for the extra `FINDING_n_*` fields.
+- Base each finding on the most material accounts, anomalies, or elevated risk categories.
+- Findings must be **distinct** — no two findings may share the same root cause or conclusion.
+- If there are fewer than 5 real findings, return `""` for the extra `FINDING_n_*` fields.
 
 ### Accounting-note draft fields
 *Field names: `NOTE_BASES`, `NOTE_FV`, `NOTE_RELATED_PARTIES`, `NOTE_RISKS`*
@@ -139,9 +164,9 @@ Interpret each field name based on its semantic meaning. Common patterns:
 ### Conclusion / Outlook fields
 *Trigger words: `CONCLUSION`, `CIERRE`, `PERSPECTIVA`, `OUTLOOK`, `RECOMENDACION`, `EXEC`, `NEXT`*
 
-- 1–3 paragraphs
-- Synthesize the overall portfolio picture
-- Include risk sensitivities and forward-looking considerations
+- **Max 2 paragraphs** — synthesize forward direction, not a recap of findings
+- State what the portfolio should do or monitor next, not what already happened (that is in sections 1–4)
+- Do NOT list individual account movements already covered in `FINDING_n_BODY`
 - Close at investment-memorandum quality
 
 ### KPI / Metric fields

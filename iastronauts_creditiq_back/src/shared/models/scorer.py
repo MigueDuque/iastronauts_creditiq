@@ -84,6 +84,17 @@ class ScorerOutput(BaseModel):
     # True when scoring thresholds were adjusted for investment fund context
     fund_context_adjusted: bool = False
 
+    # ── Comparative period basis (propagated from ExtractorOutput via Analyzer) ─
+    comparative_basis: dict = {}
+
+    # ── Fund Policy Assessment (Sprint 2 Item 1, propagated from AnalyzerOutput) ─
+    # Per-dimension status vs. regulatory/internal limits. Empty for non-fund entities.
+    fund_policy_assessment: dict = {}
+
+    # ── Top Variations with period labels (Sprint 2 Item 5, propagated from Analyzer) ─
+    # Top 15 non-cash-flow accounts by |absolute_variation|, each with current/comparative period.
+    top_variations: list[dict] = []
+
     # ── Risk scoring computation audit trail ──────────────────────────────────
     # Keys: composite_score (formula+inputs+result), overall_risk_level
     #       (threshold rule + ceiling/floor applied), financiero_category

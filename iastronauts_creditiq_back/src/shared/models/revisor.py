@@ -18,6 +18,7 @@ class ValidationCategory(str, Enum):
     BUSINESS_LOGIC = "BUSINESS_LOGIC"       # Cat 4: Financial coherence
     CONSISTENCY = "CONSISTENCY"             # Cat 5: URL patterns & coverage
     NARRATIVE = "NARRATIVE"                 # Cat 6: LLM-assessed quality
+    EVIDENCE_BINDING = "EVIDENCE_BINDING"   # Cat 7: Evidence First — machine-checkable causal claims
 
 
 class ValidationFlag(BaseModel):

@@ -59,6 +59,11 @@ class AccountAnalysis(BaseModel):
     # ── Dashboard investment signal (asset accounts only) ────────────────────
     investment_signal: str | None = None
 
+    # ── Evidence First (Sprint 1 Item 2) ────────────────────────────────────
+    # Machine-checkable causal claims produced by CausalityAgent.
+    # Format: [{"claim": "...", "evidence_type": "account|variation|news|policy|note", "ref": "..."}]
+    evidence: list[dict] = []
+
     # ── Account hierarchy (set by hierarchy_engine) ──────────────────────────
     # Role of this row within the statement structure, so downstream consumers
     # never mix levels of the same money (e.g. a portfolio summary line and its
@@ -147,6 +152,23 @@ class AnalyzerOutput(BaseModel):
     # ── Sheet-based Concentration (Activos / Instrumentos / Bancos) ──────────
     # Populated from source_sheet metadata; empty dict when source lacks sheet data
     sheet_concentration: dict = {}
+
+    # ── Comparative period basis (propagated from ExtractorOutput) ───────────
+    # Keyed by statement type; each entry: {current, comparative, rule, [mismatch_warning]}
+    comparative_basis: dict = {}
+
+    # ── Fund Policy Assessment (Sprint 2 Item 1) ─────────────────────────────
+    # Per-dimension status vs. regulatory/internal limits for investment funds.
+    # Empty dict for non-fund entities or when no concentration data is available.
+    # Keys: fund_type, policy_source, limits, assessments, breach_count, near_count,
+    #       within_count, summary.
+    fund_policy_assessment: dict = {}
+
+    # ── Top Variations with period labels (Sprint 2 Item 5) ──────────────────
+    # Top 15 non-cash-flow accounts by |absolute_variation|, each carrying
+    # current_period and comparative_period from comparative_basis.
+    # Empty list when no accounts have a previous period baseline.
+    top_variations: list[dict] = []
 
     # ── Global computation audit trail ────────────────────────────────────────
     # Covers the materiality threshold derivation and aggregation counts.

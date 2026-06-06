@@ -1,0 +1,5 @@
+{
+  "stage": "scale_normalization",
+  "input": "input.json",
+  "description": "Document with 'Cifras en millones de COP' — values already in MM, no-op normalization. Canonical totals must match scale_miles case."
+}

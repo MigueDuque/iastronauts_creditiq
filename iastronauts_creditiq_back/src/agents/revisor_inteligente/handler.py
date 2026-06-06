@@ -808,6 +808,86 @@ def _compute_adjusted_score(base_score: int, flags: list[ValidationFlag]) -> int
 
 
 # ---------------------------------------------------------------------------
+# Category 7 — Evidence Binding (Evidence First)
+# ---------------------------------------------------------------------------
+
+_REFUSAL_PHRASE = "No existe evidencia suficiente para determinar la causa de esta variación."
+
+def _check_evidence_binding(report: FinalReportOutput) -> list[ValidationFlag]:
+    """
+    Verify that causal claims in HIGH-materiality accounts are backed by
+    machine-checkable evidence entries. Three checks:
+      7.1 HIGH-mat account with possible_causes and no evidence → ERROR  −10
+      7.2 evidence entry with empty ref → WARNING −3
+      7.3 evidence entry whose ref doesn't match any known account_id → WARNING −3
+    """
+    flags: list[ValidationFlag] = []
+    known_ids = {a.account_id for a in report.analysis_results}
+
+    for acct in report.analysis_results:
+        if acct.materiality.value != "HIGH":
+            continue
+        # Ignore accounts that explicitly declared insufficient evidence
+        has_refusal = any(_REFUSAL_PHRASE in c for c in acct.possible_causes)
+        if has_refusal:
+            continue
+
+        has_causes = bool(acct.possible_causes)
+        has_evidence = bool(getattr(acct, "evidence", []))
+
+        # 7.1 HIGH-mat with causes but no evidence
+        if has_causes and not has_evidence:
+            flags.append(ValidationFlag(
+                check_id="7.1",
+                category=ValidationCategory.EVIDENCE_BINDING,
+                severity=ValidationSeverity.ERROR,
+                message=(
+                    f"Cuenta de alta materialidad '{acct.account_id}' tiene causas "
+                    f"declaradas pero ninguna entrada de evidencia (Evidence First)."
+                ),
+                affected_field=f"analysis_results[{acct.account_id}].evidence",
+                expected_value="≥1 entrada de evidencia",
+                actual_value="[]",
+            ))
+
+        for ev in getattr(acct, "evidence", []):
+            ref = (ev.get("ref") or "").strip()
+            ev_type = ev.get("evidence_type", "")
+
+            # 7.2 evidence entry with empty ref
+            if not ref:
+                flags.append(ValidationFlag(
+                    check_id="7.2",
+                    category=ValidationCategory.EVIDENCE_BINDING,
+                    severity=ValidationSeverity.WARNING,
+                    message=(
+                        f"Evidencia en '{acct.account_id}' tiene ref vacío "
+                        f"(claim: '{ev.get('claim', '')[:60]}')."
+                    ),
+                    affected_field=f"analysis_results[{acct.account_id}].evidence[].ref",
+                    expected_value="account_id, headline, cláusula o estándar NIIF",
+                    actual_value="''",
+                ))
+
+            # 7.3 account-type evidence whose ref is not a real account_id
+            elif ev_type == "account" and ref not in known_ids:
+                flags.append(ValidationFlag(
+                    check_id="7.3",
+                    category=ValidationCategory.EVIDENCE_BINDING,
+                    severity=ValidationSeverity.WARNING,
+                    message=(
+                        f"Referencia de evidencia '{ref}' en '{acct.account_id}' "
+                        f"no corresponde a ningún account_id conocido."
+                    ),
+                    affected_field=f"analysis_results[{acct.account_id}].evidence[].ref",
+                    expected_value=f"uno de {len(known_ids)} account_ids conocidos",
+                    actual_value=ref,
+                ))
+
+    return flags
+
+
+# ---------------------------------------------------------------------------
 # Lambda handler
 # ---------------------------------------------------------------------------
 
@@ -830,6 +910,9 @@ def lambda_handler(event: dict, context) -> dict:
     errors_so_far = [f for f in flags if f.severity == ValidationSeverity.ERROR]
     if not errors_so_far:
         flags += _check_narrative(payload, llm)
+
+    # Cat 7 — Evidence Binding: always runs (independent of structural errors)
+    flags += _check_evidence_binding(payload)
 
     errors_count = sum(1 for f in flags if f.severity == ValidationSeverity.ERROR)
     warnings_count = sum(1 for f in flags if f.severity == ValidationSeverity.WARNING)

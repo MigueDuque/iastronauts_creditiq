@@ -1,0 +1,27 @@
+{
+  "description": "BTG P.INMOBILIARIO — real estate investment fund, 80 accounts, periods 2025-06 vs 2024-12. Exercises fund-aware risk weights, counterparty/interest-rate/FX market risk, and the 3 report-facing risk categories.",
+  "metrics": {
+    "is_fund": true,
+    "liquidity.score": 70,
+    "liquidity.level": "LOW",
+    "credit.score": 55,
+    "credit.level": "MEDIUM",
+    "solvency.score": 88,
+    "solvency.level": "LOW",
+    "market.score": 60,
+    "market.level": "MEDIUM",
+    "operational.score": 42,
+    "operational.level": "MEDIUM",
+    "composite.score": 64,
+    "composite.overall_risk": "MEDIUM",
+    "composite.validation_score": 72,
+    "composite.requires_human_review": true,
+    "composite.analysis_confidence": 0.726,
+    "composite.anti_hallucination_passed": false,
+    "composite.anti_hallucination_failures": 5,
+    "category.credito.level": "MEDIUM",
+    "category.financiero.level": "LOW",
+    "category.mercado.level": "MEDIUM"
+  },
+  "tolerances": {}
+}

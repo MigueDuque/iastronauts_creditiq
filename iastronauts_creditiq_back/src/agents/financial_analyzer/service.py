@@ -87,8 +87,13 @@ from .sheet_concentration_engine import (
 )
 from .synthesis_engine import ExecutiveSynthesis, synthesize as synthesize_portfolio, synthesis_to_dict
 from .financial_diagnostics_engine import DiagnosticsResult, run_diagnostics, diagnostics_to_dict
+from .fund_policy_engine import (
+    FundPolicyAssessment, apply_fund_limits, policy_assessment_to_dict
+)
 from shared.progress_store import emit as _emit_step
 from shared.macro_context import generate_macro_context
+from shared.financial_math import is_cash_flow_account
+from shared.fund_policy_loader import load_fund_policy, extract_policy_clauses
 
 logger = logging.getLogger("financial_analyzer.service")
 
@@ -134,8 +139,30 @@ class FinancialAnalyzerService:
         leaf_ids = leaf_account_ids(hierarchy)
 
         # ── Step 3: Variation reliability [Improvement #1] ──────────────────
+        # Pass period-homogeneity context so flow accounts compared across different
+        # durations (e.g. Q1 2025 vs FY 2024) are flagged as PERIOD_LENGTH_MISMATCH.
+        _cb_for_rel: dict = payload.comparative_basis or {}
+        _is_stmt = {
+            "income_statement": _cb_for_rel.get("income_statement", {}),
+            "cash_flow": _cb_for_rel.get("cash_flow", {}),
+        }
+
+        def _reliability_kwargs(v: "AccountVariation") -> dict:
+            stmt = getattr(v, "statement_type", None) or ""
+            cat = v.category
+            if stmt in ("income_statement", "cash_flow") or cat in ("revenue", "expense"):
+                basis_key = "income_statement" if stmt != "cash_flow" else "cash_flow"
+                b = _is_stmt.get(basis_key, {})
+                return {
+                    "periods_homogeneous": b.get("periods_homogeneous", True),
+                    "current_period_months": b.get("current_period_months", 12),
+                    "comparative_period_months": b.get("comparative_period_months", 12),
+                    "annualization_factor": b.get("annualization_factor"),
+                }
+            return {}
+
         reliabilities: dict[str, ReliabilityResult] = {
-            v.account_id: assess_reliability(v) for v in variations
+            v.account_id: assess_reliability(v, **_reliability_kwargs(v)) for v in variations
         }
         unreliable_count = sum(
             1 for r in reliabilities.values()
@@ -201,6 +228,7 @@ class FinancialAnalyzerService:
         _SKIP_ANOMALY = {
             VariationReliability.INSUFFICIENT_BASELINE,
             VariationReliability.EXTREME_VARIATION,
+            VariationReliability.PERIOD_LENGTH_MISMATCH,
         }
         anomalies: dict[str, AnomalyResult] = {
             v.account_id: (
@@ -220,10 +248,14 @@ class FinancialAnalyzerService:
                 payload.job_id, len(structural_issues), structural_issues,
             )
 
+        # Item 6 (Sprint 2): exclude cash-flow statement rows from the materiality
+        # ranking — they are movements, not positions, and inflate the "material
+        # accounts" list used by LLM sub-agents and the report generator.
         high_materiality_accounts = [
             v.account_name
             for v in variations
             if materialities[v.account_id] == MaterialityLevel.HIGH
+            and not is_cash_flow_account(v)
         ]
 
         # ── Step 10: Causality chain detection [Improvement #2] ──────────────
@@ -326,6 +358,136 @@ class FinancialAnalyzerService:
             "available" if sheet_conc.bank_available else "unavailable",
         )
 
+        # ── Step 12b3: Fund Policy Assessment (Sprint 2 Item 1 + Sprint 3 Item 8) ──
+        # Compare measured concentration against regulatory / internal limits.
+        # When a policy document exists in S3 (rag/{tenant_id}/fund_policies/),
+        # its limits override the SFC Colombia defaults.
+        # Only meaningful for investment funds; produces an empty dict for others.
+        fund_type_detected = (fund_dict.get("fund_type") or "general")
+        fund_policy_dict: dict = {}
+        _policy_clauses: str = ""  # raw policy text for prompt injection (Item 8)
+        if fund_analysis.is_investment_fund:
+            # Try to load tenant-specific policy from S3 (Item 8)
+            _loaded_policy = None
+            try:
+                _s3 = boto3.client("s3")
+                _loaded_policy = load_fund_policy(
+                    tenant_id=payload.tenant_id,
+                    fund_type=fund_type_detected,
+                    s3_client=_s3,
+                    bucket=BUCKET,
+                    llm_provider=self._llm,
+                    job_id=payload.job_id,
+                )
+                if _loaded_policy:
+                    from shared.fund_policy_loader import load_policy_text
+                    _raw = load_policy_text(payload.tenant_id, _s3, BUCKET)
+                    _policy_clauses = extract_policy_clauses(_raw or "")
+                    logger.info(
+                        "fund_policy_kb | job=%s source=policy_document limits_found=True",
+                        payload.job_id,
+                    )
+                else:
+                    logger.info(
+                        "fund_policy_kb | job=%s source=default (no policy docs found)",
+                        payload.job_id,
+                    )
+            except Exception as _pe:
+                logger.warning(
+                    "fund_policy_kb | job=%s load failed: %s — using defaults", payload.job_id, _pe
+                )
+
+            concentration_views = {
+                **conc_dict,
+                "bank_breakdown": sheet_conc_dict.get("bank_breakdown", []),
+                "instrument_breakdown": sheet_conc_dict.get("instrument_breakdown", []),
+                "asset_breakdown": sheet_conc_dict.get("asset_breakdown", []),
+            }
+            policy_assessment: FundPolicyAssessment = apply_fund_limits(
+                concentration_views=concentration_views,
+                fund_type=fund_type_detected,
+                policy=_loaded_policy,  # None → uses SFC defaults
+            )
+            fund_policy_dict = policy_assessment_to_dict(policy_assessment)
+            logger.info(
+                "fund_policy | job=%s fund_type=%s source=%s breach=%d near=%d within=%d",
+                payload.job_id, fund_type_detected, fund_policy_dict.get("policy_source"),
+                fund_policy_dict.get("breach_count", 0),
+                fund_policy_dict.get("near_count", 0),
+                fund_policy_dict.get("within_count", 0),
+            )
+
+        # ── Step 12b4: Top Variations with period labels (Sprint 2 Item 5) ───
+        # Sorted by |absolute_variation|; cash-flow rows excluded (Item 6).
+        # Each row carries the correct current/comparative period for its
+        # statement type (balance vs P&L), resolved from comparative_basis.
+        comparative_basis_dict: dict = payload.comparative_basis or {}
+
+        def _periods_for_category(cat: str, stmt_type: str | None = None) -> tuple[str, str, bool]:
+            """Returns (current_period_label, comparative_period_label, periods_homogeneous).
+            Uses document_showed (actual data) as the comparative label, not the IFRS ideal,
+            so the label matches what previous_value actually contains."""
+            cat_lower = cat.lower()
+            if stmt_type == "cash_flow":
+                key = "cash_flow"
+            elif stmt_type == "income_statement" or cat_lower in ("revenue", "expense"):
+                key = "income_statement"
+            else:
+                key = "balance_sheet"
+            basis = comparative_basis_dict.get(key, {})
+            current_p = basis.get("current") or (payload.periods[0] if payload.periods else "")
+            # document_showed is the actual column-2 period in the document (what previous_value reflects)
+            comp_p = (
+                basis.get("document_showed")
+                or basis.get("comparative")
+                or (payload.periods[1] if len(payload.periods) > 1 else "")
+            )
+            homogeneous = basis.get("periods_homogeneous", True)
+            return current_p, comp_p, homogeneous
+
+        top_var_candidates = [
+            v for v in variations
+            if not v.is_total
+            and not is_cash_flow_account(v)
+            and v.has_previous_value
+            # Exclude flow accounts with mismatched period lengths from variation rankings —
+            # their raw % variation is driven by duration difference, not real activity change.
+            and reliabilities[v.account_id].reliability != VariationReliability.PERIOD_LENGTH_MISMATCH
+        ]
+        top_var_candidates.sort(key=lambda v: abs(v.absolute_variation), reverse=True)
+        top_variations_list: list[dict] = []
+        for v in top_var_candidates[:15]:
+            cur_p, cmp_p, homogeneous = _periods_for_category(
+                v.category, getattr(v, "statement_type", None)
+            )
+            top_variations_list.append({
+                "account_id": v.account_id,
+                "account_name": v.account_name,
+                "category": v.category,
+                "current_period": cur_p,
+                "comparative_period": cmp_p,
+                "periods_homogeneous": homogeneous,
+                "current_value": round(v.current_value, 2),
+                "previous_value": round(v.previous_value, 2),
+                "absolute_variation": round(v.absolute_variation, 2),
+                "variation_pct": round(v.variation_pct, 2) if v.variation_pct is not None else None,
+                "materiality": materialities[v.account_id].value
+                if v.account_id in materialities else "LOW",
+            })
+
+        # Attach period labels to top_accounts in conc_dict (all are balance-sheet assets)
+        bs_basis = comparative_basis_dict.get("balance_sheet", {})
+        bs_current = bs_basis.get("current") or (payload.periods[0] if payload.periods else "")
+        bs_comparative = (
+            bs_basis.get("document_showed")
+            or bs_basis.get("comparative")
+            or (payload.periods[1] if len(payload.periods) > 1 else "")
+        )
+        for acc in conc_dict.get("top_accounts", []):
+            acc["current_period"] = bs_current
+            acc["comparative_period"] = bs_comparative
+            acc["periods_homogeneous"] = True  # balance-sheet snapshots are always comparable
+
         # ── Step 12c: Executive Synthesis ────────────────────────────────────
         _emit_step(payload.job_id, "Building executive synthesis")
         portfolio_synthesis: ExecutiveSynthesis = synthesize_portfolio(
@@ -424,10 +586,16 @@ class FinancialAnalyzerService:
                 # llm_provider=None → macro news ranking uses the deterministic
                 # keyword heuristic instead of an LLM call. The heuristic is
                 # adequate for news relevance and saves one round-trip per job.
+                _portfolio_ctx = {
+                    "category_concentration": conc_dict.get("category_concentration"),
+                    "top_accounts": conc_dict.get("top_accounts"),
+                    "instrument_breakdown": sheet_conc_dict.get("instrument_breakdown"),
+                }
                 _fut = _pool.submit(
                     generate_macro_context,
                     analysis_period=analysis_period,
                     llm_provider=None,
+                    portfolio_context=_portfolio_ctx,
                 )
                 try:
                     macro_ctx = _fut.result(timeout=_MACRO_TIMEOUT)
@@ -470,6 +638,8 @@ class FinancialAnalyzerService:
             macro_context=macro_ctx,
             executive_synthesis=synthesis_dict,
             financial_diagnostics=diagnostics_dict if diagnostics_result.signals else None,
+            comparative_basis=payload.comparative_basis if payload.comparative_basis else None,
+            policy_clauses=_policy_clauses,
         )
 
         # ── Step 15b: Executive KPI consolidation ────────────────────────────
@@ -502,6 +672,7 @@ class FinancialAnalyzerService:
             totals=totals,
             threshold=threshold,
             hierarchy=hierarchy,
+            periods=payload.periods,
         )
 
         # Sort by impact_score descending [Improvement #5]
@@ -600,6 +771,9 @@ class FinancialAnalyzerService:
             financial_diagnostics=diagnostics_dict,
             sheet_concentration=sheet_conc_dict,
             computation_trace=global_computation_trace,
+            comparative_basis=payload.comparative_basis,
+            fund_policy_assessment=fund_policy_dict,
+            top_variations=top_variations_list,
         )
 
         self._save_to_s3(result)
@@ -676,6 +850,7 @@ class FinancialAnalyzerService:
         totals: FinancialTotals | None = None,
         threshold: float = 0.0,
         hierarchy: dict | None = None,
+        periods: list[str] | None = None,
     ) -> list[AccountAnalysis]:
         """
         Merge deterministic math outputs with LLM qualitative insights.
@@ -708,7 +883,7 @@ class FinancialAnalyzerService:
             impact = impact_scores[v.account_id]
 
             # NIIF references: keyword inference + LLM
-            inferred_niif = infer_niif_references(v.account_name, v.category, mat)
+            inferred_niif = infer_niif_references(v.account_name, v.category, mat, periods=periods or [])
             llm_niif = insight.niif_note_references if insight else []
             niif_refs = sorted(set(inferred_niif) | set(llm_niif))
 
@@ -857,6 +1032,7 @@ class FinancialAnalyzerService:
                 is_related_party=insight.is_related_party if insight else False,
                 related_party_counterpart=insight.related_party_counterpart if insight else None,
                 investment_signal=insight.investment_signal if insight else None,
+                evidence=insight.evidence if insight else [],
                 computation_trace=acct_trace,
                 statement_role=h.statement_role if h else "primary_line",
                 parent_account_id=h.parent_account_id if h else None,
