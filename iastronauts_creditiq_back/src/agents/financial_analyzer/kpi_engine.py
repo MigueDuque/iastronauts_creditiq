@@ -307,7 +307,7 @@ def _build_dashboard_metrics(
         if aum_growth is not None:
             cards.append({
                 "key":    "aum_growth",
-                "label":  "AUM Growth",
+                "label":  "Crecimiento AUM",
                 "value":  f"{float(aum_growth):+.1f}%",
                 "signal": _signal(float(aum_growth), 5.0, -5.0),
             })
@@ -315,7 +315,7 @@ def _build_dashboard_metrics(
         if net_flow is not None:
             cards.append({
                 "key":    "net_flow",
-                "label":  "Net Investor Flow",
+                "label":  "Flujo Neto de Inversionistas",
                 "value":  f"COP {float(net_flow):+,.0f} MM",
                 "signal": "positive" if float(net_flow) > 0 else "negative",
             })
@@ -324,14 +324,14 @@ def _build_dashboard_metrics(
         net_margin = float(profit.get("net_margin_pct", 0) or 0)
         cards.append({
             "key":    "net_margin",
-            "label":  "Net Margin",
+            "label":  "Margen Neto",
             "value":  f"{net_margin:.1f}%",
             "signal": _signal(net_margin, 10.0, 0.0),
         })
         ebitda_margin = float(profit.get("ebitda_margin_pct", 0) or 0)
         cards.append({
             "key":    "ebitda_margin",
-            "label":  "EBITDA Margin",
+            "label":  "Margen EBITDA",
             "value":  f"{ebitda_margin:.1f}%",
             "signal": _signal(ebitda_margin, 15.0, 0.0),
         })
@@ -349,7 +349,7 @@ def _build_dashboard_metrics(
     eq_score = float(kpis.get("earnings_quality", {}).get("quality_score", 0) or 0)
     cards.append({
         "key":    "earnings_quality",
-        "label":  "Earnings Quality",
+        "label":  "Calidad de Utilidades",
         "value":  f"{eq_score:.0f}/100",
         "signal": _signal(eq_score, 70.0, 40.0),
     })
@@ -361,7 +361,7 @@ def _build_dashboard_metrics(
         top1 = fund_top1 if fund_top1 > 0 else top1
     cards.append({
         "key":    "concentration",
-        "label":  "Top Concentration",
+        "label":  "Concentración Máxima",
         "value":  f"{top1:.1f}%",
         "signal": _signal_inv(top1, 20.0, 40.0),
     })

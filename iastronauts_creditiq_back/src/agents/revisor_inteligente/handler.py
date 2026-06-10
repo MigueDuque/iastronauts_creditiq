@@ -11,6 +11,7 @@ from shared.job_store import (
     EXTRACTOR, FINANCIAL_ANALYZER, RISK_SCORER, REPORT_GENERATOR, REVISOR,
     CHAT_LOG, ANALYSIS_SUMMARY,
 )
+from shared.agent_handoff import hydrate_input, slim_envelope
 from shared.llm_provider import LLMProvider
 from shared.models import FinalReportOutput
 from shared.models.base import FinancialHealth, MaterialityLevel, RiskLevel
@@ -896,7 +897,9 @@ def lambda_handler(event: dict, context) -> dict:
     Input:  FinalReportOutput
     Output: RevisorOutput
     """
-    payload = FinalReportOutput.model_validate(event)
+    # Rehydrate the full FinalReportOutput from S3 (Step Functions passes a slim
+    # pointer; falls back to the event for direct/local calls). See agent_handoff.py.
+    payload = hydrate_input(event, REPORT_GENERATOR, FinalReportOutput, discriminator="analysis_results")
     llm = LLMProvider()
 
     flags: list[ValidationFlag] = []
@@ -945,7 +948,20 @@ def lambda_handler(event: dict, context) -> dict:
         logger.error("revisor | job=%s failed to save REVISOR artifact: %s",
                      payload.job_id, exc)
 
-    return result_dict
+    # Terminal SFN state: the full RevisorOutput is in S3 above. Return a slim
+    # pointer (RevisorOutput inherits the whole FinalReportOutput, so the full dump
+    # is well over the 256 KB execution-output cap) carrying the QA summary scalars
+    # that status-label builders read.
+    return slim_envelope(
+        result,
+        status="completed",
+        extra={
+            "validation_score": adjusted_score,
+            "errors_count": errors_count,
+            "warnings_count": warnings_count,
+            "validation_passed": (errors_count == 0),
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

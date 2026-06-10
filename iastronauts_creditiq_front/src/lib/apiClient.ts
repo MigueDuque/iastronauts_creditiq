@@ -11,7 +11,8 @@ import { cognitoEnabled, getIdToken } from './auth'
 
 async function authHeaders(): Promise<Record<string, string>> {
   if (!cognitoEnabled) {
-    return { 'x-tenant-id': 'demo' }
+    const devTenant = import.meta.env.VITE_DEV_TENANT_ID || 'demo'
+    return { 'x-tenant-id': devTenant }
   }
   const token = await getIdToken()
   return token ? { Authorization: `Bearer ${token}` } : {}

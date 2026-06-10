@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { apiFetch } from '../lib/apiClient'
+import { categoryEs } from '../lib/dataLabels'
 
 const API = import.meta.env.VITE_API_URL || ''
 
@@ -229,7 +230,7 @@ export default function JobResultPage() {
                     letterSpacing: '0.05em',
                   }}
                 >
-                  {cat === 'all' ? `All (${accounts.length})` : `${cat} (${accounts.filter(a => a.category === cat).length})`}
+                  {cat === 'all' ? `Todas (${accounts.length})` : `${categoryEs(cat)} (${accounts.filter(a => a.category === cat).length})`}
                 </button>
               ))}
             </div>
@@ -258,7 +259,7 @@ export default function JobResultPage() {
                         <td style={{ padding: '9px 14px', fontFamily: 'JetBrains Mono', fontSize: 11, color: '#94A3B8', whiteSpace: 'nowrap' }}>{a.account_id}</td>
                       <td style={{ padding: '9px 14px', whiteSpace: 'nowrap' }}>
                         <span style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: catColor, background: `${catColor}18`, border: `1px solid ${catColor}30`, padding: '2px 7px', borderRadius: 4 }}>
-                          {a.category}
+                          {categoryEs(a.category)}
                         </span>
                       </td>
                       <td style={{ padding: '9px 14px', fontFamily: 'Inter', fontSize: 13, color: '#F5F7FA', minWidth: 240 }}>{a.normalized_account_name}</td>

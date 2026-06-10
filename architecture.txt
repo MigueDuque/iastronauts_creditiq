@@ -1,0 +1,151 @@
+flowchart TD
+    classDef aws fill:#FF9900,stroke:#232F3E,stroke-width:2px,color:#232F3E
+    classDef lambda fill:#F7A80D,stroke:#232F3E,stroke-width:2px,color:white
+    classDef s3 fill:#3F8624,stroke:#232F3E,stroke-width:2px,color:white
+    classDef external fill:#00A4A6,stroke:#232F3E,stroke-width:2px,color:white
+    classDef client fill:#333333,stroke:#232F3E,stroke-width:2px,color:white
+    classDef obs fill:#C7472A,stroke:#232F3E,stroke-width:2px,color:white
+
+    Client(["Cliente Web / Usuario"]):::client
+
+    subgraph AWS_Cloud["AWS Cloud"]
+
+        subgraph CDN["Frontend"]
+            CF("CloudFront + OAC"):::aws
+            S3Front[("Frontend S3")]:::s3
+        end
+
+        subgraph Auth["Autenticacion (Cognito)"]
+            Cognito("Cognito User Pool / JWT Authorizer"):::aws
+            L_PreToken("Pre-Token Gen Lambda"):::lambda
+        end
+
+        subgraph API["Capa de API (HTTP API Gateway)"]
+            ApiGW("HTTP API - CORS + Cognito JWT"):::aws
+
+            subgraph Lambdas_API["Lambdas de Endpoint"]
+                L_Presigned("Presigned URL"):::lambda
+                L_Orch("Orchestrator"):::lambda
+                L_Status("Analysis Status"):::lambda
+                L_ListJobs("List Jobs"):::lambda
+                L_Artifact("Job Artifact - extractor/analyzer/scorer"):::lambda
+                L_Report("Report URL"):::lambda
+                L_Continue("Continue Analysis"):::lambda
+                L_Runner("Agent Runner - reanalyze 2/3/4"):::lambda
+                L_Cancel("Cancel Analysis"):::lambda
+                L_Chat("Analysis Chat - POST chat / GET history"):::lambda
+                L_MarketData("Market Data - yfinance quotes"):::lambda
+                L_MarketRead("Market Read - pulse/news/overview/signals"):::lambda
+            end
+        end
+
+        subgraph Core_Workflow["Multi-Agent Workflow (Step Functions STANDARD)"]
+            SFN{"Analysis State Machine"}:::aws
+
+            subgraph Lambdas_Agents["Agentes Inteligentes (Lambdas)"]
+                A_Extractor("1 - Document Extractor"):::lambda
+                A_Analyzer("2 - Financial Analyzer - 14 engines + 4 sub-agents"):::lambda
+                A_Scorer("3 - Risk Scorer"):::lambda
+                A_Report("4 - Report Generator + Management Report module"):::lambda
+                A_Revisor("5 - Revisor Inteligente - QA + chat backend"):::lambda
+                A_Pause("Pause / Review Gate - waitForTaskToken x4"):::lambda
+            end
+        end
+
+        subgraph Data["Almacenamiento y Seguridad"]
+            S3Main[("Main S3 Bucket - uploads/ jobs/ reports/ instructions/")]:::s3
+            SM("Secrets Manager - Anthropic + GNews keys"):::aws
+        end
+
+        Textract("AWS Textract"):::aws
+
+        subgraph Observability["Observabilidad"]
+            SNS("SNS Alerts Topic"):::obs
+            CW("CloudWatch - Alarms + Dashboard"):::obs
+            DLQ("SQS DLQ - Agent Runner"):::obs
+        end
+    end
+
+    subgraph Externo["Servicios Externos"]
+        LLM("LLMs - Anthropic Claude / Bedrock"):::external
+        YFinance("YFinance"):::external
+        GNews("GNews"):::external
+    end
+
+    Client -->|"1. Carga sitio"| CF
+    CF --> S3Front
+
+    Client -->|"2. Login"| Cognito
+    Cognito -.->|"custom claims"| L_PreToken
+
+    Client -->|"3. Peticiones HTTP"| ApiGW
+    ApiGW -->|"Valida JWT"| Cognito
+    ApiGW --> L_Presigned
+    ApiGW --> L_Orch
+    ApiGW --> L_Status
+    ApiGW --> L_ListJobs
+    ApiGW --> L_Artifact
+    ApiGW --> L_Report
+    ApiGW --> L_Continue
+    ApiGW --> L_Runner
+    ApiGW --> L_Cancel
+    ApiGW --> L_Chat
+    ApiGW --> L_MarketData
+    ApiGW --> L_MarketRead
+
+    L_Presigned -->|"URL segura"| S3Main
+    Client -.->|"4. Sube documentos"| S3Main
+
+    L_Orch -->|"5. Inicia analisis"| SFN
+    L_Continue -->|"reanuda (SendTaskSuccess)"| SFN
+    L_Cancel -->|"StopExecution"| SFN
+    L_Status --> S3Main
+    L_ListJobs --> S3Main
+    L_Artifact --> S3Main
+    L_Report --> S3Main
+
+    L_Continue -.->|"fallback"| L_Runner
+    L_Runner -.->|"invoca agente directo"| A_Analyzer
+    L_Runner -.-> A_Scorer
+    L_Runner -.-> A_Report
+    L_Runner -.-> A_Revisor
+    L_Runner -.->|"async fail"| DLQ
+
+    L_Chat -->|"contexto del job"| S3Main
+    L_Chat -->|"respuesta LLM"| LLM
+
+    L_MarketData -->|"refresh self-invoke"| L_MarketData
+    L_MarketData --> YFinance
+    L_MarketData <--> S3Main
+    L_MarketRead -->|"ingestion + interpreter"| GNews
+    L_MarketRead --> LLM
+    L_MarketRead <--> S3Main
+
+    SFN --> A_Extractor
+    A_Extractor --> A_Pause
+    A_Pause --> A_Analyzer
+    A_Analyzer --> A_Scorer
+    A_Scorer --> A_Report
+    A_Report --> A_Revisor
+
+    A_Extractor <--> S3Main
+    A_Analyzer <--> S3Main
+    A_Scorer <--> S3Main
+    A_Report <--> S3Main
+    A_Revisor <--> S3Main
+
+    A_Extractor -->|"texto/tablas"| Textract
+    A_Extractor -->|"AI"| LLM
+    A_Analyzer -->|"AI"| LLM
+    A_Scorer -->|"AI"| LLM
+    A_Report -->|"AI"| LLM
+    A_Revisor -->|"AI"| LLM
+
+    A_Analyzer -.->|"API key"| SM
+    L_Chat -.-> SM
+    L_MarketRead -.-> SM
+
+    SFN -.->|"ExecutionsFailed"| CW
+    DLQ -.-> CW
+    CW -->|"alarmas"| SNS
+    SNS -.->|"email"| Client

@@ -8,6 +8,8 @@ Output: AnalyzerOutput   (consumed by RiskScorer)
 import logging
 
 from shared.models import ExtractorOutput
+from shared.agent_handoff import hydrate_input, slim_envelope
+from shared.job_store import EXTRACTOR
 
 from .service import FinancialAnalyzerService
 
@@ -20,7 +22,10 @@ def lambda_handler(event: dict, context) -> dict:
     Validates the incoming ExtractorOutput, runs the full analysis pipeline,
     and returns the serialized AnalyzerOutput.
     """
-    payload = ExtractorOutput.model_validate(event)
+    # Step Functions hands us a slim claim-check pointer; rehydrate the full
+    # ExtractorOutput from S3 (falls back to the event for direct/local calls that
+    # still pass the full payload). See shared/agent_handoff.py.
+    payload = hydrate_input(event, EXTRACTOR, ExtractorOutput, discriminator="accounts")
 
     logger.info(
         "handler_start | job=%s tenant=%s accounts=%d periods=%s",
@@ -35,4 +40,5 @@ def lambda_handler(event: dict, context) -> dict:
         len(result.high_materiality_accounts), len(result.niif_notes_required),
     )
 
-    return result.model_dump(mode="json")
+    # The service self-persists the full AnalyzerOutput to S3; return only a pointer.
+    return slim_envelope(result, status="analysis_complete")

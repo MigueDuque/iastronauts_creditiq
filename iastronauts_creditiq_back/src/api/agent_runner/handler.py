@@ -51,13 +51,15 @@ logger.setLevel(logging.INFO)
 # agent number → (upstream artifact fed in, env var holding the target Lambda name,
 #                 terminal status to record, response artifact to persist or None
 #                 when the agent already persists its own output).
-# Agents 2, 3 and 5 save their own *_response.json internally; Agent 4 does not.
+# Every agent self-persists its full *_response.json internally and now returns
+# only a slim claim-check pointer (see shared/agent_handoff.py), so save_as is None
+# across the board — persisting the slim return here would clobber the full S3 doc.
 # Agent 4 pauses at report_complete (mirrors the SFN report-review gate) so the
 # intelligent reviewer (Agent 5) still runs afterwards on the manual path.
 _AGENTS: dict[int, tuple[str, str, str, str | None]] = {
     2: (EXTRACTOR,          "ANALYZER_FUNCTION_NAME",         "analysis_complete", None),
     3: (FINANCIAL_ANALYZER, "RISK_SCORER_FUNCTION_NAME",      "scoring_complete",  None),
-    4: (RISK_SCORER,        "REPORT_GENERATOR_FUNCTION_NAME", "report_complete",   REPORT_GENERATOR),
+    4: (RISK_SCORER,        "REPORT_GENERATOR_FUNCTION_NAME", "report_complete",   None),
     5: (REPORT_GENERATOR,   "REVISOR_FUNCTION_NAME",          "completed",         None),
 }
 

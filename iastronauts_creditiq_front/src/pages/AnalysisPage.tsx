@@ -5,6 +5,7 @@ import 'katex/dist/katex.min.css'
 import AiReasoningPipeline from '../components/AiReasoningPipeline'
 import ChatWithReviewer from '../components/ChatWithReviewer'
 import { apiFetch } from '../lib/apiClient'
+import { categoryEs, levelEs, healthEs } from '../lib/dataLabels'
 
 const API = import.meta.env.VITE_API_URL || ''
 const STORAGE_KEY = 'creditiq_analysis_id'
@@ -987,8 +988,8 @@ export default function AnalysisPage() {
                   </div>
                 )}
                 {report && <Kpi label="ACCOUNTS" value={String(report.accounts.length)} color="#5BA4FF" />}
-                {analyzerData && <Kpi label="HEALTH" value={analyzerData.overall_financial_health} color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#8d90a2'} />}
-                {scorerData && <Kpi label="RISK" value={scorerData.overall_risk_score} color={RISK_COLOR[scorerData.overall_risk_score] ?? '#8d90a2'} />}
+                {analyzerData && <Kpi label="HEALTH" value={healthEs(analyzerData.overall_financial_health)} color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#8d90a2'} />}
+                {scorerData && <Kpi label="RISK" value={levelEs(scorerData.overall_risk_score)} color={RISK_COLOR[scorerData.overall_risk_score] ?? '#8d90a2'} />}
                 <button onClick={openJobPicker} className="flex items-center gap-1 px-2.5 py-1 rounded border border-border text-outline hover:text-on-surface transition-colors text-[11px] font-mono">
                   <span className="material-symbols-outlined text-[13px]">history</span>
                   Jobs
@@ -1136,11 +1137,11 @@ export default function AnalysisPage() {
                               margen_neto_pct: r?.margen_neto_pct,
                               roe_pct: r?.roe_pct,
                             },
-                            result: analyzerData.overall_financial_health.replace(/_/g, ' '),
+                            result: healthEs(analyzerData.overall_financial_health),
                             note: 'Estado financiero derivado por reglas, no por el LLM.',
                           }
                           tiles.push(
-                            <StatTile key="health" wide label="Financial Health" value={analyzerData.overall_financial_health.replace(/_/g, ' ')} color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#2F80FF'} icon="monitor_heart" trace={healthTrace} />
+                            <StatTile key="health" wide label="Financial Health" value={healthEs(analyzerData.overall_financial_health)} color={HEALTH_COLOR[analyzerData.overall_financial_health] ?? '#2F80FF'} icon="monitor_heart" trace={healthTrace} />
                           )
                           if (isFundWithNav) {
                             const nav = analyzerData.fund_analysis!.nav_reconciliation!
@@ -1298,9 +1299,9 @@ export default function AnalysisPage() {
                                         {r.variation_pct !== 0 ? `${r.variation_pct > 0 ? '+' : ''}${r.variation_pct.toFixed(1)}%` : '—'}
                                       </td>
                                       <td className="py-2 px-3">
-                                        <span className="text-[10px] font-mono px-2 py-0.5 rounded" style={{ color: r.materiality === 'HIGH' ? '#FF4D6D' : r.materiality === 'MEDIUM' ? '#FFB020' : '#56F2C1', background: r.materiality === 'HIGH' ? '#FF4D6D20' : r.materiality === 'MEDIUM' ? '#FFB02020' : '#56F2C120', border: `1px solid ${r.materiality === 'HIGH' ? '#FF4D6D40' : r.materiality === 'MEDIUM' ? '#FFB02040' : '#56F2C140'}` }}>{r.materiality}</span>
+                                        <span className="text-[10px] font-mono px-2 py-0.5 rounded" style={{ color: r.materiality === 'HIGH' ? '#FF4D6D' : r.materiality === 'MEDIUM' ? '#FFB020' : '#56F2C1', background: r.materiality === 'HIGH' ? '#FF4D6D20' : r.materiality === 'MEDIUM' ? '#FFB02020' : '#56F2C120', border: `1px solid ${r.materiality === 'HIGH' ? '#FF4D6D40' : r.materiality === 'MEDIUM' ? '#FFB02040' : '#56F2C140'}` }}>{levelEs(r.materiality)}</span>
                                       </td>
-                                      <td className="py-2 px-3"><span className="text-[10px] font-mono" style={{ color: RISK_COLOR[r.risk_level] ?? '#8d90a2' }}>{r.risk_level}</span></td>
+                                      <td className="py-2 px-3"><span className="text-[10px] font-mono" style={{ color: RISK_COLOR[r.risk_level] ?? '#8d90a2' }}>{levelEs(r.risk_level)}</span></td>
                                       <td className="py-2 px-3">{r.anomaly_detected && <span className="material-symbols-outlined text-[14px]" style={{ color: '#FFB020' }}>warning</span>}</td>
                                     </tr>
                                   ))}
@@ -1394,7 +1395,7 @@ export default function AnalysisPage() {
                             const riskTrace: CardTrace | undefined = csd?.formula ? {
                               formula: csd.formula,
                               inputs: csd.weighted_components ?? csd.weights,
-                              result: csd.value != null ? `${scorerData.overall_risk_score} (${csd.value}/100)` : scorerData.overall_risk_score,
+                              result: csd.value != null ? `${levelEs(scorerData.overall_risk_score)} (${csd.value}/100)` : levelEs(scorerData.overall_risk_score),
                               note: csd.weight_profile ? `Perfil de ponderación: ${csd.weight_profile}` : undefined,
                             } : undefined
                             const valTrace: CardTrace | undefined = vsd?.components ? {
@@ -1411,7 +1412,7 @@ export default function AnalysisPage() {
                             } : undefined
                             return (
                               <>
-                                <MetricCard label="Overall Risk" value={scorerData.overall_risk_score} color={RISK_COLOR[scorerData.overall_risk_score] ?? '#8d90a2'} icon="security" trace={riskTrace} />
+                                <MetricCard label="Overall Risk" value={levelEs(scorerData.overall_risk_score)} color={RISK_COLOR[scorerData.overall_risk_score] ?? '#8d90a2'} icon="security" trace={riskTrace} />
                                 <MetricCard label="Validation Score" value={`${scorerData.validation_score}/100`}
                                   color={scorerData.validation_score >= 75 ? '#56F2C1' : scorerData.validation_score >= 50 ? '#FFB020' : '#FF4D6D'} icon="verified" trace={valTrace} />
                                 <MetricCard label="Confidence" value={`${(scorerData.analysis_confidence * 100).toFixed(0)}%`}
@@ -1448,12 +1449,12 @@ export default function AnalysisPage() {
                               const d = scorerData.risk_dimensions[dim]
                               if (!d) return null
                               const c = RISK_COLOR[d.level] ?? '#8d90a2'
-                              const names: Record<string, string> = { liquidity: 'Liquidity', credit: 'Credit', solvency: 'Solvency', market: 'Market', operational: 'Operational' }
+                              const names: Record<string, string> = { liquidity: 'Liquidez', credit: 'Crédito', solvency: 'Solvencia', market: 'Mercado', operational: 'Operacional' }
                               return (
                                 <div key={dim} className="p-4 flex flex-col gap-2">
                                   <div className="flex items-center justify-between">
                                     <span className="text-[10px] font-mono text-outline uppercase">{names[dim]}</span>
-                                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded" style={{ color: c, background: `${c}15`, border: `1px solid ${c}30` }}>{d.level}</span>
+                                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded" style={{ color: c, background: `${c}15`, border: `1px solid ${c}30` }}>{levelEs(d.level)}</span>
                                   </div>
                                   <div className="flex items-end gap-2">
                                     <span className="text-[20px] font-mono font-bold" style={{ color: c }}>{d.score}</span>
@@ -2308,7 +2309,7 @@ function ViewTabBar({ activeView, onSelectView, report, analyzerData, scorerData
       running: isRunning2,
       done: !!analyzerData,
       color: AGENT_COLOR.agent2,
-      summary: analyzerData ? analyzerData.overall_financial_health : null,
+      summary: analyzerData ? healthEs(analyzerData.overall_financial_health) : null,
       summaryColor: HEALTH_COLOR[analyzerData?.overall_financial_health ?? ''],
     },
     {
@@ -2320,7 +2321,7 @@ function ViewTabBar({ activeView, onSelectView, report, analyzerData, scorerData
       running: isRunning3,
       done: !!scorerData,
       color: AGENT_COLOR.agent3,
-      summary: scorerData ? scorerData.overall_risk_score : null,
+      summary: scorerData ? levelEs(scorerData.overall_risk_score) : null,
       summaryColor: RISK_COLOR[scorerData?.overall_risk_score ?? ''],
     },
     {
@@ -3152,7 +3153,7 @@ function AccountsTable({ report, filtered, accounts, categories, catFilter, setC
                 background: catFilter === cat ? `${CATEGORY_COLOR[cat] ?? '#2F80FF'}18` : 'transparent',
                 color: catFilter === cat ? (CATEGORY_COLOR[cat] ?? '#2F80FF') : '#94A3B8',
               }}>
-              {cat === 'all' ? `All (${accounts.length})` : `${cat} (${accounts.filter(a => a.category === cat).length})`}
+              {cat === 'all' ? `Todas (${accounts.length})` : `${categoryEs(cat)} (${accounts.filter(a => a.category === cat).length})`}
             </button>
           ))}
         </div>
@@ -3173,7 +3174,7 @@ function AccountsTable({ report, filtered, accounts, categories, catFilter, setC
                 <tr key={a.account_id} className={`hover:bg-surface-container-lowest/50 ${i % 2 ? 'bg-surface-container-lowest/20' : ''}`}>
                   <td className="py-2 px-3 font-mono text-[11px] text-outline">{a.account_id}</td>
                   <td className="py-2 px-3">
-                    <span className="text-[10px] font-mono px-2 py-0.5 rounded" style={{ color: catColor, background: `${catColor}18`, border: `1px solid ${catColor}30` }}>{a.category}</span>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded" style={{ color: catColor, background: `${catColor}18`, border: `1px solid ${catColor}30` }}>{categoryEs(a.category)}</span>
                   </td>
                   <td className="py-2 px-3 text-on-surface min-w-[200px]">{a.normalized_account_name}</td>
                   <td className="py-2 px-3 text-right font-mono">{a.current_value.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</td>

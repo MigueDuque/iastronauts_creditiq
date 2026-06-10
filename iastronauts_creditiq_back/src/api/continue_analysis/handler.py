@@ -17,6 +17,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from shared.job_store import load as job_load, load_first as job_load_first, save as job_save, STATUS, EXTRACTOR, FINANCIAL_ANALYZER, RISK_SCORER, REPORT_GENERATOR
+from shared.agent_handoff import slim_envelope
 from agents.pause.handler import PAUSE_TOKEN
 
 logger = logging.getLogger()
@@ -133,10 +134,15 @@ def lambda_handler(event: dict, context) -> dict:
             resume_payload = dict(resume_payload)
             resume_payload["llm_model"] = llm_model
 
+        # send_task_success output feeds straight into the next SFN state and is capped
+        # at 256 KB — the same limit that fails a fat agent return. The next agent
+        # rehydrates its full input from S3, so resume with a slim claim-check pointer.
+        envelope = slim_envelope(resume_payload, status=resume_status)
+
         # Resume the Step Functions execution
         _sfn_client().send_task_success(
             taskToken=task_token,
-            output=json.dumps(resume_payload, ensure_ascii=False, default=str),
+            output=json.dumps(envelope, ensure_ascii=False, default=str),
         )
 
         # Clear the token so double-clicks are harmless (write empty object, not delete)

@@ -218,6 +218,16 @@ iastronauts-creditiq-us-east-1-dev/
 
 ---
 
+## AI Analysis Perspectives (`src/shared/role_context.py`)
+
+User picks WHO is doing the evaluation; agents 2/3/4 adapt emphasis/narrative (never deterministic numbers).
+
+- **Catalog**: `role_profiles.json` — 9 closed roles: `general` (default, zero injection), `fund_manager`, `financial_analyst`, `financial_manager`, `fiscal_reviewer`, `external_auditor`, `board_member`, `risk_investments`, `accountant`. Three-tier fallback: S3 `instructions/prompts/role_profiles.json` → `src/agents/system_pompts/role_profiles.json` → inline.
+- **Flow**: frontend sends `analysis_role` in `POST /analyses` body → `OrchestratorOutput.analysis_role` → propagated through every agent output (like `tenant_id`).
+- **Injection**: handlers call `llm.set_role_context(build_role_prompt_block(payload.analysis_role))` — the block rides the uncached dynamic suffix in `LLMProvider`, so it reaches every LLM call without invalidating the prompt-cache prefix. Agent 4 additionally passes `report_emphasis` (boost/reduce sections) into the narrative user prompt.
+- **Hard rule**: the role block adjusts emphasis/ordering/tone only; deterministic scores, risk levels and figures are untouched (LLM ceiling rule), so the eval harness golden snapshots are unaffected.
+- Frontend selector lives in `UploadDialog.tsx` Step 2 (`ANALYSIS_ROLES`, persisted under `localStorage creditiq_analysis_role`).
+
 ## Multi-tenant Security (`src/shared/`)
 
 - **`tenant_context.py`** — `TenantContext`: immutable security context built at API boundary. `assert_s3_key(key)` enforces `uploads/{tid}/`, `reports/{tid}/`, `rag/{tid}/` boundaries.

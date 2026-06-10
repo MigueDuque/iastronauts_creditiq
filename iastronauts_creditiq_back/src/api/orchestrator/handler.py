@@ -8,6 +8,7 @@ from botocore.exceptions import ClientError
 
 from shared.audit_logger import AuditAction, log_audit_event
 from shared.models import BusinessContext, FileToProcess, OrchestratorOutput, OutputFormat
+from shared.role_context import normalize_role
 from shared.s3_report_store import slugify
 from shared.tenant_context import TenantBoundaryViolation
 from shared.tenant_middleware import extract_tenant_context, source_ip, validate_requested_tenant
@@ -60,8 +61,9 @@ def _run_extractor_bg(event: dict) -> None:
     try:
         from agents.document_extractor.handler import lambda_handler as extractor_handler  # noqa: PLC0415
         result = extractor_handler(event, None)
-        # extractor handler already calls job_save internally; build completion summary
-        n_accounts = len((result or {}).get("accounts", []))
+        # extractor handler self-persists to S3 and returns a slim claim-check
+        # envelope; read the summary scalars it carries (not the full account list).
+        n_accounts = (result or {}).get("accounts_extracted", 0)
         confidence = (result or {}).get("extraction_confidence", 0)
         agent1_step = (
             f"{n_accounts} accounts extracted · {confidence * 100:.1f}% confidence"
@@ -220,6 +222,8 @@ def lambda_handler(event: dict, context) -> dict:
             niif_standards=body.get("niif_standards", []),
             report_language=body.get("report_language", "es"),
             output_formats=output_formats,
+            # AI Analysis Perspectives — closed catalog; unknown values fall back to general
+            analysis_role=normalize_role(body.get("analysis_role")),
         )
 
         # Persist ownership record once, before either execution path. This lets

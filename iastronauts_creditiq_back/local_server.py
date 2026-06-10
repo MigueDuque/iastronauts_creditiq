@@ -340,8 +340,9 @@ def _run_agent4(job_id: str, llm_model: str | None = None) -> None:
         from agents.report_generator.handler import lambda_handler as report_gen
         if job_id in _cancelled_jobs:
             return
-        result = report_gen(payload, None)
-        job_save(job_id, REPORT_GENERATOR, result)
+        # report_gen self-persists the full REPORT_GENERATOR artifact and returns a
+        # slim claim-check pointer; re-saving that pointer would clobber the full doc.
+        report_gen(payload, None)
 
         if job_id not in _cancelled_jobs:
             _save_status(job_id, "report_complete", progress=build_progress(
@@ -383,8 +384,9 @@ def _run_agent5(job_id: str) -> None:
         from agents.revisor_inteligente.handler import lambda_handler as revisor
         if job_id in _cancelled_jobs:
             return
+        # revisor self-persists the full REVISOR artifact and returns a slim pointer
+        # carrying the QA summary scalars read below; no re-save needed.
         revised = revisor(payload, None)
-        job_save(job_id, REVISOR, revised)
 
         if job_id not in _cancelled_jobs:
             review_step = (
@@ -471,77 +473,17 @@ async def get_management_report(analysis_id: str):
 # ── Job listing ────────────────────────────────────────────────────────────────
 
 @app.get("/jobs")
-async def list_jobs():
-    """List all jobs from S3 sorted newest first. Used by the GUI job picker."""
-    import boto3
+async def list_jobs(request: Request):
+    """List jobs for the current tenant, newest first. Used by the GUI job picker.
 
-    s3 = boto3.client("s3")
-    bucket = os.environ.get("MAIN_BUCKET", "")
-    if not bucket:
-        return JSONResponse(content={"jobs": []})
-
-    # Single paginated listing — collect all keys under jobs/
-    all_keys: set[str] = set()
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix="jobs/"):
-        for obj in page.get("Contents", []):
-            all_keys.add(obj["Key"])
-
-    # Discover jobs from status.json files  (jobs/{date}/{job_id}/status.json)
-    job_dates: dict[str, str] = {}
-    for key in all_keys:
-        parts = key.split("/")
-        if len(parts) == 4 and parts[3] == "status.json":
-            job_dates[parts[2]] = parts[1]  # job_id → date_folder
-
-    jobs: list[dict] = []
-    for job_id, date_folder in job_dates.items():
-        base = f"jobs/{date_folder}/{job_id}"
-        has_extractor = f"{base}/extractor_response.json"          in all_keys
-        has_analyzer  = f"{base}/financial_analyzer_response.json" in all_keys
-        has_scorer    = f"{base}/risk_scorer_response.json"        in all_keys
-        has_report    = f"{base}/report_generator_response.json"   in all_keys
-
-        # Read status.json for exact disposition (failed / cancelled / completed)
-        status = "unknown"
-        try:
-            obj = s3.get_object(Bucket=bucket, Key=f"{base}/status.json")
-            status = json.loads(obj["Body"].read()).get("status", "unknown")
-        except Exception:
-            pass
-
-        # If status is ambiguous, derive from artifact presence
-        if status in ("unknown", "processing", "pending"):
-            if has_report:
-                status = "completed"
-            elif has_scorer:
-                status = "scoring_complete"
-            elif has_analyzer:
-                status = "analysis_complete"
-            elif has_extractor:
-                status = "extraction_complete"
-
-        company_name: str | None = None
-        periods: list[str] = []
-        if has_extractor:
-            try:
-                ext_obj = s3.get_object(Bucket=bucket, Key=f"{base}/extractor_response.json")
-                ext = json.loads(ext_obj["Body"].read())
-                company_name = ext.get("company_name")
-                periods = ext.get("periods", [])
-            except Exception:
-                pass
-
-        jobs.append({
-            "job_id": job_id,
-            "date": date_folder,
-            "status": status,
-            "company_name": company_name,
-            "periods": periods,
-        })
-
-    jobs.sort(key=lambda j: j["date"], reverse=True)
-    return JSONResponse(content={"jobs": jobs})
+    Delegates to the deployed list_jobs handler so local mirrors the cloud exactly:
+    it applies the same tenant.json ownership filter (scoped to the x-tenant-id the
+    frontend sends — 'demo' by default) instead of returning every tenant's jobs.
+    This is also why local previously showed MORE jobs than the cloud — the old
+    local route did no tenant filtering at all.
+    """
+    from api.list_jobs.handler import lambda_handler
+    return _resp(lambda_handler(_event(request, None), None))
 
 
 # ── AI Market Pulse ─────────────────────────────────────────────────────────────

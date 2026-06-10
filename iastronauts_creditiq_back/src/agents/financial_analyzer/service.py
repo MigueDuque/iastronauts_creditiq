@@ -35,6 +35,7 @@ import boto3
 from shared.llm_provider import LLMProvider
 from shared.models import ExtractorOutput, AnalyzerOutput, FinancialHealth, AccountAnalysis
 from shared.models.base import MaterialityLevel, RiskLevel
+from shared.role_context import build_role_prompt_block
 from shared.s3_report_store import fetch_historical_reports, slugify
 from shared.s3_instructions import load_text as load_instruction
 from shared.job_store import save as job_save, FINANCIAL_ANALYZER
@@ -124,6 +125,10 @@ class FinancialAnalyzerService:
         Execute the full analysis pipeline for one job.
         Returns AnalyzerOutput ready to be passed to the RiskScorer agent.
         """
+        # AI Analysis Perspectives — every LLM sub-agent call in this job inherits
+        # the user's professional perspective (no-op for the default "general" role).
+        self._llm.set_role_context(build_role_prompt_block(payload.analysis_role))
+
         # ── Step 1: Enrich previous_value from S3 history ──────────────────
         _emit_step(payload.job_id, "Loading historical data")
         enriched_accounts = self._enrich_with_history(payload)
@@ -748,6 +753,7 @@ class FinancialAnalyzerService:
             niif_standards=payload.niif_standards,
             report_language=payload.report_language,
             output_formats=payload.output_formats,
+            analysis_role=payload.analysis_role,
             company_name=payload.company_name,
             currency=payload.currency,
             periods=payload.periods,

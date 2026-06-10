@@ -37,3 +37,7 @@ class OrchestratorOutput(BaseModel):
     niif_standards: list[str] = Field(default_factory=list)
     report_language: str = "es"
     output_formats: list[OutputFormat] = Field(default_factory=list)
+    # AI Analysis Perspectives — professional role the analysis is tailored to.
+    # Catalog defined in shared/role_context.py (role_profiles.json). Must flow
+    # through every agent output, like tenant_id.
+    analysis_role: str = "general"

@@ -1,0 +1,294 @@
+{
+  "version": "1.0",
+  "default_role": "general",
+  "profiles": {
+    "general": {
+      "label": "Análisis General CreditIQ",
+      "description": "Análisis financiero integral estándar de CreditIQ, sin sesgo hacia un perfil profesional específico.",
+      "priorities": [],
+      "key_questions": [],
+      "report_emphasis": {
+        "boost": [],
+        "reduce": []
+      },
+      "tone": "professional",
+      "risk_focus": []
+    },
+    "fund_manager": {
+      "label": "Administrador de Fondos",
+      "description": "Gestor responsable de la composición, riesgo y desempeño del portafolio del fondo.",
+      "priorities": [
+        "Composición y evolución del portafolio",
+        "Concentración por emisor, instrumento y contraparte",
+        "Diversificación y cumplimiento de política de inversión",
+        "Liquidez del portafolio y del fondo",
+        "Riesgo de mercado y de crédito",
+        "Flujos de aportes y retiros (suscripciones/redenciones)"
+      ],
+      "key_questions": [
+        "¿Cómo evolucionó el portafolio en el período?",
+        "¿Qué posiciones aumentaron y cuáles disminuyeron?",
+        "¿Existe concentración excesiva en algún emisor, instrumento o contraparte?",
+        "¿Existen riesgos de liquidez ante un escenario de retiros?",
+        "¿El portafolio respeta los límites de la política de inversión?"
+      ],
+      "report_emphasis": {
+        "boost": [
+          "portfolio_transformation",
+          "risk_intelligence",
+          "ai_signals",
+          "concentration",
+          "fund_flows"
+        ],
+        "reduce": [
+          "accounting_detail",
+          "niif_notes_detail"
+        ]
+      },
+      "tone": "professional",
+      "risk_focus": [
+        "concentration",
+        "liquidity",
+        "market",
+        "counterparty"
+      ]
+    },
+    "financial_analyst": {
+      "label": "Analista Financiero",
+      "description": "Analista enfocado en desempeño, rentabilidad y drivers de los resultados.",
+      "priorities": [
+        "Rentabilidad y márgenes",
+        "Crecimiento de ingresos y resultados",
+        "EBITDA, ROE y ROA",
+        "Eficiencia operativa",
+        "Tendencias y drivers de las variaciones"
+      ],
+      "key_questions": [
+        "¿Qué impulsa los resultados del período?",
+        "¿Qué explica las variaciones más relevantes?",
+        "¿Qué tendencias emergen al comparar períodos?",
+        "¿Los resultados son sostenibles o dependen de partidas no recurrentes?"
+      ],
+      "report_emphasis": {
+        "boost": [
+          "executive_summary",
+          "financial_performance",
+          "ratios",
+          "trends"
+        ],
+        "reduce": []
+      },
+      "tone": "professional",
+      "risk_focus": [
+        "earnings_quality",
+        "sustainability"
+      ]
+    },
+    "financial_manager": {
+      "label": "Gerente Financiero",
+      "description": "Responsable de la salud financiera global: liquidez, solvencia y sostenibilidad.",
+      "priorities": [
+        "Liquidez y capital de trabajo",
+        "Solvencia y estructura de capital",
+        "Rentabilidad operativa",
+        "Sostenibilidad financiera y continuidad del negocio"
+      ],
+      "key_questions": [
+        "¿La entidad está financieramente sana?",
+        "¿Existen riesgos de continuidad o de caja en el corto plazo?",
+        "¿La estructura de financiamiento es sostenible?",
+        "¿Qué decisiones financieras requieren atención inmediata?"
+      ],
+      "report_emphasis": {
+        "boost": [
+          "financial_health",
+          "liquidity",
+          "solvency",
+          "cash_flow"
+        ],
+        "reduce": []
+      },
+      "tone": "professional",
+      "risk_focus": [
+        "liquidity",
+        "solvency",
+        "going_concern"
+      ]
+    },
+    "fiscal_reviewer": {
+      "label": "Revisor Fiscal",
+      "description": "Revisor enfocado en cumplimiento normativo NIIF, revelaciones e inconsistencias.",
+      "priorities": [
+        "Cumplimiento NIIF / NIC",
+        "Revelaciones requeridas y notas a los estados financieros",
+        "Inconsistencias y partidas sin soporte",
+        "Cumplimiento regulatorio y de presentación"
+      ],
+      "key_questions": [
+        "¿Existen riesgos de presentación en los estados financieros?",
+        "¿Existen omisiones relevantes en revelaciones o notas?",
+        "¿Qué partidas presentan inconsistencias frente a la normativa NIIF?",
+        "¿La ecuación contable y los subtotales cumplen NIIF 18?"
+      ],
+      "report_emphasis": {
+        "boost": [
+          "niif_compliance",
+          "disclosures",
+          "validation_flags",
+          "accounting_detail"
+        ],
+        "reduce": [
+          "investment_signals"
+        ]
+      },
+      "tone": "formal",
+      "risk_focus": [
+        "compliance",
+        "presentation",
+        "disclosure"
+      ]
+    },
+    "external_auditor": {
+      "label": "Auditor Externo",
+      "description": "Auditor enfocado en materialidad, anomalías y excepciones que merecen revisión.",
+      "priorities": [
+        "Materialidad y umbrales de revisión",
+        "Anomalías y variaciones inusuales",
+        "Excepciones, reclasificaciones y partidas atípicas",
+        "Evidencia y trazabilidad de los cálculos"
+      ],
+      "key_questions": [
+        "¿Qué partidas merecen revisión detallada?",
+        "¿Qué cambios son inusuales frente al período comparativo?",
+        "¿Qué variaciones carecen de explicación económica clara?",
+        "¿Dónde existe mayor riesgo de error material?"
+      ],
+      "report_emphasis": {
+        "boost": [
+          "materiality",
+          "anomalies",
+          "computation_trace",
+          "exceptions"
+        ],
+        "reduce": [
+          "strategic_narrative"
+        ]
+      },
+      "tone": "formal",
+      "risk_focus": [
+        "material_misstatement",
+        "anomalies",
+        "unusual_movements"
+      ]
+    },
+    "board_member": {
+      "label": "Miembro de Junta Directiva",
+      "description": "Miembro de junta que necesita conclusiones ejecutivas, estratégicas y accionables, con mínimo lenguaje técnico.",
+      "priorities": [
+        "Visión estratégica del desempeño",
+        "Riesgos principales y su evolución",
+        "Tendencias relevantes para la toma de decisiones",
+        "Decisiones y acciones recomendadas"
+      ],
+      "key_questions": [
+        "¿Qué está pasando con la entidad en términos simples?",
+        "¿Qué debería preocuparnos como junta?",
+        "¿Qué decisiones deberíamos considerar?",
+        "¿Cuál es la tendencia general: mejora o deterioro?"
+      ],
+      "report_emphasis": {
+        "boost": [
+          "board_summary",
+          "executive_summary",
+          "strategic_risks",
+          "recommendations"
+        ],
+        "reduce": [
+          "accounting_detail",
+          "technical_ratios",
+          "niif_notes_detail"
+        ]
+      },
+      "tone": "executive_plain_language",
+      "risk_focus": [
+        "strategic",
+        "reputational",
+        "top_risks"
+      ]
+    },
+    "risk_investments": {
+      "label": "Riesgos e Inversiones",
+      "description": "Especialista en riesgo de mercado e inversiones: volatilidad, sensibilidad macro, escenarios y exposición.",
+      "priorities": [
+        "Volatilidad y sensibilidad de las posiciones",
+        "Sensibilidad macroeconómica (tasas, FX, spreads)",
+        "Escenarios de estrés y eventos de cola",
+        "Exposición por clase de activo, emisor y moneda"
+      ],
+      "key_questions": [
+        "¿Dónde está concentrado el riesgo del portafolio?",
+        "¿Qué eventos macro podrían impactar el portafolio?",
+        "¿Cuál es la exposición a tasa de interés y a moneda extranjera?",
+        "¿Cómo se comportaría el portafolio bajo escenarios adversos?"
+      ],
+      "report_emphasis": {
+        "boost": [
+          "risk_intelligence",
+          "macro_context",
+          "scenarios",
+          "exposure",
+          "concentration"
+        ],
+        "reduce": [
+          "accounting_detail"
+        ]
+      },
+      "tone": "professional",
+      "risk_focus": [
+        "market",
+        "interest_rate",
+        "fx",
+        "concentration",
+        "macro"
+      ]
+    },
+    "accountant": {
+      "label": "Contador",
+      "description": "Contador responsable de la integridad de los registros: clasificación, conciliación, devengo y políticas contables.",
+      "priorities": [
+        "Correcta clasificación de cuentas y rubros",
+        "Integridad y cuadre de saldos (ecuación contable, subtotales)",
+        "Conciliaciones entre estados (balance, resultados, flujo, patrimonio)",
+        "Aplicación de políticas contables y principio de devengo",
+        "Ajustes y reclasificaciones requeridas al cierre"
+      ],
+      "key_questions": [
+        "¿Las cuentas están correctamente clasificadas por categoría y estado financiero?",
+        "¿Cuadran los totales y subtotales entre estados financieros?",
+        "¿Qué ajustes o reclasificaciones se requieren antes del cierre?",
+        "¿Existen partidas registradas en períodos incorrectos (corte/devengo)?",
+        "¿Qué cuentas requieren conciliación o soporte adicional?"
+      ],
+      "report_emphasis": {
+        "boost": [
+          "accounting_detail",
+          "computation_trace",
+          "account_classification",
+          "reconciliations",
+          "niif_notes_detail"
+        ],
+        "reduce": [
+          "strategic_narrative",
+          "investment_signals"
+        ]
+      },
+      "tone": "technical",
+      "risk_focus": [
+        "classification_errors",
+        "reconciliation_gaps",
+        "cutoff",
+        "accrual"
+      ]
+    }
+  }
+}

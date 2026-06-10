@@ -20,6 +20,7 @@ class FinalReportOutput(BaseModel):
     """
     job_id: str
     tenant_id: str
+    analysis_role: str = "general"   # AI Analysis Perspectives (role_context.py)
     company_name: str
     periods: list[str]                           # e.g. ["2024-12", "2023-12"]
     generated_at: datetime = Field(default_factory=datetime.utcnow)

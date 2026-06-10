@@ -109,6 +109,7 @@ class AnalyzerOutput(BaseModel):
     niif_standards: list[str]
     report_language: str
     output_formats: list[OutputFormat]
+    analysis_role: str = "general"   # AI Analysis Perspectives (role_context.py)
 
     # Output del analyzer
     company_name: str

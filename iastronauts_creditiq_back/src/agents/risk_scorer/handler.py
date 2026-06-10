@@ -17,7 +17,9 @@ from dataclasses import asdict
 
 from shared.llm_provider import LLMProvider
 from shared.models import AnalyzerOutput, ScorerOutput
-from shared.job_store import save as job_save, RISK_SCORER
+from shared.job_store import save as job_save, RISK_SCORER, FINANCIAL_ANALYZER
+from shared.agent_handoff import hydrate_input, slim_envelope
+from shared.role_context import build_role_prompt_block
 
 from .scoring import compute_risk
 from .llm_reasoning import generate_risk_narrative
@@ -31,7 +33,9 @@ def lambda_handler(event: dict, context) -> dict:
     Input:  AnalyzerOutput
     Output: ScorerOutput
     """
-    payload = AnalyzerOutput.model_validate(event)
+    # Rehydrate the full AnalyzerOutput from S3 (Step Functions passes a slim
+    # pointer; falls back to the event for direct/local calls). See agent_handoff.py.
+    payload = hydrate_input(event, FINANCIAL_ANALYZER, AnalyzerOutput, discriminator="analysis_results")
     logger.info("RiskScorer: job_id=%s company=%s", payload.job_id, payload.company_name)
 
     # ─── 1+2. Deterministic engines + composite (pure core, shared with eval) ──
@@ -88,6 +92,9 @@ def lambda_handler(event: dict, context) -> dict:
 
     try:
         llm = LLMProvider()
+        # AI Analysis Perspectives — the risk narrative prioritizes the alerts and
+        # findings relevant to the user's role (scores stay deterministic).
+        llm.set_role_context(build_role_prompt_block(payload.analysis_role))
         period = payload.periods[0] if payload.periods else "N/A"
         risk_summary = generate_risk_narrative(
             company_name=payload.company_name,
@@ -134,6 +141,7 @@ def lambda_handler(event: dict, context) -> dict:
         niif_standards=payload.niif_standards,
         report_language=payload.report_language,
         output_formats=payload.output_formats,
+        analysis_role=payload.analysis_role,
         company_name=payload.company_name,
         currency=payload.currency,
         periods=payload.periods,
@@ -189,4 +197,5 @@ def lambda_handler(event: dict, context) -> dict:
         job_save(result.job_id, RISK_SCORER, output)
     except Exception as exc:
         logger.error("Failed to persist scorer output to S3: %s", exc)
-    return output
+    # Full ScorerOutput is in S3; return only a claim-check pointer to SFN.
+    return slim_envelope(result, status="scoring_complete")

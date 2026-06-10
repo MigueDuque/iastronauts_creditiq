@@ -57,6 +57,30 @@ function fileType(name: string): string {
   return ext
 }
 
+// ── AI Analysis Perspectives ──────────────────────────────────────────────────
+// Closed catalog mirroring backend shared/role_context.py (role_profiles.json).
+// The backend validates the id and falls back to 'general' on unknown values.
+export const ANALYSIS_ROLES = [
+  { id: 'general',           label: 'Análisis General CreditIQ',    hint: 'Análisis financiero integral estándar (default)' },
+  { id: 'fund_manager',      label: 'Administrador de Fondos',      hint: 'Portafolio, concentración, liquidez y flujos' },
+  { id: 'financial_analyst', label: 'Analista Financiero',          hint: 'Rentabilidad, márgenes, crecimiento y tendencias' },
+  { id: 'financial_manager', label: 'Gerente Financiero',           hint: 'Liquidez, solvencia y sostenibilidad financiera' },
+  { id: 'fiscal_reviewer',   label: 'Revisor Fiscal',               hint: 'Cumplimiento NIIF, revelaciones e inconsistencias' },
+  { id: 'external_auditor',  label: 'Auditor Externo',              hint: 'Materialidad, anomalías y excepciones' },
+  { id: 'board_member',      label: 'Miembro de Junta Directiva',   hint: 'Conclusiones ejecutivas, estrategia y decisiones' },
+  { id: 'risk_investments',  label: 'Riesgos e Inversiones',        hint: 'Volatilidad, sensibilidad macro, escenarios y exposición' },
+  { id: 'accountant',        label: 'Contador',                     hint: 'Clasificación, conciliaciones, devengo y ajustes' },
+] as const
+
+export type AnalysisRoleId = (typeof ANALYSIS_ROLES)[number]['id']
+
+const ROLE_STORAGE_KEY = 'creditiq_analysis_role'
+
+function loadStoredRole(): AnalysisRoleId {
+  const stored = localStorage.getItem(ROLE_STORAGE_KEY)
+  return ANALYSIS_ROLES.some((r) => r.id === stored) ? (stored as AnalysisRoleId) : 'general'
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface FileUploadState {
@@ -103,6 +127,7 @@ export default function UploadDialog({ open, onClose }: UploadDialogProps) {
   const [selectedYear, setSelectedYear] = useState<string>('')
   const [selectedQuarter, setSelectedQuarter] = useState<string>('')
   const [duplicateWarning, setDuplicateWarning] = useState<string | null>(null)
+  const [analysisRole, setAnalysisRole] = useState<AnalysisRoleId>(loadStoredRole)
 
   function initPeriodAndYear() {
     const parsed = deriveFolder(files)
@@ -225,6 +250,7 @@ export default function UploadDialog({ open, onClose }: UploadDialogProps) {
           s3_location:  f.s3Key!,
           file_type:    fileType(f.file.name),
         })),
+        analysis_role: analysisRole,
       }
       if (forceRerun) body.force_rerun = true
 
@@ -458,6 +484,46 @@ export default function UploadDialog({ open, onClose }: UploadDialogProps) {
               size="small"
               sx={{ ...inputSx, mb: 2 }}
             />
+
+            {/* AI Analysis Perspective Selector */}
+            <Box sx={{ mb: 2 }}>
+              <label style={{ fontFamily: 'Inter', fontSize: 12, color: 'var(--color-on-surface-variant)', display: 'block', marginBottom: 6 }}>
+                ¿Desde qué perspectiva desea analizar este documento?
+              </label>
+              <select
+                value={analysisRole}
+                onChange={(e) => {
+                  const role = e.target.value as AnalysisRoleId
+                  setAnalysisRole(role)
+                  localStorage.setItem(ROLE_STORAGE_KEY, role)
+                }}
+                disabled={launching}
+                style={{
+                  width: '100%',
+                  backgroundColor: 'var(--color-surface-container-low)',
+                  border: '1px solid var(--color-border)',
+                  borderRadius: '8px',
+                  color: 'var(--color-on-surface)',
+                  fontFamily: 'Inter',
+                  fontSize: 14,
+                  padding: '8.5px 12px',
+                  outline: 'none',
+                  cursor: 'pointer',
+                  transition: 'border-color 0.2s',
+                }}
+                onFocus={(e) => (e.target.style.borderColor = 'var(--color-primary)')}
+                onBlur={(e) => (e.target.style.borderColor = 'var(--color-border)')}
+              >
+                {ANALYSIS_ROLES.map((r) => (
+                  <option key={r.id} value={r.id} style={{ backgroundColor: 'var(--color-surface)' }}>
+                    {r.label}{r.id === 'general' ? ' (Default)' : ''}
+                  </option>
+                ))}
+              </select>
+              <div style={{ fontFamily: 'JetBrains Mono', fontSize: 10, color: 'var(--color-on-surface-variant)', letterSpacing: '0.05em', marginTop: 6, paddingLeft: 2 }}>
+                {ANALYSIS_ROLES.find((r) => r.id === analysisRole)?.hint}
+              </div>
+            </Box>
 
             {/* Period and Year Selector */}
             <Box sx={{ display: 'flex', gap: 2, mb: 2 }}>

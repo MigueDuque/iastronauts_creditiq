@@ -8,11 +8,13 @@ from datetime import datetime
 
 import boto3
 
-from shared.job_store import EXTRACTOR, REPORT_GENERATOR, ANALYSIS_SUMMARY, save as job_save, save_bytes as job_save_bytes, load as job_load
+from shared.job_store import EXTRACTOR, REPORT_GENERATOR, RISK_SCORER, ANALYSIS_SUMMARY, save as job_save, save_bytes as job_save_bytes, load as job_load
+from shared.agent_handoff import hydrate_input, slim_envelope
 from shared.financial_math import is_cash_flow_account
 from shared.llm_provider import LLMProvider
 from shared.models import ScorerOutput, FinalReportOutput, NiifNoteDraft
 from shared.niif_notes import load_niif_note
+from shared.role_context import build_role_prompt_block, get_role_profile, get_role_label
 from shared.s3_instructions import load_text
 from shared.s3_report_store import (
     fetch_historical_reports,
@@ -946,11 +948,28 @@ def _call_llm_for_fields(
     """Ask the LLM to fill each template placeholder. Returns {} on error."""
     system_prompt = _get_system_prompt()
     field_list = "\n".join(f"- {{{{{p}}}}}" for p in placeholders)
+
+    # AI Analysis Perspectives — tell the narrative author which sections deserve
+    # more (or less) development for the selected professional role.
+    emphasis_note = ""
+    profile = get_role_profile(payload.analysis_role)
+    emphasis = profile.get("report_emphasis") or {}
+    if payload.analysis_role != "general" and (emphasis.get("boost") or emphasis.get("reduce")):
+        boost = ", ".join(emphasis.get("boost", []))
+        reduce = ", ".join(emphasis.get("reduce", []))
+        emphasis_note = (
+            f"## ÉNFASIS DEL REPORTE (perfil: {profile.get('label', payload.analysis_role)})\n\n"
+            f"Desarrolla con mayor profundidad: {boost or 'N/A'}.\n"
+            f"Trata con menor detalle (sin omitir hallazgos críticos): {reduce or 'N/A'}.\n\n"
+        )
+
     user_prompt = (
+        f"{emphasis_note}"
         f"## CAMPOS DEL TEMPLATE\n\n{field_list}\n\n"
         f"## DATOS FINANCIEROS\n\n{digest}"
     )
     llm = LLMProvider(model=llm_model)
+    llm.set_role_context(build_role_prompt_block(payload.analysis_role))
     try:
         result = llm.generate_json(
             system_prompt=system_prompt,
@@ -1057,6 +1076,10 @@ def _build_analysis_summary_md(payload: ScorerOutput, executive_summary: str, bo
         f"**Períodos:** {periods}  |  **Moneda:** {payload.currency or 'COP'}  "
         f"|  **Generado:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
         f"**Job ID:** {payload.job_id}",
+    ]
+    if payload.analysis_role != "general":
+        lines.append(f"**Perspectiva de análisis:** {get_role_label(payload.analysis_role)}")
+    lines += [
         "",
         "---",
         "",
@@ -1181,8 +1204,10 @@ def lambda_handler(event: dict, context) -> dict:
       5. Save filled .docx to jobs/{date}/{job_id}/report_generator_report.docx
       6. Store s3://bucket/key in FinalReportOutput.docx_report_url
     """
+    # llm_model is a transient field carried on the event (not in the S3 artifact);
+    # read it before rehydrating the full ScorerOutput from S3. See agent_handoff.py.
     llm_model: str | None = event.get("llm_model") or None
-    payload = ScorerOutput.model_validate(event)
+    payload = hydrate_input(event, RISK_SCORER, ScorerOutput, discriminator="analysis_results")
     bucket = os.environ["MAIN_BUCKET"]
     reference_date = datetime.utcnow()
 
@@ -1319,6 +1344,7 @@ def lambda_handler(event: dict, context) -> dict:
     result = FinalReportOutput(
         job_id=payload.job_id,
         tenant_id=payload.tenant_id,
+        analysis_role=payload.analysis_role,
         company_name=payload.company_name,
         periods=payload.periods,
         generated_at=reference_date,
@@ -1365,4 +1391,6 @@ def lambda_handler(event: dict, context) -> dict:
         "ReportGenerator done | job=%s docx=%s",
         payload.job_id, docx_s3_url or "none",
     )
-    return output
+    # Full FinalReportOutput is persisted to S3 above; return only a claim-check
+    # pointer so the SFN handoff to RevisorInteligente stays under the 256 KB cap.
+    return slim_envelope(result, status="report_complete")

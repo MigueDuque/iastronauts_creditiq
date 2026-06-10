@@ -144,6 +144,10 @@ class LLMProvider:
     - API Directa de Anthropic (usando ANTHROPIC_API_KEY)
     - AWS Bedrock (usando roles de IAM y boto3)
     """
+    # Class-level default so instances built without __init__ (tests stub the
+    # constructor) still have a valid empty role context.
+    _role_context_block: str = ""
+
     def __init__(self, model: Optional[str] = None):
         self.provider = os.getenv("LLM_PROVIDER", "anthropic_api").lower()
         # Per-agent override: callers can pass model=... (e.g. a cheaper model for
@@ -153,6 +157,11 @@ class LLMProvider:
         # Language for client-facing prose. Defaults to Spanish (es) — the clients
         # are Spanish-speaking even though the data contract stays in English.
         self.report_language = os.getenv("REPORT_LANGUAGE", "es").lower()
+
+        # AI Analysis Perspectives — optional role-context block appended to every
+        # system prompt of this provider instance (set once per job by the agent
+        # handler via set_role_context). Empty string = no perspective (general).
+        self._role_context_block: str = ""
 
         logger.info(f"Inicializando LLMProvider con proveedor: {self.provider}")
 
@@ -181,6 +190,15 @@ class LLMProvider:
             self.model = model or os.getenv("BEDROCK_MODEL", "us.anthropic.claude-haiku-4-5-20251001")
         else:
             raise ValueError(f"Proveedor LLM no soportado: {self.provider}")
+
+    def set_role_context(self, role_block: str) -> None:
+        """
+        Register the analysis-role perspective block (from
+        shared.role_context.build_role_prompt_block) so EVERY subsequent LLM call
+        made through this provider instance carries the user's professional
+        perspective — no per-call plumbing required in agent code.
+        """
+        self._role_context_block = role_block or ""
 
     def _inject_tenant_boundary(
         self,
@@ -225,6 +243,10 @@ class LLMProvider:
         if self.report_language != "en":
             language = _LANGUAGE_NAMES.get(self.report_language, _LANGUAGE_NAMES["es"])
             suffix += _LANGUAGE_DIRECTIVE_TEMPLATE.format(language=language)
+        # Role perspective is per-job (volatile) — it lives in the uncached tail so
+        # changing roles between analyses never invalidates the cached static prefix.
+        if self._role_context_block:
+            suffix += self._role_context_block
         return suffix
 
     def _anthropic_system_blocks(
@@ -329,6 +351,7 @@ class LLMProvider:
         elif self.provider == "bedrock":
             scoped_system = self._inject_tenant_boundary(system_prompt, tenant_id, job_id)
             scoped_system = self._inject_language(scoped_system)
+            scoped_system += self._role_context_block
             # Usando la nueva API "Converse" de Bedrock (más moderna y estandarizada)
             response = self.client.converse(
                 modelId=self.model,
@@ -364,6 +387,7 @@ class LLMProvider:
         """Multi-turn conversation. `messages` is a list of {"role": "user"/"assistant", "content": "..."} dicts."""
         scoped_system = self._inject_tenant_boundary(system_prompt, tenant_id, job_id)
         scoped_system = self._inject_language(scoped_system)
+        scoped_system += self._role_context_block
         logger.info(
             "llm_chat | provider=%s model=%s tenant=%s job=%s turns=%d",
             self.provider, self.model, tenant_id or "anon", job_id or "N/A", len(messages),

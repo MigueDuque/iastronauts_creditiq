@@ -17,6 +17,7 @@ class ScorerOutput(BaseModel):
     niif_standards: list[str]
     report_language: str
     output_formats: list[OutputFormat]
+    analysis_role: str = "general"   # AI Analysis Perspectives (role_context.py)
 
     # Resultados del analyzer propagados para el Report Generator
     company_name: str

@@ -18,6 +18,7 @@ from shared.llm_provider import LLMProvider, LLMTransientError
 from shared.models import ExtractedAccount, ExtractorOutput, OrchestratorOutput
 from shared.s3_instructions import load_text as load_instruction
 from shared.job_store import save as job_save, EXTRACTOR
+from shared.agent_handoff import slim_envelope
 from .niif_validator import validate_niif
 
 logger = logging.getLogger()
@@ -780,6 +781,7 @@ def lambda_handler(event: dict, context) -> dict:
         niif_standards=payload.niif_standards,
         report_language=payload.report_language,
         output_formats=payload.output_formats,
+        analysis_role=payload.analysis_role,
         company_name=company_name,
         currency="COP",
         periods=unique_periods,
@@ -808,4 +810,14 @@ def lambda_handler(event: dict, context) -> dict:
     except Exception as exc:
         logger.warning("extractor_output_save_failed | job=%s error=%s", result.job_id, exc)
 
-    return output
+    # Return a slim claim-check pointer to Step Functions — the full ExtractorOutput
+    # is in S3 above. Passing the whole 80-account payload as SFN state risks
+    # States.DataLimitExceeded (256 KB cap). See shared/agent_handoff.py.
+    return slim_envelope(
+        output,
+        status="extraction_complete",
+        extra={
+            "accounts_extracted": len(result.accounts),
+            "extraction_confidence": result.extraction_confidence,
+        },
+    )

@@ -69,6 +69,7 @@ class AnalysisRequest(BaseModel):
     business_context: BusinessContext
     files_to_process: list[FileToProcess]
     niif_standards: list[str] = ["NIIF 7", "NIIF 9", "NIIF 13"]
+    analysis_role: str = "general"   # AI Analysis Perspectives (role_context.py)
 
 
 # ── background worker ─────────────────────────────────────────────────────────
@@ -101,6 +102,7 @@ def run_extractor(job_id: str, request: AnalysisRequest):
                 for f in request.files_to_process
             ],
             niif_standards=request.niif_standards,
+            analysis_role=request.analysis_role,
             output_formats=[OutputFormat.MARKDOWN],
         ).model_dump(mode="json")
 

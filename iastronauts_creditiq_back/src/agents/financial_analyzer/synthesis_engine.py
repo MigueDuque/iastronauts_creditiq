@@ -591,7 +591,7 @@ def _build_risk_signals(
         risks.append(f"Dependencia de valorización: {valuation_dep_pct:.0f}% de utilidades son no realizadas")
 
     if "investor_net_outflows_material" in signals and net_flow is not None:
-        risks.append(f"Presión de redempciones: salida neta de {abs(net_flow):,.0f} COP MM de inversionistas")
+        risks.append(f"Presión de redenciones: salida neta de {abs(net_flow):,.0f} COP MM de inversionistas")
 
     if "aum_decline_severe" in signals:
         risks.append("Reducción severa de AUM con impacto potencial en estructura de costos")
