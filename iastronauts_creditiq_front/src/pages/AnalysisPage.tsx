@@ -777,6 +777,10 @@ export default function AnalysisPage() {
 
   async function _doRunAgent5() {
     if (!jobId) return
+    // Re-entry guard: a second click while the first /continue is in flight (or already
+    // resumed the pipeline) hits the no-token fallback and 409s, which we'd surface as a
+    // phantom "Pipeline failed". The token is single-use, so one launch is all we get.
+    if (phase === 'agent5') return
     userNavigatedRef.current = false; setNewData(new Set())
     setPhase('agent5'); setRevisorData(null); setElapsed(0)
     setActiveView('agent4')
@@ -1734,7 +1738,8 @@ export default function AnalysisPage() {
                           </button>
                           <button
                             onClick={_doRunAgent5}
-                            className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95"
+                            disabled={phase === 'agent5'}
+                            className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
                             style={{ background: '#A78BFA', color: '#050816' }}
                           >
                             <span className="material-symbols-outlined text-[16px]">verified</span>
@@ -1838,7 +1843,8 @@ export default function AnalysisPage() {
                       >
                         <button
                           onClick={_doRunAgent5}
-                          className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95"
+                          disabled={phase === 'agent5'}
+                          className="flex items-center gap-2 px-5 py-2.5 rounded font-mono text-[13px] font-semibold whitespace-nowrap transition-all hover:opacity-90 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
                           style={{ background: '#6EE7B7', color: '#050816' }}
                         >
                           <span className="material-symbols-outlined text-[16px]">verified</span>
@@ -1878,7 +1884,7 @@ export default function AnalysisPage() {
 
                         {/* Re-run button */}
                         <div className="flex justify-end gap-2">
-                          <button onClick={_doRunAgent5} className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors">
+                          <button onClick={_doRunAgent5} disabled={phase === 'agent5'} className="flex items-center gap-1 px-3 py-2 rounded border border-border text-outline hover:text-on-surface font-mono text-[11px] transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
                             <span className="material-symbols-outlined text-[13px]">replay</span>Re-run Agent 5
                           </button>
                         </div>

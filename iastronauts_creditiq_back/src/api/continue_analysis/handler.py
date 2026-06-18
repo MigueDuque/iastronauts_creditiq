@@ -43,6 +43,15 @@ def _sfn_client():
 
 def _continue_via_runner(analysis_id: str, current_status: str, llm_model: str | None = None) -> dict:
     """Manual fallback: async-invoke agent_runner for the next agent."""
+    # Idempotency: a duplicate /continue (e.g. a double-click) arrives after the first
+    # one already consumed the SFN task token and flipped status to "processing". The
+    # job is already advancing, so treat this as a harmless no-op instead of a 409 —
+    # otherwise the frontend paints a phantom "Pipeline failed" over a healthy run.
+    # "completed" is likewise terminal and needs no further action.
+    if current_status in ("processing", "completed"):
+        logger.info("continue noop | job=%s already=%s", analysis_id, current_status)
+        return _response(202, {"analysis_id": analysis_id, "status": current_status})
+
     agent = _NEXT_AGENT_FOR_STATUS.get(current_status)
     if not agent:
         return _response(409, {
